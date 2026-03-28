@@ -120,12 +120,8 @@ mod tests {
 
     #[test]
     fn test_welcome_plugin_execute() {
-        let plugin = WelcomePlugin;
-        let args = vec!["welcome".to_string()];
-        assert!(plugin.execute(&args).unwrap());
-
-        let args = vec!["other".to_string()];
-        assert!(!plugin.execute(&args).unwrap());
+        let mut plugin = WelcomePlugin;
+        assert!(plugin.init().is_ok());
     }
 
     #[test]

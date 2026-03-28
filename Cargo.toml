@@ -1,5 +1,5 @@
 [package]
-name = "mvp6-array"
+name = "winuxsh"
 version = "0.6.0"
 edition = "2021"
 description = "WinSH MVP6 - Array Support and Internationalization"

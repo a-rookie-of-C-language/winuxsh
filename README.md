@@ -89,22 +89,33 @@ For more details, see `utils/README.md`.
 
 ## Usage
 
+add this to windows terminal settings
+replace the default profile with this one and $env:PATH to your PATH variable
+```json
+{
+    "guid": "{9acb9455-ca63-5af2-ba0c-1fa3a891bd59}",
+    "commandline":"${env:PATH}\\winuxsh.exe",
+    "hidden": false,
+    "name": "winuxsh",
+}
+```
+
 ### Interactive Mode
 
 ```bash
-./mvp6-array.exe
+./winuxsh.exe
 ```
 
 ### Execute Single Command
 
 ```bash
-./mvp6-array.exe -c "echo Hello World"
+./winuxsh.exe -c "echo Hello World"
 ```
 
 ### Execute Script
 
 ```bash
-./mvp6-array.exe script.sh
+./winuxsh.exe script.sh
 ```
 
 ### Command Examples

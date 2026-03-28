@@ -142,15 +142,34 @@ impl Shell {
 
         let edit_mode = Box::new(Emacs::new(keybindings));
 
+        // Create history with a graceful fallback when file access is denied.
+        // This keeps tests and restricted environments from panicking.
+        let history = match FileBackedHistory::with_file(1000, history_path.clone()) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "{} {}",
+                    "Warning:".yellow(),
+                    format!("Failed to open history file, using in-memory history: {}", e)
+                );
+                match FileBackedHistory::new(1000) {
+                    Ok(h) => h,
+                    Err(fallback_err) => {
+                        return Err(crate::error::ShellError::Config(format!(
+                            "Failed to initialize history: {}; fallback failed: {}",
+                            e, fallback_err
+                        )));
+                    }
+                }
+            }
+        };
+
         // Create line editor with edit mode and completion (exactly like MVP4)
         let line_editor = Reedline::create()
             .with_completer(completer)
             .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
             .with_edit_mode(edit_mode)
-            .with_history(Box::new(
-                FileBackedHistory::with_file(1000, history_path.clone())
-                    .expect("Error configuring history with file"),
-            ))
+            .with_history(Box::new(history))
             .with_quick_completions(true)
             .with_partial_completions(true);
 

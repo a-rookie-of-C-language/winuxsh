@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn test_tokenize_error_redirect() {
         let tokens = Tokenizer::tokenize("cmd 2> error.txt").unwrap();
-        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[1], Token::RedirErr);
     }
 
@@ -289,8 +289,8 @@ mod tests {
     #[test]
     fn test_tokenize_array() {
         let tokens = Tokenizer::tokenize("array define fruits (apple banana)").unwrap();
-        assert_eq!(tokens.len(), 6);
+        assert_eq!(tokens.len(), 7);
         assert_eq!(tokens[3], Token::ArrayStart);
-        assert_eq!(tokens[5], Token::ArrayEnd);
+        assert_eq!(tokens[6], Token::ArrayEnd);
     }
 }

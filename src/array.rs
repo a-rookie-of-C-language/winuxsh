@@ -100,7 +100,10 @@ mod tests {
     fn test_array_value() {
         let value = ArrayValue::array(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
         assert_eq!(value.as_string(), None);
-        assert_eq!(value.as_array(), Some(&["a", "b", "c"][..]));
+        assert_eq!(
+            value.as_array(),
+            Some(&["a".to_string(), "b".to_string(), "c".to_string()][..])
+        );
         assert_eq!(value.get(0), Some("a"));
         assert_eq!(value.get(1), Some("b"));
         assert_eq!(value.get(2), Some("c"));
