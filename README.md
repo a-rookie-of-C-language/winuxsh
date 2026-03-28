@@ -283,7 +283,7 @@ MIT License - see LICENSE file for details
 ## Support
 
 For issues and questions:
-- GitHub Issues: https://github.com/yourusername/winuxsh/issues
+- GitHub Issues: https://github.com/caomengxuan666/winuxsh/issues
 - Documentation: See inline code documentation
 
 ## Roadmap
