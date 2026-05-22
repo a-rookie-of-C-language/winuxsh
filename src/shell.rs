@@ -1046,10 +1046,21 @@ impl Shell {
             return self.execute_single_command(&cmds[0]);
         }
 
+        // Convenience extension (non-POSIX):
+        // `which <cmd> | cd` => locate <cmd>, print path, then cd into its containing directory.
+        if self.try_pipe_to_cd(&cmds[0], &cmds[1..])? {
+            return Ok(());
+        }
+
         // Fast path: support selected builtins as the first stage in a pipeline.
         // Example: env | grep PATH
         if let Some(input) = self.try_builtin_pipeline_input(&cmds[0]) {
             return self.execute_real_pipeline_with_input(&cmds[1..], input.into_bytes());
+        }
+        // Also support side-effect builtins that do not produce stdout in pipelines.
+        // Example: cd | which newman
+        if self.try_builtin_pipeline_side_effect(&cmds[0])? {
+            return self.execute_real_pipeline_with_input(&cmds[1..], Vec::new());
         }
 
         // Use real pipeline implementation with Windows pipes
@@ -1083,6 +1094,63 @@ impl Shell {
             "pwd" => Some(format!("{}\n", self.current_dir.display())),
             _ => None,
         }
+    }
+
+    fn try_builtin_pipeline_side_effect(&mut self, first: &CommandInfo) -> Result<bool> {
+        if first.args.is_empty() {
+            return Ok(false);
+        }
+
+        match first.args[0].as_str() {
+            "cd" => {
+                if let Some(result) = self.handle_builtin(&first.args) {
+                    result?;
+                    self.last_exit_code = 0;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn try_pipe_to_cd(&mut self, first: &CommandInfo, rest: &[CommandInfo]) -> Result<bool> {
+        if rest.len() != 1 || first.args.is_empty() || rest[0].args.is_empty() {
+            return Ok(false);
+        }
+        if first.args[0] != "which" || rest[0].args[0] != "cd" {
+            return Ok(false);
+        }
+        if first.args.len() < 2 {
+            return Ok(false);
+        }
+
+        let target = &first.args[1];
+        let cmd_path = self
+            .find_command_in_path(target)
+            .ok_or_else(|| crate::error::ShellError::CommandNotFound(format!("Command '{}' not found", target)))?;
+
+        println!("{}", cmd_path.display());
+
+        let new_dir = if cmd_path.is_dir() {
+            cmd_path
+        } else if let Some(parent) = cmd_path.parent() {
+            parent.to_path_buf()
+        } else {
+            return Ok(true);
+        };
+
+        std::env::set_current_dir(&new_dir).map_err(|e| {
+            crate::error::ShellError::InvalidCommand(format!(
+                "cd: {} - {}",
+                new_dir.display(),
+                e
+            ))
+        })?;
+        self.current_dir = std::env::current_dir()?;
+        self.last_exit_code = 0;
+        Ok(true)
     }
 
     /// Execute a real pipeline with Windows pipes
@@ -2790,5 +2858,13 @@ echo redirected > __OUT_PATH__
         let err = fs::read_to_string(err_path).unwrap();
         assert_eq!(err, "redirected\n");
         let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn test_which_pipe_cd_changes_to_command_directory() {
+        let mut shell = Shell::new(false).unwrap();
+        shell.execute_command("which cmd | cd").unwrap();
+        let cwd = shell.current_dir.to_string_lossy().to_ascii_lowercase();
+        assert!(cwd.contains("\\system32"));
     }
 }
