@@ -23,8 +23,7 @@ static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 use windows_sys::Win32::Foundation::BOOL;
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
-    CTRL_SHUTDOWN_EVENT, PHANDLER_ROUTINE,
+    SetConsoleCtrlHandler, CTRL_C_EVENT,
 };
 
 #[cfg(windows)]
@@ -48,7 +47,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
             }
 
             // No child process, let the default handler run
-            return 0;
+            0
         }
         _ => 0, // Let default handlers run for other signals
     }
@@ -115,7 +114,6 @@ mod tokenizer;
 mod winuxcmd_ffi;
 
 use shell::Shell;
-use winuxcmd_ffi::WinuxCmdFFI;
 
 fn print_usage() {
     println!("WinSH usage:");
@@ -165,7 +163,7 @@ fn run() -> Result<()> {
                     }
                     shell.execute_command(&args[2])?;
                 } else {
-                    eprintln!("{} {}", "Error:".red(), "-c requires an argument");
+                    eprintln!("{} -c requires an argument", "Error:".red());
                     std::process::exit(1);
                 }
             }

@@ -2,7 +2,6 @@
 // Provides Tab completion for executable commands
 
 use std::env;
-use std::path::PathBuf;
 use crate::completion::{CompletionContext, CompletionResult};
 use crate::error::Result;
 

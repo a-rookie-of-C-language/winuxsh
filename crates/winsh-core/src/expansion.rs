@@ -35,12 +35,12 @@ pub fn expand_variable(
                 expand_default_modifier(name, modifier, env)
             } else if modifier.starts_with('#') && !modifier.starts_with("##") {
                 expand_prefix_removal(name, &modifier[1..], false, env)
-            } else if modifier.starts_with("##") {
-                expand_prefix_removal(name, &modifier[2..], true, env)
+            } else if let Some(stripped) = modifier.strip_prefix("##") {
+                expand_prefix_removal(name, stripped, true, env)
             } else if modifier.starts_with('%') && !modifier.starts_with("%%") {
                 expand_suffix_removal(name, &modifier[1..], false, env)
-            } else if modifier.starts_with("%%") {
-                expand_suffix_removal(name, &modifier[2..], true, env)
+            } else if let Some(stripped) = modifier.strip_prefix("%%") {
+                expand_suffix_removal(name, stripped, true, env)
             } else if modifier.starts_with('/') {
                 expand_substitution(name, modifier, env)
             } else if modifier == "#" {
@@ -68,8 +68,7 @@ fn expand_default_modifier(
     let is_empty = value.map(|s| s.is_empty()).unwrap_or(true);
 
     // Handle colon variants (check for empty too)
-    let (check_empty, op, operand) = if modifier.starts_with(':') {
-        let rest = &modifier[1..];
+    let (check_empty, op, operand) = if let Some(rest) = modifier.strip_prefix(':') {
         let op = &rest[..1];
         let operand = &rest[1..];
         (true, op, operand)
@@ -188,9 +187,8 @@ fn expand_substitution(
 ) -> Result<String, ShellError> {
     let value = env.get(name).unwrap_or("");
 
-    if modifier.starts_with("//") {
+    if let Some(rest) = modifier.strip_prefix("//") {
         // ${VAR//old/new} - replace all occurrences
-        let rest = &modifier[2..];
         if let Some((old, new)) = rest.split_once('/') {
             Ok(value.replace(old, new))
         } else {

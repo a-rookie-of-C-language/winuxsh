@@ -4,20 +4,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The command execution backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendType {
     /// Use system commands (default PATH lookup)
     System,
     /// Use winuxcmd/uutils coreutils implementation
     WinuxCmd,
     /// Auto-detect: prefer winuxcmd if available, fallback to system
+    #[default]
     Auto,
-}
-
-impl Default for BackendType {
-    fn default() -> Self {
-        BackendType::Auto
-    }
 }
 
 /// Shell configuration.

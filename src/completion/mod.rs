@@ -62,7 +62,7 @@ impl CompletionContext {
         }
 
         let last_sep = before_cursor
-            .rfind(|c: char| c == ';' || c == '|' || c == '&' || c == '\n');
+            .rfind([';', '|', '&', '\n']);
 
         if let Some(p) = last_sep {
             let skip = ceil_char_boundary(before_cursor, p + 1);
@@ -109,7 +109,7 @@ impl CompletionContext {
         let before_cursor = &self.input[..pos];
 
         let cmd_start = before_cursor
-            .rfind(|c: char| c == ';' || c == '|' || c == '&')
+            .rfind([';', '|', '&'])
             .map(|p| ceil_char_boundary(before_cursor, p + 1))
             .unwrap_or(0);
 

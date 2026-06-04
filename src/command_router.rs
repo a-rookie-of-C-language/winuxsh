@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use log::debug;
 
@@ -261,21 +260,17 @@ impl CommandRouter {
                 
                 // Commands with known issues in DLL implementation
                 // Force them to use PATH for better compatibility
-                let force_path_commands = vec![
-                    "top",   // top needs proper TTY handling
-                ];
-                if force_path_commands.iter().any(|&cmd| cmd == command) {
+                let force_path_commands = ["top"];
+                if force_path_commands.contains(&command) {
                     debug!("Force PATH execution for compatibility: {}", command);
                     return RouteDecision::ExternalCommand;
                 }
                 
                 // Text processing commands that might wait for input
                 // Force them to use PATH for proper Ctrl+C handling
-                let input_waiting_commands = vec![
-                    "grep", "sed", "awk", "perl", "python", "ruby", "less", "more", "vi", "vim", "nano", "ed", "emacs",
-                    "ssh", "telnet", "ftp", "sftp", "nc", "netcat"
-                ];
-                if input_waiting_commands.iter().any(|&cmd| cmd == command) {
+                let input_waiting_commands = ["grep", "sed", "awk", "perl", "python", "ruby", "less", "more", "vi", "vim", "nano", "ed", "emacs",
+                    "ssh", "telnet", "ftp", "sftp", "nc", "netcat"];
+                if input_waiting_commands.contains(&command) {
                     debug!("Force PATH execution for input-waiting command: {}", command);
                     return RouteDecision::ExternalCommand;
                 }

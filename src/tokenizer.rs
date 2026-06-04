@@ -27,6 +27,7 @@ pub enum Token {
 
 /// Command information structure
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct CommandInfo {
     pub args: Vec<String>,
     pub stdin_redir: Option<String>,
@@ -39,21 +40,6 @@ pub struct CommandInfo {
     pub background: bool,
 }
 
-impl Default for CommandInfo {
-    fn default() -> Self {
-        CommandInfo {
-            args: Vec::new(),
-            stdin_redir: None,
-            stdout_redir: None,
-            stderr_redir: None,
-            stdout_append: false,
-            stderr_append: false,
-            stderr_to_stdout: false,
-            stdout_to_stderr: false,
-            background: false,
-        }
-    }
-}
 
 /// Parsed command AST
 #[derive(Debug, Clone)]

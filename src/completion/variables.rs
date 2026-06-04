@@ -23,18 +23,14 @@ impl VariableCompleter {
         }
 
         // Extract variable name (after $ and potentially {)
-        let var_name = if word.starts_with("${") {
-            if word.len() > 2 {
-                &word[2..]
+        let var_name = if let Some(rest) = word.strip_prefix("${") {
+            if rest.ends_with('}') {
+                &rest[..rest.len() - 1]
             } else {
                 return Ok(None);
             }
-        } else if word.starts_with('$') {
-            if word.len() > 1 {
-                &word[1..]
-            } else {
-                return Ok(None);
-            }
+        } else if let Some(rest) = word.strip_prefix('$') {
+            rest
         } else {
             return Ok(None);
         };

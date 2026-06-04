@@ -51,9 +51,8 @@ impl Plugin for OhMyWinuxsh {
                 }
             }
             "current-theme" => {
-                if let ThemePlugin::Theme(ref theme) = shell.theme_plugin {
-                    println!("Current theme: {}", theme.name);
-                }
+                let ThemePlugin::Theme(ref theme) = shell.theme_plugin;
+                println!("Current theme: {}", theme.name);
             }
             "help" => {
                 self.show_help();

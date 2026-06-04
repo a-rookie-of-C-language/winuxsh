@@ -81,7 +81,7 @@ impl Lexer {
                     self.advance();
                     return Ok(self.make_token(TokenKind::Or));
                 }
-                return Ok(self.make_token(TokenKind::Pipe));
+                Ok(self.make_token(TokenKind::Pipe))
             }
             '&' => {
                 self.advance();
@@ -97,27 +97,27 @@ impl Lexer {
                     }
                     return Ok(self.make_token(TokenKind::RedirCombined));
                 }
-                return Ok(self.make_token(TokenKind::Background));
+                Ok(self.make_token(TokenKind::Background))
             }
             ';' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::Semicolon));
+                Ok(self.make_token(TokenKind::Semicolon))
             }
             '(' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::LeftParen));
+                Ok(self.make_token(TokenKind::LeftParen))
             }
             ')' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::RightParen));
+                Ok(self.make_token(TokenKind::RightParen))
             }
             '{' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::LeftBrace));
+                Ok(self.make_token(TokenKind::LeftBrace))
             }
             '}' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::RightBrace));
+                Ok(self.make_token(TokenKind::RightBrace))
             }
             '<' => {
                 self.advance();
@@ -137,7 +137,7 @@ impl Lexer {
                     }
                     return Ok(self.make_token(TokenKind::RedirIn));
                 }
-                return Ok(self.make_token(TokenKind::RedirIn));
+                Ok(self.make_token(TokenKind::RedirIn))
             }
             '>' => {
                 self.advance();
@@ -149,23 +149,23 @@ impl Lexer {
                     self.advance();
                     return Ok(self.make_token(TokenKind::RedirOut));
                 }
-                return Ok(self.make_token(TokenKind::RedirOut));
+                Ok(self.make_token(TokenKind::RedirOut))
             }
             '!' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::Bang));
+                Ok(self.make_token(TokenKind::Bang))
             }
             '$' => {
-                return self.read_dollar();
+                self.read_dollar()
             }
             '\'' => {
-                return self.read_single_quote();
+                self.read_single_quote()
             }
             '"' => {
-                return self.read_double_quote();
+                self.read_double_quote()
             }
             '`' => {
-                return self.read_backtick();
+                self.read_backtick()
             }
             '\\' => {
                 self.advance();
@@ -173,7 +173,7 @@ impl Lexer {
                     return Err(ShellError::unterminated("escape sequence", self.line));
                 }
                 let escaped = self.advance();
-                return Ok(self.make_token(TokenKind::Word(format!("\\{}", escaped))));
+                Ok(self.make_token(TokenKind::Word(format!("\\{}", escaped))))
             }
             '[' => {
                 self.advance();
@@ -181,17 +181,17 @@ impl Lexer {
                     self.advance();
                     return Ok(self.make_token(TokenKind::DoubleLeftBracket));
                 }
-                return self.read_bracket_pattern();
+                self.read_bracket_pattern()
             }
             ']' => {
                 self.advance();
-                return Ok(self.make_token(TokenKind::Word("]".to_string())));
+                Ok(self.make_token(TokenKind::Word("]".to_string())))
             }
             '~' => {
-                return self.read_tilde();
+                self.read_tilde()
             }
             _ => {
-                return self.read_word();
+                self.read_word()
             }
         }
     }
@@ -338,20 +338,20 @@ impl Lexer {
                     return self.read_until_delimiter("))", TokenKind::Arithmetic);
                 }
                 // Command substitution: $(...)
-                return self.read_until_delimiter(")", TokenKind::CommandSubst);
+                self.read_until_delimiter(")", TokenKind::CommandSubst)
             }
             '{' => {
                 // Braced variable: ${VAR}
                 self.advance(); // Skip {
-                return self.read_braced_variable();
+                self.read_braced_variable()
             }
             '\'' => {
                 // Dollar-quoted string: $'...'
-                return self.read_dollar_quote();
+                self.read_dollar_quote()
             }
             _ => {
                 // Simple variable: $VAR
-                return self.read_variable();
+                self.read_variable()
             }
         }
     }

@@ -33,7 +33,7 @@ impl Env {
             env.exports.insert(key, value);
         }
         // Ensure PATH is always available (some contexts might not export it)
-        if env.exports.get("PATH").is_none() {
+        if !env.exports.contains_key("PATH") {
             if let Ok(path) = env::var("PATH") {
                 env.exports.insert("PATH".to_string(), path);
             }

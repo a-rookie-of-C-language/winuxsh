@@ -1,6 +1,5 @@
 //! Error types for the WinSH shell.
 
-use std::fmt;
 use std::io;
 use std::path::PathBuf;
 

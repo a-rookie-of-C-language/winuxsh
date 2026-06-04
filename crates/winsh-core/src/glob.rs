@@ -12,7 +12,7 @@ use std::fs;
 use crate::ShellError;
 
 /// Options for glob expansion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GlobOptions {
     /// Include dotfiles in expansion
     pub glob_dots: bool,
@@ -22,17 +22,6 @@ pub struct GlobOptions {
     pub null_glob: bool,
     /// Enable extended glob patterns
     pub extended_glob: bool,
-}
-
-impl Default for GlobOptions {
-    fn default() -> Self {
-        Self {
-            glob_dots: false,
-            case_glob: false,
-            null_glob: false,
-            extended_glob: false,
-        }
-    }
 }
 
 /// Expand glob patterns in a list of words.
@@ -88,8 +77,8 @@ fn expand_simple(pattern: &str, cwd: &Path, opts: &GlobOptions) -> Result<Vec<St
 
     // Determine base directory
     let (base_dir, pattern_part) = if pattern.contains('/') || pattern.contains('\\') {
-        let sep = if pattern.contains('/') { '/' } else { '\\' };
-        let mut parts: Vec<&str> = pattern.split(|c| c == '/' || c == '\\').collect();
+        let _sep = if pattern.contains('/') { '/' } else { '\\' };
+        let mut parts: Vec<&str> = pattern.split(|c| ['/', '\\'].contains(&c)).collect();
         let file_pattern = parts.pop().unwrap_or("*");
         let base = if parts.is_empty() {
             cwd.to_path_buf()

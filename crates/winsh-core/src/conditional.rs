@@ -163,8 +163,8 @@ fn tokenize_conditional(expr: &str) -> Result<Vec<CondToken>, ShellError> {
                 }
 
                 // Check if it's a variable
-                if s.starts_with('$') {
-                    let var_name = s[1..].to_string();
+                if let Some(var_name) = s.strip_prefix('$') {
+                    let var_name = var_name.to_string();
                     tokens.push(CondToken::Variable(var_name));
                 } else {
                     tokens.push(CondToken::String(s));

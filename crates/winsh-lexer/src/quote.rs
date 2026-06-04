@@ -32,7 +32,7 @@ pub fn process_dollar_quotes(input: &str) -> Result<String, ShellError> {
                     octal.push(d);
                     for _ in 0..2 {
                         if let Some(&c) = chars.peek() {
-                            if c >= '0' && c <= '7' {
+                            if ('0'..='7').contains(&c) {
                                 octal.push(chars.next().unwrap());
                             } else {
                                 break;

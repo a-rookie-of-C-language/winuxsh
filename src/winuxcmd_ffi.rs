@@ -1,9 +1,6 @@
-﻿/// WinuxCmd FFI bindings for direct DLL execution
-/// No daemon required - all commands execute directly via the DLL
-
+﻿//! WinuxCmd FFI bindings for direct DLL execution
+//! No daemon required - all commands execute directly via the DLL
 use std::ffi::{CStr, CString, c_char, c_int};
-use std::path::Path;
-use std::sync::Mutex;
 use libloading::{Library, Symbol};
 
 /// Response from WinuxCmd FFI
@@ -84,7 +81,7 @@ impl WinuxCmdFFI {
             let mut error_msg = String::new();
 
             for path in dll_paths {
-                match unsafe { Library::new(&path) } {
+                match Library::new(&path) {
                     Ok(lib) => {
                         library = Some(lib);
                         break;
@@ -100,7 +97,7 @@ impl WinuxCmdFFI {
             })?;
 
             // Load all function pointers at once - this will move library but we get what we need
-            let (execute, free_buffer, get_version, get_all_commands, free_commands_array) = unsafe {
+            let (execute, free_buffer, get_version, get_all_commands, free_commands_array) = {
                 let execute_sym: Symbol<ExecuteFunc> = library.get(b"winux_execute")?;
                 let free_buffer_sym: Symbol<FreeBufferFunc> = library.get(b"winux_free_buffer")?;
                 let get_version_sym: Symbol<GetVersionFunc> = library.get(b"winux_get_version")?;
@@ -150,11 +147,11 @@ impl WinuxCmdFFI {
 
             if let Some(execute) = FFI.execute {
                 let cmd_cstring = CString::new(command)?;
-                let mut arg_cstrings: Vec<CString> = args.iter()
+                let arg_cstrings: Vec<CString> = args.iter()
                     .map(|arg| CString::new(arg.as_str()))
                     .collect::<Result<Vec<_>, _>>()?;
 
-                let mut arg_pointers: Vec<*const c_char> = arg_cstrings.iter()
+                let arg_pointers: Vec<*const c_char> = arg_cstrings.iter()
                     .map(|cs| cs.as_ptr())
                     .collect();
 

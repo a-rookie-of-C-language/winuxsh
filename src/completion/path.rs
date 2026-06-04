@@ -47,18 +47,18 @@ impl PathCompleter {
             (base_dir, String::new(), false)
         } else if word.contains('/') || word.contains('\\') {
             // Relative path with directory separator
-            let last_sep = word.rfind(|c: char| c == '/' || c == '\\').unwrap();
+            let last_sep = word.rfind(['/', '\\']).unwrap();
             let dir_part = &word[..last_sep];
             let prefix_part = &word[last_sep + 1..];
             (context.current_dir.join(dir_part), prefix_part.to_string(), false)
-        } else if word.starts_with('.') {
+        } else if let Some(stripped) = word.strip_prefix('.') {
             // Current directory reference
-            if word == "." || word == "./" {
+            if stripped.is_empty() || stripped == "/" {
                 (context.current_dir.clone(), String::new(), false)
-            } else if word.starts_with("./") {
-                (context.current_dir.clone(), word[2..].to_string(), false)
+            } else if let Some(rest) = stripped.strip_prefix('/') {
+                (context.current_dir.clone(), rest.to_string(), false)
             } else {
-                (context.current_dir.clone(), word[1..].to_string(), false)
+                (context.current_dir.clone(), stripped.to_string(), false)
             }
         } else {
             // No path separator, assume current directory

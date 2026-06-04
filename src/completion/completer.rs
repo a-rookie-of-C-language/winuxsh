@@ -108,7 +108,7 @@ impl WinuxshCompleter {
         // For path completion, we need to handle path separators correctly
         // Only replace the part after the last path separator
         let before_cursor = &input[..cursor_pos];
-        let last_path_sep = before_cursor.rfind(|c: char| c == '/' || c == '\\');
+        let last_path_sep = before_cursor.rfind(|c| ['/', '\\'].contains(&c));
         
         let span = if let Some(sep_pos) = last_path_sep {
             // For paths, only replace after the last separator
@@ -129,7 +129,7 @@ impl WinuxshCompleter {
 
         completions
             .into_iter()
-            .zip(result_descriptions.into_iter())
+            .zip(result_descriptions)
             .map(|(c, desc)| {
                 let padded_desc = desc.map(|d| {
                     let padding = max_value_len.saturating_sub(c.len());
@@ -138,7 +138,7 @@ impl WinuxshCompleter {
                 Suggestion {
                     value: c,
                     description: padded_desc,
-                    span: span.clone(),
+                    span,
                     ..Default::default()
                 }
             })

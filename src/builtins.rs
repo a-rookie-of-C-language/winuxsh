@@ -5,10 +5,9 @@ use crate::job::JobStatus;
 use crate::oh_my_winuxsh::OhMyWinuxsh;
 use crate::plugin::Plugin;
 use crate::shell::Shell;
-use crate::winuxcmd_ffi::WinuxCmdFFI;
 use colored::Colorize;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Built-in command handler
 impl Shell {
@@ -376,7 +375,7 @@ impl Shell {
     /// Handle fg command
     fn handle_fg_command(&mut self, args: &[String]) {
         if args.is_empty() {
-            eprintln!("{} {}", "fg:".red(), "Job number required");
+            eprintln!("{} Job number required", "fg:".red());
             return;
         }
 
@@ -389,11 +388,7 @@ impl Shell {
         let job_id = match job_id {
             Ok(id) => id,
             Err(_) => {
-                eprintln!(
-                    "{} {}",
-                    "fg:".red(),
-                    format!("Invalid job number '{}'", args[0])
-                );
+                eprintln!("{} Invalid job number '{}'", "fg:".red(), args[0]);
                 return;
             }
         };
@@ -401,13 +396,13 @@ impl Shell {
         let job_index = match self.job_manager.find_job_index(job_id) {
             Some(index) => index,
             None => {
-                eprintln!("{} {}", "fg:".red(), format!("Job %{} not found", job_id));
+                eprintln!("{} Job %{} not found", "fg:".red(), job_id);
                 return;
             }
         };
 
         let job = self.job_manager.get_job(job_id).unwrap();
-        println!("{} {}", "Continuing job:".cyan(), format!("[{}]", job.id));
+        println!("{} [{}]", "Continuing job:".cyan(), job.id);
 
         // Remove job from list (simplified implementation)
         let _ = self.job_manager.remove_job(job_index);
@@ -416,7 +411,7 @@ impl Shell {
     /// Handle bg command
     fn handle_bg_command(&mut self, args: &[String]) {
         if args.is_empty() {
-            eprintln!("{} {}", "bg:".red(), "Job number required");
+            eprintln!("{} Job number required", "bg:".red());
             return;
         }
 
@@ -429,11 +424,7 @@ impl Shell {
         let job_id = match job_id {
             Ok(id) => id,
             Err(_) => {
-                eprintln!(
-                    "{} {}",
-                    "bg:".red(),
-                    format!("Invalid job number '{}'", args[0])
-                );
+                eprintln!("{} Invalid job number '{}'", "bg:".red(), args[0]);
                 return;
             }
         };
@@ -441,18 +432,14 @@ impl Shell {
         let _job_index = match self.job_manager.find_job_index(job_id) {
             Some(index) => index,
             None => {
-                eprintln!("{} {}", "bg:".red(), format!("Job %{} not found", job_id));
+                eprintln!("{} Job %{} not found", "bg:".red(), job_id);
                 return;
             }
         };
 
         if let Some(job) = self.job_manager.get_job_mut(job_id) {
             job.set_status(JobStatus::Running);
-            println!(
-                "{} {}",
-                "Continue background job:".cyan(),
-                format!("[{}]", job.id)
-            );
+            println!("{} [{}]", "Continue background job:".cyan(), job.id);
         }
     }
 
@@ -561,7 +548,7 @@ impl Shell {
                 println!("  {}  {}", i + 1, line);
             }
         } else {
-            println!("{} {}", "Warning:".yellow(), "No history available");
+            println!("{} No history available", "Warning:".yellow());
         }
     }
 
@@ -588,15 +575,11 @@ impl Shell {
         }
 
         if !WinuxCmdFFI::is_initialized() {
-            eprintln!(
-                "{} {}",
-                "FFI not available:".yellow(),
-                "Initialization failed"
-            );
+            eprintln!("{} {} Initialization failed", "FFI not available:".yellow(), "".red());
             return;
         }
 
-        let command = if args.len() > 0 {
+        let command = if !args.is_empty() {
             args[0].clone()
         } else {
             "pwd".to_string()
@@ -640,11 +623,7 @@ impl Shell {
                 Err(e) => eprintln!("{} {}", "Failed to get version:".yellow(), e),
             }
         } else {
-            eprintln!(
-                "{} {}",
-                "FFI not available:".yellow(),
-                "Initialization failed"
-            );
+            eprintln!("{} {} Initialization failed", "FFI not available:".yellow(), "".red());
         }
     }
 
@@ -674,11 +653,7 @@ impl Shell {
                 }
             }
         } else {
-            eprintln!(
-                "{} {}",
-                "FFI not available:".yellow(),
-                "Initialization failed"
-            );
+            eprintln!("{} {} Initialization failed", "FFI not available:".yellow(), "".red());
         }
     }
 }

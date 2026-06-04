@@ -6,7 +6,6 @@ use reedline::{
     Reedline, ReedlineEvent, ReedlineMenu,
 };
 use std::collections::HashMap;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
@@ -24,7 +23,6 @@ use winsh_ast::word::WordPart;
 use crate::tokenizer::{CommandInfo, ParsedCommand};
 use crate::plugin::PluginManager;
 use crate::theme::ThemePlugin;
-use glob;
 
 /// Main shell structure
 pub struct Shell {
@@ -433,14 +431,12 @@ impl Shell {
             log::info!("Loading config: {}", winshrc.display());
             self.parse_config_file(&winshrc)?;
             log::info!("Config loaded successfully");
-        } else {
-            if let Some(config_path) = crate::config::ConfigManager::find_config_file() {
-                if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
-                    let mut config_manager = crate::config::ConfigManager::new();
-                    self.config = config_manager.load_config(&config_path)?;
-                } else {
-                    self.parse_config_file(&config_path)?;
-                }
+        } else if let Some(config_path) = crate::config::ConfigManager::find_config_file() {
+            if config_path.extension().map(|e| e == "toml").unwrap_or(false) {
+                let mut config_manager = crate::config::ConfigManager::new();
+                self.config = config_manager.load_config(&config_path)?;
+            } else {
+                self.parse_config_file(&config_path)?;
             }
         }
         Ok(())
@@ -532,13 +528,9 @@ impl Shell {
             self.render_prompt_template(fmt, &username, &hostname, &dir_display)
         } else if let Some(ArrayValue::String(ref fmt)) = self.env_vars.get("PS1") {
             self.render_prompt_template(fmt, &username, &hostname, &dir_display)
-        } else if let ThemePlugin::Theme(ref theme) = self.theme_plugin {
-            theme.generate_prompt(&username, &hostname, &dir_display, "$ ")
         } else {
-            format!(
-                "\x1b[1;32m{}@{}\x1b[0m \x1b[1;34m{}\x1b[0m $ ",
-                username, hostname, dir_display
-            )
+            let ThemePlugin::Theme(ref theme) = self.theme_plugin;
+            theme.generate_prompt(&username, &hostname, &dir_display, "$ ")
         };
 
         DefaultPrompt::new(
@@ -798,7 +790,7 @@ impl Shell {
                 crate::command_router::RouteDecision::Builtin => {
                     // Builtins are already handled above; keep this as a no-op.
                 }
-                crate::command_router::RouteDecision::WinuxCmdDLL(category) => {
+                crate::command_router::RouteDecision::WinuxCmdDLL(_category) => {
                     // Execute via WinuxCmd DLL
                     let args: Vec<String> = all_args[1..].to_vec();
                     return self.execute_winuxcmd_command(&clean_command, &args, &cmd_clone);
@@ -1178,7 +1170,7 @@ impl Shell {
         let mut prev_stdout: Option<std::process::ChildStdout> = None;
 
         for (i, cmd) in cmds.iter().enumerate() {
-            let is_first = i == 0;
+            let _is_first = i == 0;
             let is_last = i == cmds.len() - 1;
 
             // Get command name and args
@@ -1524,10 +1516,7 @@ impl Shell {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let executor = Executor::new(&env_vars, &self.current_dir);
-        match executor.find_command_in_path(cmd) {
-            Ok(path) => path,
-            Err(_) => None,
-        }
+        executor.find_command_in_path(cmd).unwrap_or_default()
     }
 
     /// Expand wildcards in arguments
@@ -1593,7 +1582,7 @@ impl Shell {
 
                     // Execute the command and capture output
                     let output = self.execute_substitution_command(&command);
-                    result.push_str(&output.trim());
+                    result.push_str(output.trim());
                 } else {
                     result.push(c);
                 }
@@ -2535,7 +2524,7 @@ impl Shell {
 }
 
 /// Expand a Word (from new parser) into a plain String by resolving variables etc.
-fn expand_word(word: &Word, env_vars: &HashMap<String, String>) -> String {
+fn expand_word(word: &Word, _env_vars: &HashMap<String, String>) -> String {
     let mut result = String::new();
     for part in &word.parts {
         match part {
@@ -2612,21 +2601,18 @@ fn convert_stmt(stmt: &Stmt) -> ParsedCommand {
             cmd.background = *background;
             // Convert redirections
             for redir in redirections {
-                match &redir.target {
-                    winsh_ast::redir::RedirTarget::File(word) => {
-                        let file = expand_word(word, &HashMap::new());
-                        match redir.op {
-                            winsh_ast::redir::RedirOp::In => { cmd.stdin_redir = Some(file); }
-                            winsh_ast::redir::RedirOp::Out => { cmd.stdout_redir = Some(file); }
-                            winsh_ast::redir::RedirOp::Append => { cmd.stdout_redir = Some(file); cmd.stdout_append = true; }
-                            winsh_ast::redir::RedirOp::Err => { cmd.stderr_redir = Some(file); }
-                            winsh_ast::redir::RedirOp::ErrAppend => { cmd.stderr_redir = Some(file); cmd.stderr_append = true; }
-                            winsh_ast::redir::RedirOp::ErrToOut => { cmd.stderr_to_stdout = true; }
-                            winsh_ast::redir::RedirOp::OutToErr => { cmd.stdout_to_stderr = true; }
-                            _ => {}
-                        }
+                if let winsh_ast::redir::RedirTarget::File(word) = &redir.target {
+                    let file = expand_word(word, &HashMap::new());
+                    match redir.op {
+                        winsh_ast::redir::RedirOp::In => { cmd.stdin_redir = Some(file); }
+                        winsh_ast::redir::RedirOp::Out => { cmd.stdout_redir = Some(file); }
+                        winsh_ast::redir::RedirOp::Append => { cmd.stdout_redir = Some(file); cmd.stdout_append = true; }
+                        winsh_ast::redir::RedirOp::Err => { cmd.stderr_redir = Some(file); }
+                        winsh_ast::redir::RedirOp::ErrAppend => { cmd.stderr_redir = Some(file); cmd.stderr_append = true; }
+                        winsh_ast::redir::RedirOp::ErrToOut => { cmd.stderr_to_stdout = true; }
+                        winsh_ast::redir::RedirOp::OutToErr => { cmd.stdout_to_stderr = true; }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             ParsedCommand::Single(cmd)

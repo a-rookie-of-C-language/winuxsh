@@ -48,7 +48,7 @@ impl Executor {
 
     /// Execute an external command
     pub fn execute(&self, cmd: &str, args: &[String], cmd_info: &CommandInfo) -> Result<i32> {
-        let mut result = self.execute_internal(cmd, args, cmd_info, false)?;
+        let result = self.execute_internal(cmd, args, cmd_info, false)?;
         if !result.stderr.is_empty() {
             eprint!("{}", String::from_utf8_lossy(&result.stderr));
         }

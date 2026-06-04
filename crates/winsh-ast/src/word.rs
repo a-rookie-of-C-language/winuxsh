@@ -241,7 +241,7 @@ impl fmt::Display for WordPart {
                     CaseOperator::UpperAll => "U",
                     CaseOperator::LowerAll => "L",
                 };
-                write!(f, "${{{}({}){}}}", op, name, "")
+                write!(f, "${{{}({})}}", op, name)
             }
             WordPart::VariableLength(name) => write!(f, "${{{}#}}", name),
             WordPart::CommandSubst(cmd) => write!(f, "$({})", cmd),

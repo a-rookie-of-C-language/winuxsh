@@ -1,7 +1,6 @@
 //! Expression types for arithmetic and conditional expressions.
 
 use std::fmt;
-use crate::word::Word;
 
 /// An expression used in arithmetic (( )) or conditional [[ ]] contexts.
 #[derive(Debug, Clone, PartialEq)]

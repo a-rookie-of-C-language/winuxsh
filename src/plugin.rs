@@ -32,8 +32,8 @@ impl Plugin for WelcomePlugin {
         Ok(())
     }
 
-    fn execute(&self, args: &[String], shell: &mut Shell) -> Result<bool> {
-        if args.get(0).map(|s| s.as_str()) == Some("welcome") {
+    fn execute(&self, args: &[String], _shell: &mut Shell) -> Result<bool> {
+        if args.first().map(|s| s.as_str()) == Some("welcome") {
             println!("Welcome to WinSH MVP6!");
             println!("Type 'help' for available commands.");
             println!("Type 'plugin list' to see loaded plugins.");
