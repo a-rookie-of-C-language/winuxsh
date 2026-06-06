@@ -19,17 +19,8 @@ pub enum ShellError {
     #[error("Job error: {0}")]
     Job(String),
 
-    #[error("Array error: {0}")]
-    Array(String),
-
     #[error("Config error: {0}")]
     Config(String),
-
-    #[error("Plugin error: {0}")]
-    Plugin(String),
-
-    #[error("Unknown error: {0}")]
-    Unknown(String),
 }
 
 pub type Result<T> = std::result::Result<T, ShellError>;

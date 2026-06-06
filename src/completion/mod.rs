@@ -1,14 +1,14 @@
 // Completion module for WinSH
 // Provides Tab completion for commands, paths, and variables
 
+pub mod bash_import;
 pub mod command;
 pub mod completer;
 pub mod external;
-pub mod bash_import;
 pub mod path;
 pub mod variables;
 
-pub use completer::{WinuxshCompleter, CompletionState};
+pub use completer::{CompletionState, WinuxshCompleter};
 
 use std::path::PathBuf;
 
@@ -61,8 +61,7 @@ impl CompletionContext {
             return true;
         }
 
-        let last_sep = before_cursor
-            .rfind([';', '|', '&', '\n']);
+        let last_sep = before_cursor.rfind([';', '|', '&', '\n']);
 
         if let Some(p) = last_sep {
             let skip = ceil_char_boundary(before_cursor, p + 1);
@@ -161,48 +160,22 @@ pub struct CompletionResult {
     pub completions: Vec<String>,
     /// Per-completion description (parallel to `completions`; None = no description)
     pub descriptions: Vec<Option<String>>,
-    /// Common prefix (for partial completion)
-    pub common_prefix: Option<String>,
 }
 
 impl CompletionResult {
     pub fn new(completions: Vec<String>) -> Self {
-        let common_prefix = Self::find_common_prefix(&completions);
         let len = completions.len();
         Self {
             completions,
             descriptions: vec![None; len],
-            common_prefix,
         }
     }
 
     pub fn with_descriptions(completions: Vec<String>, descriptions: Vec<Option<String>>) -> Self {
-        let common_prefix = Self::find_common_prefix(&completions);
         Self {
             completions,
             descriptions,
-            common_prefix,
         }
-    }
-
-    fn find_common_prefix(completions: &[String]) -> Option<String> {
-        if completions.is_empty() {
-            return None;
-        }
-
-        let first = &completions[0];
-        let mut prefix_len = first.len();
-
-        for completion in completions.iter().skip(1) {
-            while !completion.starts_with(&first[..prefix_len]) && prefix_len > 0 {
-                prefix_len -= 1;
-            }
-            if prefix_len == 0 {
-                return None;
-            }
-        }
-
-        Some(first[..prefix_len].to_string())
     }
 }
 
@@ -222,21 +195,14 @@ mod tests {
 
     #[test]
     fn test_is_path_completion() {
-        let ctx = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "cat /tmp/fil".to_string(),
-            12,
-        );
+        let ctx =
+            CompletionContext::new(PathBuf::from("/home/user"), "cat /tmp/fil".to_string(), 12);
         assert!(ctx.is_path_completion());
     }
 
     #[test]
     fn test_is_variable_completion() {
-        let ctx = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "echo $HOM".to_string(),
-            9,
-        );
+        let ctx = CompletionContext::new(PathBuf::from("/home/user"), "echo $HOM".to_string(), 9);
         assert!(ctx.is_variable_completion());
     }
 }

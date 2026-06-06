@@ -13,9 +13,6 @@ pub struct Theme {
     pub prompt_host: String,
     pub prompt_dir: String,
     pub prompt_symbol: String,
-    pub error_color: String,
-    pub warning_color: String,
-    pub success_color: String,
 }
 
 impl Theme {
@@ -27,9 +24,6 @@ impl Theme {
             prompt_host: "\x1b[1;36m".to_string(), // Cyan
             prompt_dir: "\x1b[1;34m".to_string(),  // Blue
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[31m".to_string(),   // Red
-            warning_color: "\x1b[33m".to_string(), // Yellow
-            success_color: "\x1b[32m".to_string(), // Green
         }
     }
 
@@ -41,9 +35,6 @@ impl Theme {
             prompt_host: "\x1b[1;37m".to_string(), // White
             prompt_dir: "\x1b[1;35m".to_string(),  // Magenta
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[31m".to_string(),
-            warning_color: "\x1b[33m".to_string(),
-            success_color: "\x1b[32m".to_string(),
         }
     }
 
@@ -55,9 +46,6 @@ impl Theme {
             prompt_host: "\x1b[1;32m".to_string(), // Green
             prompt_dir: "\x1b[1;36m".to_string(),  // Cyan
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[31m".to_string(),
-            warning_color: "\x1b[33m".to_string(),
-            success_color: "\x1b[32m".to_string(),
         }
     }
 
@@ -69,9 +57,6 @@ impl Theme {
             prompt_host: "\x1b[1;93m".to_string(), // Bright yellow
             prompt_dir: "\x1b[1;96m".to_string(),  // Bright cyan
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[91m".to_string(),   // Bright red
-            warning_color: "\x1b[93m".to_string(), // Bright yellow
-            success_color: "\x1b[92m".to_string(), // Bright green
         }
     }
 
@@ -83,9 +68,6 @@ impl Theme {
             prompt_host: "".to_string(),
             prompt_dir: "".to_string(),
             prompt_symbol: "".to_string(),
-            error_color: "\x1b[31m".to_string(),
-            warning_color: "\x1b[33m".to_string(),
-            success_color: "\x1b[32m".to_string(),
         }
     }
 
@@ -97,9 +79,6 @@ impl Theme {
             prompt_host: "\x1b[1;95m".to_string(), // Bright magenta
             prompt_dir: "\x1b[1;36m".to_string(),  // Cyan
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[91m".to_string(),   // Bright red
-            warning_color: "\x1b[93m".to_string(), // Bright yellow
-            success_color: "\x1b[95m".to_string(), // Bright magenta
         }
     }
 
@@ -111,9 +90,6 @@ impl Theme {
             prompt_host: "\x1b[1;36m".to_string(), // Cyan
             prompt_dir: "\x1b[1;94m".to_string(),  // Bright blue
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[31m".to_string(),
-            warning_color: "\x1b[33m".to_string(),
-            success_color: "\x1b[36m".to_string(), // Cyan
         }
     }
 
@@ -125,9 +101,6 @@ impl Theme {
             prompt_host: "\x1b[1;92m".to_string(), // Bright green
             prompt_dir: "\x1b[1;33m".to_string(),  // Yellow
             prompt_symbol: "\x1b[0m".to_string(),  // Reset
-            error_color: "\x1b[31m".to_string(),
-            warning_color: "\x1b[93m".to_string(), // Bright yellow
-            success_color: "\x1b[92m".to_string(), // Bright green
         }
     }
 

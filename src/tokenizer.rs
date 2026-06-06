@@ -1,33 +1,32 @@
 // Tokenizer module for WinSH MVP6
 // Ported from MVP5 to provide lexical analysis for shell commands
 
+#[cfg(test)]
 use crate::error::Result;
 
 /// Token types for lexical analysis
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Word(String),
-    Pipe,                 // |
-    And,                  // &&
-    Or,                   // ||
-    Background,           // &
-    Semicolon,            // ;
-    RedirIn,              // <
-    RedirOut,             // >
-    RedirAppend,          // >>
-    RedirErr,             // 2>
-    RedirErrAppend,       // 2>>
-    RedirErrToOut,        // 2>&1
-    RedirOutToErr,        // 1>&2 or >&2
-    Wildcard(String),     // Wildcard pattern
-    CommandSubst(String), // Command substitution
-    ArrayStart,           // (
-    ArrayEnd,             // )
+    Pipe,           // |
+    And,            // &&
+    Or,             // ||
+    Background,     // &
+    Semicolon,      // ;
+    RedirIn,        // <
+    RedirOut,       // >
+    RedirAppend,    // >>
+    RedirErr,       // 2>
+    RedirErrAppend, // 2>>
+    RedirErrToOut,  // 2>&1
+    RedirOutToErr,  // 1>&2 or >&2
+    ArrayStart,     // (
+    ArrayEnd,       // )
 }
 
 /// Command information structure
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CommandInfo {
     pub args: Vec<String>,
     pub stdin_redir: Option<String>,
@@ -40,7 +39,6 @@ pub struct CommandInfo {
     pub background: bool,
 }
 
-
 /// Parsed command AST
 #[derive(Debug, Clone)]
 pub enum ParsedCommand {
@@ -51,19 +49,11 @@ pub enum ParsedCommand {
     Sequence(Vec<ParsedCommand>),
 }
 
-impl ParsedCommand {
-    /// Convert to single command
-    pub fn into_single_cmd(self) -> CommandInfo {
-        match self {
-            ParsedCommand::Single(cmd) => cmd,
-            _ => panic!("Expected single command"),
-        }
-    }
-}
-
 /// Tokenizer for shell commands
+#[cfg(test)]
 pub struct Tokenizer;
 
+#[cfg(test)]
 impl Tokenizer {
     /// Tokenize a command string into tokens
     pub fn tokenize(cmd: &str) -> Result<Vec<Token>> {

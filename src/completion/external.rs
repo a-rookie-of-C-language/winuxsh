@@ -45,8 +45,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::completion::{CompletionContext, CompletionPlugin, CompletionResult};
 use crate::completion::command::CommandCompleter;
+use crate::completion::{CompletionContext, CompletionPlugin, CompletionResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CommandCompletionPlugin
@@ -75,17 +75,11 @@ impl CompletionPlugin for CommandCompletionPlugin {
 #[serde(untagged)]
 pub enum ValuesSource {
     /// Static list baked into the definition file.
-    Static {
-        values: Vec<String>,
-    },
+    Static { values: Vec<String> },
     /// Run a sub-process; each stdout line becomes a candidate.
-    Dynamic {
-        values_from_command: DynamicCommand,
-    },
+    Dynamic { values_from_command: DynamicCommand },
     /// Delegate to the built-in path completer.
-    Path {
-        values_from: PathLiteral,
-    },
+    Path { values_from: PathLiteral },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +228,10 @@ fn resolve_cache_dir() -> Option<PathBuf> {
         }
         return Some(p);
     }
-    let base = dirs::home_dir()?.join(".winsh").join("completions").join("cache");
+    let base = dirs::home_dir()?
+        .join(".winsh")
+        .join("completions")
+        .join("cache");
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
@@ -245,7 +242,13 @@ fn resolve_cache_dir() -> Option<PathBuf> {
 fn cache_key_to_filename(key: &str) -> String {
     let safe: String = key
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{}.toml", safe)
 }
@@ -272,11 +275,6 @@ impl ExternalCompletionPlugin {
         self.definitions.len()
     }
 
-    /// Names of all loaded command definitions (for diagnostics)
-    pub fn definition_names(&self) -> Vec<&str> {
-        self.definitions.keys().map(|s| s.as_str()).collect()
-    }
-
     /// Create an empty plugin (no definitions loaded).
     pub fn new() -> Self {
         Self {
@@ -284,23 +282,6 @@ impl ExternalCompletionPlugin {
             mem_cache: Mutex::new(HashMap::new()),
             cache_dir: resolve_cache_dir(),
         }
-    }
-
-    /// Load all `*.toml` and `*.bash` definition files from `dir`.
-    ///
-    /// Load order / priority:
-    ///   1. `*.toml` files are loaded first and take **highest priority**.
-    ///      A user-written `fd.toml` will suppress auto-import of `fd.bash`.
-    ///   2. `*.bash` files whose stem has no matching `.toml` are auto-imported.
-    ///      The parsed result is written to the cache dir as
-    ///      `<cmd>.parsed.toml` and reused on subsequent starts while the
-    ///      source `.bash` file's mtime is unchanged.
-    ///
-    /// Files that fail to parse are skipped with a warning.
-    pub fn load_from_dir(dir: &Path) -> Self {
-        let mut plugin = Self::new();
-        plugin.load_dir(dir);
-        plugin
     }
 
     /// Load definitions from a single directory into this plugin.
@@ -473,10 +454,8 @@ impl ExternalCompletionPlugin {
     }
 
     fn load_file(&self, path: &Path) -> Result<CommandDef, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("read error: {}", e))?;
-        toml::from_str(&content)
-            .map_err(|e| format!("parse error: {}", e))
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {}", e))?;
+        toml::from_str(&content).map_err(|e| format!("parse error: {}", e))
     }
 
     /// Enrich flag descriptions by parsing `cmd -h` output for each loaded
@@ -499,10 +478,7 @@ impl ExternalCompletionPlugin {
             }
 
             // Run `cmd -h` (some tools write help to stderr)
-            let output = match std::process::Command::new(&cmd_name)
-                .arg("-h")
-                .output()
-            {
+            let output = match std::process::Command::new(&cmd_name).arg("-h").output() {
                 Ok(o) => o,
                 Err(_) => continue,
             };
@@ -543,8 +519,7 @@ impl ExternalCompletionPlugin {
                 // Persist enriched definitions to cache
                 if changed {
                     if let Some(ref cache_dir) = self.cache_dir {
-                        let cache_file =
-                            cache_dir.join(format!("{}.parsed.toml", cmd_name));
+                        let cache_file = cache_dir.join(format!("{}.parsed.toml", cmd_name));
                         if let Ok(serialised) = toml::to_string_pretty(def) {
                             let _ = std::fs::write(&cache_file, serialised);
                         }
@@ -629,7 +604,10 @@ impl ExternalCompletionPlugin {
         if completions.is_empty() {
             None
         } else {
-            Some(CompletionResult::with_descriptions(completions, descriptions))
+            Some(CompletionResult::with_descriptions(
+                completions,
+                descriptions,
+            ))
         }
     }
 
@@ -647,9 +625,15 @@ impl ExternalCompletionPlugin {
                     .filter(|v| v.starts_with(&word))
                     .cloned()
                     .collect();
-                if matches.is_empty() { None } else { Some(CompletionResult::new(matches)) }
+                if matches.is_empty() {
+                    None
+                } else {
+                    Some(CompletionResult::new(matches))
+                }
             }
-            Some(ValuesSource::Dynamic { values_from_command }) => {
+            Some(ValuesSource::Dynamic {
+                values_from_command,
+            }) => {
                 let cache_key = format!("{}::{}", def.command, values_from_command.cmd);
                 self.resolve_dynamic(cache_key, values_from_command, context)
             }
@@ -801,14 +785,22 @@ impl ExternalCompletionPlugin {
     }
 
     /// Filter a value list by the current word prefix.
-    fn filter_values(&self, values: &[String], context: &CompletionContext) -> Option<CompletionResult> {
+    fn filter_values(
+        &self,
+        values: &[String],
+        context: &CompletionContext,
+    ) -> Option<CompletionResult> {
         let word = context.get_current_word().unwrap_or_default();
         let matches: Vec<String> = values
             .iter()
             .filter(|v| v.starts_with(&word))
             .cloned()
             .collect();
-        if matches.is_empty() { None } else { Some(CompletionResult::new(matches)) }
+        if matches.is_empty() {
+            None
+        } else {
+            Some(CompletionResult::new(matches))
+        }
     }
 }
 

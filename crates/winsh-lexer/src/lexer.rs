@@ -62,6 +62,10 @@ impl Lexer {
 
         let c = self.peek();
 
+        if c.is_ascii_digit() && self.peek_offset(1) == '>' {
+            return Ok(self.read_fd_redirection());
+        }
+
         // Handle comments
         if c == '#' && self.is_at_word_start() {
             return self.read_comment();
@@ -147,6 +151,10 @@ impl Lexer {
                 }
                 if self.peek() == '&' {
                     self.advance();
+                    if self.peek() == '2' {
+                        self.advance();
+                        return Ok(self.make_token(TokenKind::RedirOutToErr));
+                    }
                     return Ok(self.make_token(TokenKind::RedirOut));
                 }
                 Ok(self.make_token(TokenKind::RedirOut))
@@ -589,6 +597,44 @@ impl Lexer {
         Ok(self.make_token(TokenKind::Comment(comment)))
     }
 
+    fn read_fd_redirection(&mut self) -> Token {
+        let fd = self.advance();
+        self.advance(); // Skip >
+
+        if self.peek() == '>' {
+            self.advance();
+            let kind = if fd == '2' {
+                TokenKind::RedirErrAppend
+            } else {
+                TokenKind::RedirAppend
+            };
+            return self.make_token(kind);
+        }
+
+        if self.peek() == '&' {
+            self.advance();
+            let target_fd = self.peek();
+            if target_fd.is_ascii_digit() {
+                self.advance();
+            }
+
+            let kind = match (fd, target_fd) {
+                ('2', '1') => TokenKind::RedirErrToOut,
+                ('1', '2') => TokenKind::RedirOutToErr,
+                ('2', _) => TokenKind::RedirErr,
+                _ => TokenKind::RedirOut,
+            };
+            return self.make_token(kind);
+        }
+
+        let kind = if fd == '2' {
+            TokenKind::RedirErr
+        } else {
+            TokenKind::RedirOut
+        };
+        self.make_token(kind)
+    }
+
     /// Skip whitespace (excluding newlines).
     fn skip_whitespace(&mut self) {
         while !self.is_at_end() && (self.peek() == ' ' || self.peek() == '\t' || self.peek() == '\r') {
@@ -615,6 +661,10 @@ impl Lexer {
         } else {
             self.input[self.pos]
         }
+    }
+
+    fn peek_offset(&self, offset: usize) -> char {
+        self.input.get(self.pos + offset).copied().unwrap_or('\0')
     }
 
     /// Advance to the next character and return the previous one.
@@ -686,6 +736,18 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::Word("hello".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::RedirOut);
         assert_eq!(tokens[3].kind, TokenKind::Word("file.txt".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_fd_redirections() {
+        let tokens = Lexer::tokenize("echo hello 2> err.txt 2>> log.txt 2>&1 1>&2 >&2").unwrap();
+        assert_eq!(tokens[2].kind, TokenKind::RedirErr);
+        assert_eq!(tokens[3].kind, TokenKind::Word("err.txt".to_string()));
+        assert_eq!(tokens[4].kind, TokenKind::RedirErrAppend);
+        assert_eq!(tokens[5].kind, TokenKind::Word("log.txt".to_string()));
+        assert_eq!(tokens[6].kind, TokenKind::RedirErrToOut);
+        assert_eq!(tokens[7].kind, TokenKind::RedirOutToErr);
+        assert_eq!(tokens[8].kind, TokenKind::RedirOutToErr);
     }
 
     #[test]

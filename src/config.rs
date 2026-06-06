@@ -8,34 +8,16 @@ use std::path::{Path, PathBuf};
 pub struct WinuxCmdConfig {
     #[serde(default = "default_enable_dll")]
     pub enable_dll: bool,
-
-    #[serde(default = "default_auto_start_daemon")]
-    pub auto_start_daemon: bool,
-
-    #[serde(default = "default_daemon_timeout")]
-    pub daemon_timeout: u64,
 }
 
 impl Default for WinuxCmdConfig {
     fn default() -> Self {
-        WinuxCmdConfig {
-            enable_dll: true,
-            auto_start_daemon: true,
-            daemon_timeout: 5,
-        }
+        WinuxCmdConfig { enable_dll: true }
     }
 }
 
 fn default_enable_dll() -> bool {
     true
-}
-
-fn default_auto_start_daemon() -> bool {
-    true
-}
-
-fn default_daemon_timeout() -> u64 {
-    5
 }
 
 /// Terminal color configuration
@@ -219,11 +201,6 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// Get configuration
-    pub fn config(&self) -> &ShellConfig {
-        &self.config
-    }
-
     /// Parse ANSI escape sequences like \x1b[1;32m
     fn parse_ansi_escape_sequences(&self, input: &str) -> String {
         let mut result = String::new();
@@ -291,8 +268,6 @@ mod tests {
         assert_eq!(config.prompt_format, "%u@%h %w $ ");
         assert_eq!(config.plugins.len(), 0);
         assert!(config.winuxcmd.enable_dll);
-        assert!(config.winuxcmd.auto_start_daemon);
-        assert_eq!(config.winuxcmd.daemon_timeout, 5);
     }
 
     #[test]
@@ -315,7 +290,5 @@ mod tests {
     fn test_winuxcmd_default() {
         let config = WinuxCmdConfig::default();
         assert!(config.enable_dll);
-        assert!(config.auto_start_daemon);
-        assert_eq!(config.daemon_timeout, 5);
     }
 }

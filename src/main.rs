@@ -11,10 +11,10 @@ use anyhow::Result;
 
 // Win32 API for Ctrl+C handling
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(windows)]
-static mut CURRENT_CHILD_PID: u32 = 0;
+static CURRENT_CHILD_PID: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(windows)]
 static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -22,9 +22,7 @@ static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::BOOL;
 #[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_C_EVENT,
-};
+use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
 
 #[cfg(windows)]
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
@@ -34,12 +32,13 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
             CTRL_C_RECEIVED.store(true, Ordering::SeqCst);
 
             // If there's a child process running, try to terminate it
-            if CURRENT_CHILD_PID != 0 {
+            let current_child_pid = CURRENT_CHILD_PID.load(Ordering::SeqCst);
+            if current_child_pid != 0 {
                 // Terminate the child process only
                 use windows_sys::Win32::System::Threading::{
                     OpenProcess, TerminateProcess, PROCESS_TERMINATE,
                 };
-                let handle = OpenProcess(PROCESS_TERMINATE, 0, CURRENT_CHILD_PID);
+                let handle = OpenProcess(PROCESS_TERMINATE, 0, current_child_pid);
                 if !handle.is_null() {
                     TerminateProcess(handle, 1);
                 }
@@ -65,16 +64,12 @@ pub fn setup_ctrl_c_handler() {
 
 #[cfg(windows)]
 pub fn set_current_child_pid(pid: u32) {
-    unsafe {
-        CURRENT_CHILD_PID = pid;
-    }
+    CURRENT_CHILD_PID.store(pid, Ordering::SeqCst);
 }
 
 #[cfg(windows)]
 pub fn clear_current_child_pid() {
-    unsafe {
-        CURRENT_CHILD_PID = 0;
-    }
+    CURRENT_CHILD_PID.store(0, Ordering::SeqCst);
 }
 
 #[cfg(windows)]
@@ -99,19 +94,57 @@ use std::env;
 use std::path::PathBuf;
 
 mod array;
+#[path = "runtime/ast_adapter.rs"]
+mod ast_adapter;
 mod builtins;
+#[path = "builtins/array.rs"]
+mod builtins_array;
+#[path = "builtins/jobs.rs"]
+mod builtins_jobs;
+#[path = "builtins/meta.rs"]
+mod builtins_meta;
+#[path = "runtime/capture.rs"]
+mod capture;
+#[path = "runtime/command_execution.rs"]
+mod command_execution;
+#[path = "runtime/command_lookup.rs"]
+mod command_lookup;
 mod command_router;
 mod completion;
 mod config;
 mod error;
 mod executor;
+#[path = "runtime/expansion.rs"]
+mod expansion;
 mod job;
 mod oh_my_winuxsh;
+#[path = "runtime/pipeline.rs"]
+mod pipeline;
 mod plugin;
+#[path = "runtime/prompt.rs"]
+mod prompt;
+#[path = "runtime/redirection.rs"]
+mod redirection;
+mod script;
+#[path = "script/blocks.rs"]
+mod script_blocks;
+#[path = "script/expansion.rs"]
+mod script_expansion;
+#[path = "script/utils.rs"]
+mod script_utils;
 mod shell;
+#[path = "shell/completion.rs"]
+mod shell_completion;
+#[path = "shell/config.rs"]
+mod shell_config;
+#[path = "shell/init.rs"]
+mod shell_init;
 mod theme;
 mod tokenizer;
+#[path = "winuxcmd/ffi.rs"]
 mod winuxcmd_ffi;
+#[path = "winuxcmd/locator.rs"]
+mod winuxcmd_locator;
 
 use shell::Shell;
 
@@ -155,11 +188,7 @@ fn run() -> Result<()> {
                 if args.len() > 2 {
                     let mut shell = Shell::new(true)?;
                     if let Err(e) = shell.save_history(&args[2]) {
-                        eprintln!(
-                            "{} {}",
-                            "Warning:".yellow(),
-                            format!("Failed to save history: {}", e)
-                        );
+                        eprintln!("{} Failed to save history: {}", "Warning:".yellow(), e);
                     }
                     shell.execute_command(&args[2])?;
                 } else {
@@ -219,11 +248,7 @@ impl Shell {
                     }
 
                     if let Err(e) = self.save_history(line) {
-                        eprintln!(
-                            "{} {}",
-                            "Warning:".yellow(),
-                            format!("Failed to save history: {}", e)
-                        );
+                        eprintln!("{} Failed to save history: {}", "Warning:".yellow(), e);
                     }
 
                     // Execute command
@@ -232,7 +257,7 @@ impl Shell {
                     }
 
                     // Update completion state with current directory after command execution
-                    self.update_completion_state();
+                    self.update_completion_state(line);
                 }
                 Ok(Signal::CtrlD) => {
                     println!();

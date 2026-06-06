@@ -1,9 +1,9 @@
 // Command completion for WinSH
 // Provides Tab completion for executable commands
 
-use std::env;
 use crate::completion::{CompletionContext, CompletionResult};
 use crate::error::Result;
+use std::env;
 
 /// Command completer
 pub struct CommandCompleter;
@@ -64,7 +64,7 @@ impl CommandCompleter {
                         if let Ok(file_type) = entry.file_type() {
                             if file_type.is_file() {
                                 let file_name = entry.file_name().to_string_lossy().to_string();
-                                
+
                                 // Check if it's executable by extension
                                 let is_executable = file_name.ends_with(".exe")
                                     || file_name.ends_with(".bat")
@@ -119,6 +119,7 @@ impl CommandCompleter {
     }
 
     /// Check if a command exists in PATH
+    #[cfg(test)]
     pub fn command_exists(command: &str) -> bool {
         Self::get_builtin_commands().contains(&command.to_string())
             || Self::get_path_commands().contains(&command.to_string())

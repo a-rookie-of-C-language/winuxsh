@@ -6,16 +6,12 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JobStatus {
     Running,
-    Stopped,
-    Done,
 }
 
 impl fmt::Display for JobStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JobStatus::Running => write!(f, "Running"),
-            JobStatus::Stopped => write!(f, "Stopped"),
-            JobStatus::Done => write!(f, "Done"),
         }
     }
 }
@@ -40,12 +36,8 @@ impl Job {
         }
     }
 
-    /// Set job status
-    pub fn set_status(&mut self, status: JobStatus) {
-        self.status = status;
-    }
-
     /// Get job status
+    #[cfg(test)]
     pub fn status(&self) -> JobStatus {
         self.status
     }
@@ -81,16 +73,6 @@ impl JobManager {
         self.jobs.iter().find(|j| j.id == job_id)
     }
 
-    /// Get a mutable job by ID
-    pub fn get_job_mut(&mut self, job_id: u32) -> Option<&mut Job> {
-        self.jobs.iter_mut().find(|j| j.id == job_id)
-    }
-
-    /// Get a job by index
-    pub fn get_job_by_index(&self, index: usize) -> Option<&Job> {
-        self.jobs.get(index)
-    }
-
     /// Find job index by ID
     pub fn find_job_index(&self, job_id: u32) -> Option<usize> {
         self.jobs.iter().position(|j| j.id == job_id)
@@ -110,17 +92,13 @@ impl JobManager {
         }
     }
 
-    /// Cleanup completed jobs
-    pub fn cleanup(&mut self) {
-        self.jobs.retain(|job| job.status != JobStatus::Done);
-    }
-
     /// Check if there are any jobs
     pub fn has_jobs(&self) -> bool {
         !self.jobs.is_empty()
     }
 
     /// Get job count
+    #[cfg(test)]
     pub fn job_count(&self) -> usize {
         self.jobs.len()
     }
@@ -146,18 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_job_status() {
-        let mut job = Job::new(1, "sleep 10".to_string(), 1234);
-        assert_eq!(job.status(), JobStatus::Running);
-
-        job.set_status(JobStatus::Stopped);
-        assert_eq!(job.status(), JobStatus::Stopped);
-
-        job.set_status(JobStatus::Done);
-        assert_eq!(job.status(), JobStatus::Done);
-    }
-
-    #[test]
     fn test_job_manager() {
         let mut manager = JobManager::new();
         assert_eq!(manager.job_count(), 0);
@@ -175,21 +141,5 @@ mod tests {
         let index = manager.find_job_index(job_id);
         assert!(index.is_some());
         assert_eq!(index.unwrap(), 0);
-    }
-
-    #[test]
-    fn test_job_manager_cleanup() {
-        let mut manager = JobManager::new();
-        manager.add_job("sleep 10".to_string(), 1234);
-        manager.add_job("sleep 20".to_string(), 5678);
-
-        // Mark first job as done
-        if let Some(job) = manager.get_job_mut(1) {
-            job.set_status(JobStatus::Done);
-        }
-
-        manager.cleanup();
-        assert_eq!(manager.job_count(), 1);
-        assert_eq!(manager.list_jobs()[0].id, 2);
     }
 }

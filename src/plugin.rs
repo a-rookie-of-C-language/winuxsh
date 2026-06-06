@@ -19,6 +19,13 @@ pub trait Plugin: std::fmt::Debug {
     }
 }
 
+/// Public plugin metadata shown by shell builtins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginInfo<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+}
+
 /// Welcome plugin
 #[derive(Debug)]
 pub struct WelcomePlugin;
@@ -70,28 +77,15 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Execute plugins
-    pub fn execute(&mut self, args: &[String], shell: &mut Shell) -> Result<bool> {
-        for plugin in &mut self.plugins {
-            if plugin.execute(args, shell)? {
-                return Ok(true); // Plugin handled the command
-            }
-        }
-        Ok(false) // No plugin handled the command
-    }
-
-    /// Execute plugins with immutable self reference
-    pub fn execute_readonly(&self, args: &[String], shell: &mut Shell) -> Result<bool> {
-        for plugin in &self.plugins {
-            if plugin.execute(args, shell)? {
-                return Ok(true); // Plugin handled the command
-            }
-        }
-        Ok(false) // No plugin handled the command
-    }
     /// List all plugins
-    pub fn list_plugins(&self) -> Vec<&str> {
-        self.plugins.iter().map(|p| p.name()).collect()
+    pub fn list_plugins(&self) -> Vec<PluginInfo<'_>> {
+        self.plugins
+            .iter()
+            .map(|p| PluginInfo {
+                name: p.name(),
+                description: p.description(),
+            })
+            .collect()
     }
 
     /// Get number of loaded plugins
@@ -130,6 +124,12 @@ mod tests {
 
         manager.add_plugin(Box::new(WelcomePlugin)).unwrap();
         assert_eq!(manager.plugin_count(), 1);
-        assert_eq!(manager.list_plugins(), vec!["welcome"]);
+        assert_eq!(
+            manager.list_plugins(),
+            vec![PluginInfo {
+                name: "welcome",
+                description: "Welcome message plugin",
+            }]
+        );
     }
 }

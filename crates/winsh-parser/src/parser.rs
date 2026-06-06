@@ -163,7 +163,13 @@ impl Parser {
                     background = true;
                     break;
                 }
-                TokenKind::RedirOut | TokenKind::RedirIn | TokenKind::RedirAppend => {
+                TokenKind::RedirOut
+                | TokenKind::RedirIn
+                | TokenKind::RedirAppend
+                | TokenKind::RedirErr
+                | TokenKind::RedirErrAppend
+                | TokenKind::RedirErrToOut
+                | TokenKind::RedirOutToErr => {
                     redirections.push(self.parse_redirection()?);
                 }
                 _ => {
@@ -245,11 +251,27 @@ impl Parser {
             }
         };
 
+        if matches!(op, RedirOp::ErrToOut | RedirOp::OutToErr) {
+            let target_fd = match op {
+                RedirOp::ErrToOut => 1,
+                RedirOp::OutToErr => 2,
+                _ => unreachable!(),
+            };
+            return Ok(Redirection {
+                fd: Some(if matches!(op, RedirOp::ErrToOut) { 2 } else { 1 }),
+                op,
+                target: RedirTarget::Fd(target_fd),
+            });
+        }
+
         self.skip_newlines();
         let target = self.parse_word()?;
 
         Ok(Redirection {
-            fd: None,
+            fd: match op {
+                RedirOp::Err | RedirOp::ErrAppend => Some(2),
+                _ => None,
+            },
             op,
             target: RedirTarget::File(target),
         })
@@ -826,6 +848,25 @@ mod tests {
                 assert_eq!(redirections[0].op, RedirOp::Out);
             }
             _ => panic!("Expected command with redirection"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fd_redirections() {
+        let stmts = parse("echo hello 2> err.txt 2>&1 1>&2");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Command { redirections, .. } => {
+                assert_eq!(redirections.len(), 3);
+                assert_eq!(redirections[0].fd, Some(2));
+                assert_eq!(redirections[0].op, RedirOp::Err);
+                assert!(matches!(redirections[0].target, RedirTarget::File(_)));
+                assert_eq!(redirections[1].op, RedirOp::ErrToOut);
+                assert_eq!(redirections[1].target, RedirTarget::Fd(1));
+                assert_eq!(redirections[2].op, RedirOp::OutToErr);
+                assert_eq!(redirections[2].target, RedirTarget::Fd(2));
+            }
+            _ => panic!("Expected command with fd redirections"),
         }
     }
 
