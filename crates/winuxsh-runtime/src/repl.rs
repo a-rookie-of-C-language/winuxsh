@@ -70,8 +70,9 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
         )));
     }
     if shell.syntax_highlighting.main_highlighter_enabled() {
-        editor = editor.with_highlighter(Box::new(WinuxshSyntaxHighlighter::new(
+        editor = editor.with_highlighter(Box::new(WinuxshSyntaxHighlighter::new_with_commands(
             &shell.syntax_highlighting,
+            shell.aliases.keys().map(String::as_str),
         )));
     }
 

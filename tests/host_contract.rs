@@ -146,6 +146,60 @@ echo SHOULD_NOT_PRINT
 }
 
 #[test]
+fn zsh_setopt_is_supported_when_sourcing_startup_rc() {
+    let temp = unique_temp_dir("winuxsh-host-setopt");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let rc = home.join(".winshrc");
+    std::fs::write(
+        &rc,
+        r#"
+plugins=(
+    git
+    completion
+)
+setopt hist_ignore_dups
+setopt hist_ignore_space prompt_subst prompt_percent brace_expand tilde_expand variable_expand command_subst arith_expand monitor
+unsetopt prompt_percent
+export SETOPT_RC_OK=ok
+"#,
+    )
+    .unwrap();
+
+    let output = run_winuxsh(
+        &format!(
+            "source {}; echo $SETOPT_RC_OK; setopt",
+            shell_quote(&shell_path(&rc))
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "source .winshrc setopt");
+    assert_eq!(normalize_text(&output.stderr), "");
+
+    let stdout = stdout_lines(&output);
+    assert!(stdout.contains(&"ok".to_string()), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains(&"hist_ignore_dups".to_string()),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&"hist_ignore_space".to_string()),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        !stdout.contains(&"prompt_percent".to_string()),
+        "stdout was {stdout:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn native_backslash_drive_paths_work_for_winuxcmd_and_cd() {
     if !cfg!(windows) {
         return;
@@ -222,6 +276,51 @@ fn path_lookup_finds_windows_pathextext_commands() {
     );
     assert_success(&output, "PATH contract");
     assert_eq!(normalize_text(&output.stdout), "path-ok");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn sourced_rc_keeps_winuxcmd_visible_to_windows_children() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-winuxcmd-child-path");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("winuxcmd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["winuxcmd.exe", "ls.exe", "cat.exe", "grep.exe", "ln.exe"] {
+        std::fs::write(bin.join(name), b"").unwrap();
+    }
+    std::fs::write(
+        home.join(".winshrc"),
+        r#"export PATH="$PATH;C:\does-not-exist-winuxsh-test""#,
+    )
+    .unwrap();
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let output = run_winuxsh(
+        "source ~/.winshrc; where.exe ls; where.exe winuxcmd",
+        &start,
+        &home,
+        &[
+            ("PATH", old_path),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD".to_string()),
+            ("WINUXCMD_PATH", native_path(&bin.join("winuxcmd.exe"))),
+        ],
+    );
+
+    assert_success(&output, "source rc keeps winuxcmd on child PATH");
+    let stdout = normalize_text(&output.stdout).replace('\\', "/");
+    assert!(stdout.contains("/winuxcmd/ls.exe"), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains("/winuxcmd/winuxcmd.exe"),
+        "stdout was {stdout:?}"
+    );
 
     let _ = std::fs::remove_dir_all(temp);
 }

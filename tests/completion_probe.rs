@@ -149,6 +149,28 @@ fn path_completion_preserves_typed_directory_prefix() {
 }
 
 #[test]
+fn tilde_path_completion_lists_home_entries() {
+    let env = ProbeEnv::new("winuxsh-completion-tilde");
+    std::fs::create_dir_all(env.home.join("adir")).unwrap();
+    std::fs::write(env.home.join("alpha.txt"), "alpha").unwrap();
+
+    let suggestions = run_probe("ls ~/", &env, &[]);
+
+    assert_contains(&suggestions, "~/adir/");
+    assert_contains(&suggestions, "~/alpha.txt");
+}
+
+#[test]
+fn completion_probe_loads_startup_rc_aliases() {
+    let env = ProbeEnv::new("winuxsh-completion-rc-alias");
+    env.write_rc("alias fetch='winuxfetch.exe'\n");
+
+    let suggestions = run_probe("fet", &env, &[]);
+
+    assert_contains(&suggestions, "fetch");
+}
+
+#[test]
 fn path_completion_escapes_spaces_in_candidates() {
     let env = ProbeEnv::new("winuxsh-completion-spaces");
     std::fs::create_dir_all(env.start.join("two dir")).unwrap();
@@ -331,6 +353,10 @@ impl ProbeEnv {
 
     fn write_config(&self, content: &str) {
         std::fs::write(self.home.join(".winshrc.toml"), content).unwrap();
+    }
+
+    fn write_rc(&self, content: &str) {
+        std::fs::write(self.home.join(".winshrc"), content).unwrap();
     }
 }
 

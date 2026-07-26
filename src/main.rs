@@ -206,7 +206,8 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
     } else {
         line.len()
     };
-    let shell = winuxsh_runtime::Shell::new()?;
+    let mut shell = winuxsh_runtime::Shell::new()?;
+    shell.run_startup_rc();
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);
     }

@@ -65,6 +65,14 @@ pub struct WinuxshSyntaxHighlighter {
 
 impl WinuxshSyntaxHighlighter {
     pub fn new(config: &SyntaxHighlightConfig) -> Self {
+        Self::new_with_commands(config, std::iter::empty::<String>())
+    }
+
+    pub fn new_with_commands<I, S>(config: &SyntaxHighlightConfig, commands: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut styles = default_styles();
         for (key, value) in &config.styles {
             if let Some(kind) = kind_from_zsh_key(key) {
@@ -73,12 +81,24 @@ impl WinuxshSyntaxHighlighter {
             }
         }
 
+        let mut command_set: HashSet<String> = CommandCompleter::get_all_commands()
+            .into_iter()
+            .map(|command| command.to_ascii_lowercase())
+            .collect();
+        command_set.extend(
+            CommandCompleter::get_common_commands()
+                .into_iter()
+                .map(|command| command.to_ascii_lowercase()),
+        );
+        command_set.extend(
+            commands
+                .into_iter()
+                .map(|command| command.as_ref().to_ascii_lowercase()),
+        );
+
         Self {
             styles,
-            commands: CommandCompleter::get_all_commands()
-                .into_iter()
-                .map(|command| command.to_ascii_lowercase())
-                .collect(),
+            commands: command_set,
             max_length: config.max_length,
         }
     }
@@ -172,7 +192,7 @@ fn classify_word(
         if is_shell_builtin(&unquoted) {
             return SyntaxKind::Builtin;
         }
-        if highlighter.commands.contains(&unquoted.to_ascii_lowercase()) {
+        if highlighter.is_known_command(&unquoted) {
             return SyntaxKind::Command;
         }
         return SyntaxKind::UnknownToken;
@@ -429,6 +449,7 @@ fn is_shell_builtin(word: &str) -> bool {
             | "read"
             | "return"
             | "set"
+            | "setopt"
             | "shift"
             | "source"
             | "test"
@@ -436,7 +457,25 @@ fn is_shell_builtin(word: &str) -> bool {
             | "type"
             | "unalias"
             | "unset"
+            | "unsetopt"
     )
+}
+
+impl WinuxshSyntaxHighlighter {
+    fn is_known_command(&self, command: &str) -> bool {
+        let lower = command.to_ascii_lowercase();
+        if self.commands.contains(&lower) {
+            return true;
+        }
+        if lower.ends_with(".exe") || lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            let stem = Path::new(&lower)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(&lower);
+            return self.commands.contains(stem);
+        }
+        false
+    }
 }
 
 fn contains_variable(word: &str) -> bool {
@@ -465,7 +504,7 @@ fn path_kind(word: &str) -> Option<SyntaxKind> {
 }
 
 fn resolve_path(word: &str) -> PathBuf {
-    let word = word.trim_matches(|ch| matches!(ch, '\'' | '"' | ')' | '('));
+    let word = shell_unescape_word(word.trim_matches(|ch| matches!(ch, '\'' | '"' | ')' | '(')));
     let expanded = if word == "~" {
         dirs::home_dir()
     } else if let Some(rest) = word.strip_prefix("~/").or_else(|| word.strip_prefix("~\\")) {
@@ -512,10 +551,54 @@ fn unquote_word(word: &str) -> String {
         if (bytes[0] == b'\'' && bytes[word.len() - 1] == b'\'')
             || (bytes[0] == b'"' && bytes[word.len() - 1] == b'"')
         {
-            return word[1..word.len() - 1].to_string();
+            return shell_unescape_word(&word[1..word.len() - 1]);
         }
     }
-    word.to_string()
+    shell_unescape_word(word)
+}
+
+fn shell_unescape_word(word: &str) -> String {
+    let mut value = String::new();
+    let mut escaped = false;
+    let mut chars = word.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if escaped {
+            value.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            if cfg!(windows) {
+                match chars.peek().copied() {
+                    Some(next) if !is_shell_escape_target(next) => {
+                        value.push(ch);
+                        continue;
+                    }
+                    Some(_) => {}
+                    None => {
+                        value.push(ch);
+                        continue;
+                    }
+                }
+            }
+            escaped = true;
+            continue;
+        }
+        value.push(ch);
+    }
+    if escaped {
+        value.push('\\');
+    }
+    value
+}
+
+fn is_shell_escape_target(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '\\' | '\'' | '"' | '$' | '`' | '!' | '&' | '|' | ';' | '<' | '>' | '(' | ')' | '['
+                | ']' | '{' | '}' | '*' | '?' | '#'
+        )
 }
 
 fn kind_from_zsh_key(key: &str) -> Option<SyntaxKind> {
@@ -628,6 +711,40 @@ mod tests {
         assert_eq!(
             style_for(&styled, &prefix.display().to_string()),
             highlighter.style(SyntaxKind::PathPrefix)
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn highlights_aliases_and_exe_commands_as_commands() {
+        let highlighter = WinuxshSyntaxHighlighter::new_with_commands(
+            &SyntaxHighlightConfig::default(),
+            ["fetch"],
+        );
+        let styled = highlighter.highlight("fetch; which.exe winuxcmd", 0);
+
+        assert_eq!(style_for(&styled, "fetch"), highlighter.style(SyntaxKind::Command));
+        assert_eq!(
+            style_for(&styled, "which.exe"),
+            highlighter.style(SyntaxKind::Command)
+        );
+    }
+
+    #[test]
+    fn highlights_escaped_paths_as_paths() {
+        let temp = unique_temp_dir("winuxsh-highlight-escaped-path");
+        std::fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("two words.txt");
+        std::fs::write(&file, "ok").unwrap();
+        let line = format!("cat {}", file.display().to_string().replace(' ', "\\ "));
+
+        let highlighter = WinuxshSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
+        let styled = highlighter.highlight(&line, 0);
+
+        assert_eq!(
+            style_for(&styled, &file.display().to_string().replace(' ', "\\ ")),
+            highlighter.style(SyntaxKind::Path)
         );
 
         let _ = std::fs::remove_dir_all(temp);

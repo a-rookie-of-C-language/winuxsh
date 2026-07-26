@@ -5,7 +5,7 @@
 //! to rubash; this layer only adds the Windows-facing UX.
 
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -53,6 +53,7 @@ pub struct Shell {
     pub native_plugins: NativePluginConfig,
     pub hooks: HookConfig,
     pub aliases: HashMap<String, String>,
+    pub zsh_options: HashSet<String>,
     pub zoxide_last_tracked_dir: Option<String>,
     pub last_working_dir_cache_path: PathBuf,
     pub last_working_dir_restored: bool,
@@ -94,6 +95,8 @@ impl Shell {
 
         // 4. Build rubash Executor after PATH injection.
         let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "winuxsh");
+        sync_executor_path_from_process_path(&mut executor);
 
         // 5. Apply imported aliases first, then native config aliases so
         // ~/.winshrc.toml remains authoritative when names collide.
@@ -194,7 +197,7 @@ impl Shell {
         };
 
         // 7. User-local state files.
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
         let history_path = config
             .history
             .path
@@ -281,6 +284,7 @@ impl Shell {
             native_plugins: config.zsh.native_plugins,
             hooks: config.hooks,
             aliases,
+            zsh_options: HashSet::new(),
             zoxide_last_tracked_dir: None,
             last_working_dir_cache_path,
             last_working_dir_restored: false,
@@ -362,7 +366,10 @@ impl Shell {
                 .is_some_and(|command| command == "lwd")
         {
             self.execute_native_last_working_dir()?
-        } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
+        } else if let Some(execution) = self
+            .execute_winuxsh_simple_ast(&ast)
+            .or_else(|| self.execute_host_synced_simple_ast(&ast))
+        {
             match execution {
                 Ok(code) => code,
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
@@ -405,6 +412,7 @@ impl Shell {
         };
 
         self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
         Ok(code)
     }
 
@@ -944,6 +952,7 @@ impl Shell {
             state.env_vars = std::env::vars()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            state.aliases = self.aliases.keys().cloned().collect();
         }
     }
 
@@ -975,6 +984,18 @@ impl Shell {
         let normalized_pwd = host_path_to_shell_path(&cwd.to_string_lossy());
         self.executor.set_env("PWD", &normalized_pwd);
     }
+
+    fn sync_process_path_from_executor_path(&mut self) {
+        let Some(path) = self.executor.get_env("PATH") else {
+            return;
+        };
+        let process_path = process_path_from_shell_path_list(path);
+        std::env::set_var("PATH", &process_path);
+        if cfg!(windows) && process_path != path {
+            self.executor.set_env("PATH", &process_path);
+        }
+    }
+
     fn sync_process_cwd_from_executor_pwd(&mut self) {
         let pwd = match self.executor.get_env("PWD") {
             Some(p) => p.to_string(),
@@ -1052,7 +1073,8 @@ impl Shell {
         normalize_winuxcmd_slash_drive_args(&mut ast);
 
         let execution = self
-            .execute_host_synced_simple_ast(&ast)
+            .execute_winuxsh_simple_ast(&ast)
+            .or_else(|| self.execute_host_synced_simple_ast(&ast))
             .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
                 Ok(()) => Ok(self.executor.last_exit_code()),
                 Err(err) => Err(err),
@@ -1075,6 +1097,7 @@ impl Shell {
         };
 
         self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
         Ok(code)
     }
     /// Built-in git aliases (oh-my-zsh style).
@@ -1134,6 +1157,7 @@ impl Shell {
             match self.executor.execute_command(command) {
                 Ok(()) => {
                     self.sync_process_cwd_from_executor_pwd();
+                    self.sync_process_path_from_executor_path();
                 }
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => return Some(Ok(code)),
                 Err(rubash::executor::ExecuteError::Return(code)) => return Some(Ok(code)),
@@ -1142,6 +1166,214 @@ impl Shell {
         }
 
         Some(Ok(self.executor.last_exit_code()))
+    }
+
+    fn execute_winuxsh_simple_ast(
+        &mut self,
+        ast: &Ast,
+    ) -> Option<Result<i32, rubash::executor::ExecuteError>> {
+        if !ast.commands.iter().any(is_winuxsh_builtin_command) {
+            return None;
+        }
+        if !ast.commands.iter().all(is_plain_simple_command) {
+            return None;
+        }
+
+        let mut code = 0;
+        for command in &ast.commands {
+            if let Some(next_code) = self.execute_winuxsh_builtin_command(command) {
+                code = next_code;
+                self.sync_process_cwd_from_executor_pwd();
+                self.sync_process_path_from_executor_path();
+                continue;
+            }
+
+            match self.executor.execute_command(command) {
+                Ok(()) => {
+                    self.sync_process_cwd_from_executor_pwd();
+                    self.sync_process_path_from_executor_path();
+                    code = self.executor.last_exit_code();
+                }
+                Err(rubash::executor::ExecuteError::ExitCode(exit_code)) => {
+                    return Some(Ok(exit_code));
+                }
+                Err(rubash::executor::ExecuteError::Return(return_code)) => {
+                    return Some(Ok(return_code));
+                }
+                Err(err) => return Some(Err(err)),
+            }
+        }
+
+        Some(Ok(code))
+    }
+
+    fn execute_winuxsh_builtin_command(&mut self, command: &rubash::parser::CommandNode) -> Option<i32> {
+        let (name, args) = winuxsh_builtin_words(command)?;
+        match name {
+            "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
+            "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
+            "source" => Some(self.execute_source_builtin(args)),
+            _ => None,
+        }
+    }
+
+    fn execute_source_builtin(&mut self, args: &[String]) -> i32 {
+        let mut args = args.iter();
+        let Some(first) = args.next() else {
+            eprintln!("winuxsh: source: filename argument required");
+            return 2;
+        };
+        let file = if first == "--" {
+            let Some(next) = args.next() else {
+                eprintln!("winuxsh: source: filename argument required");
+                return 2;
+            };
+            next
+        } else {
+            first
+        };
+
+        let Some(path) = self.resolve_source_file(file) else {
+            eprintln!("winuxsh: source: {}: No such file or directory", file);
+            return 1;
+        };
+        let script = match std::fs::read_to_string(&path) {
+            Ok(script) => script,
+            Err(err) => {
+                eprintln!("winuxsh: source: {}: {}", path.display(), err);
+                return 1;
+            }
+        };
+
+        let (script, compat_code) = self.apply_source_compat_builtins(&script);
+
+        match self.execute_script(&script) {
+            Ok(code) => {
+                self.sync_alias_mirror_from_script(&script, code);
+                if code == 0 {
+                    compat_code
+                } else {
+                    code
+                }
+            }
+            Err(err) => {
+                eprintln!("winuxsh: source: {}: {}", path.display(), err);
+                1
+            }
+        }
+    }
+
+    fn resolve_source_file(&self, file: &str) -> Option<PathBuf> {
+        let expanded = expand_source_path(file, &self.home_dir);
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        let path = resolve_shell_path_argument(pwd, &expanded);
+        path.is_file().then_some(path)
+    }
+
+    fn apply_source_compat_builtins(&mut self, script: &str) -> (String, i32) {
+        let mut sanitized = String::with_capacity(script.len());
+        let mut compat_code = 0;
+
+        for line in script.lines() {
+            if let Some(code) = self.execute_source_compat_builtin_line(line) {
+                if code != 0 {
+                    compat_code = code;
+                }
+                sanitized.push_str(":");
+            } else {
+                sanitized.push_str(line);
+            }
+            sanitized.push('\n');
+        }
+
+        (sanitized, compat_code)
+    }
+
+    fn execute_source_compat_builtin_line(&mut self, line: &str) -> Option<i32> {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+
+        let line = line.split_once('#').map(|(before, _)| before).unwrap_or(line);
+        let mut words = line.split_whitespace();
+        let command = words.next()?;
+        let command = if command == "builtin" {
+            words.next()?
+        } else {
+            command
+        };
+        let enable = match command {
+            "setopt" => true,
+            "unsetopt" => false,
+            _ => return None,
+        };
+        let args = words.map(str::to_string).collect::<Vec<_>>();
+        Some(self.execute_zsh_option_builtin(enable, &args))
+    }
+
+    fn execute_zsh_option_builtin(&mut self, enable: bool, args: &[String]) -> i32 {
+        if args.is_empty() {
+            self.print_zsh_options();
+            return 0;
+        }
+
+        let mut code = 0;
+        let mut parse_options = true;
+        for arg in args {
+            if parse_options && arg == "--" {
+                parse_options = false;
+                continue;
+            }
+            if parse_options && arg.starts_with('-') {
+                match arg.as_str() {
+                    "-m" | "-o" => continue,
+                    _ => {
+                        eprintln!("winuxsh: {}: unsupported option", if enable { "setopt" } else { "unsetopt" });
+                        code = 1;
+                        continue;
+                    }
+                }
+            }
+
+            let Some((option, option_enable)) = resolve_zsh_option_arg(arg, enable) else {
+                eprintln!("winuxsh: {}: no such option: {}", if enable { "setopt" } else { "unsetopt" }, arg);
+                code = 1;
+                continue;
+            };
+            self.apply_zsh_option(option, option_enable);
+        }
+
+        code
+    }
+
+    fn apply_zsh_option(&mut self, option: &'static str, enable: bool) {
+        if enable {
+            self.zsh_options.insert(option.to_string());
+        } else {
+            self.zsh_options.remove(option);
+        }
+
+        match option {
+            "hist_ignore_space" => {
+                self.history_ignore_space_prefixed = enable;
+            }
+            "hist_ignore_dups" => {
+                self.executor.set_env(
+                    "WINUXSH_HIST_IGNORE_DUPS",
+                    if enable { "1" } else { "0" },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn print_zsh_options(&self) {
+        let mut options: Vec<_> = self.zsh_options.iter().map(String::as_str).collect();
+        options.sort_unstable();
+        for option in options {
+            println!("{}", option);
+        }
     }
 }
 
@@ -1215,6 +1447,14 @@ fn is_host_synced_simple_sequence(ast: &Ast) -> bool {
 }
 
 fn is_host_synced_simple_command(command: &rubash::parser::CommandNode) -> bool {
+    is_plain_simple_command(command)
+        && !command
+            .words
+            .first()
+            .is_some_and(|word| word == "set" || word == "trap")
+}
+
+fn is_plain_simple_command(command: &rubash::parser::CommandNode) -> bool {
     command.pipe.is_none()
         && !command.background
         && command.and_or.is_none()
@@ -1237,10 +1477,115 @@ fn is_host_synced_simple_command(command: &rubash::parser::CommandNode) -> bool 
         && command.function_command.is_none()
         && command.brace_group.is_none()
         && command.coproc_command.is_none()
-        && !command
-            .words
-            .first()
-            .is_some_and(|word| word == "set" || word == "trap")
+}
+
+fn is_winuxsh_builtin_command(command: &rubash::parser::CommandNode) -> bool {
+    winuxsh_builtin_words(command).is_some()
+}
+
+fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str, &[String])> {
+    let words = command.words.as_slice();
+    let (name, args) = match words {
+        [name, args @ ..] => (name.as_str(), args),
+        [] => return None,
+    };
+    if name == "builtin" {
+        match args {
+            [builtin_name, builtin_args @ ..] => {
+                return winuxsh_builtin_name(builtin_name).map(|name| (name, builtin_args));
+            }
+            [] => return None,
+        }
+    }
+    winuxsh_builtin_name(name).map(|name| (name, args))
+}
+
+fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
+    match name {
+        "." | "source" => Some("source"),
+        "setopt" => Some("setopt"),
+        "unsetopt" => Some("unsetopt"),
+        _ => None,
+    }
+}
+
+fn resolve_zsh_option_arg(name: &str, enable: bool) -> Option<(&'static str, bool)> {
+    let key = zsh_option_key(name);
+    if let Some(stripped) = key.strip_prefix("no") {
+        if let Some(option) = canonical_zsh_option(stripped) {
+            return Some((option, !enable));
+        }
+    }
+    canonical_zsh_option(&key).map(|option| (option, enable))
+}
+
+fn zsh_option_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn canonical_zsh_option(key: &str) -> Option<&'static str> {
+    match key {
+        "appendhistory" => Some("append_history"),
+        "autocd" => Some("auto_cd"),
+        "autopushd" => Some("auto_pushd"),
+        "arithexpand" | "arithsubst" => Some("arith_expand"),
+        "beep" => Some("beep"),
+        "braceexpand" => Some("brace_expand"),
+        "commandsubst" => Some("command_subst"),
+        "completealiases" => Some("complete_aliases"),
+        "extendedglob" => Some("extended_glob"),
+        "globdots" => Some("glob_dots"),
+        "histfindnodups" => Some("hist_find_no_dups"),
+        "histignorealldups" => Some("hist_ignore_all_dups"),
+        "histignoredups" => Some("hist_ignore_dups"),
+        "histignorespace" => Some("hist_ignore_space"),
+        "histreduceblanks" => Some("hist_reduce_blanks"),
+        "histsavenodups" => Some("hist_save_no_dups"),
+        "histverify" => Some("hist_verify"),
+        "incappendhistory" => Some("inc_append_history"),
+        "interactivecomments" => Some("interactive_comments"),
+        "monitor" => Some("monitor"),
+        "nomatch" => Some("nomatch"),
+        "nullglob" => Some("null_glob"),
+        "promptpercent" => Some("prompt_percent"),
+        "promptsubst" => Some("prompt_subst"),
+        "pushdignoredups" => Some("pushd_ignore_dups"),
+        "sharehistory" => Some("share_history"),
+        "tildeexpand" => Some("tilde_expand"),
+        "variableexpand" => Some("variable_expand"),
+        _ => None,
+    }
+}
+
+fn expand_source_path(path: &str, home_dir: &Path) -> String {
+    if path == "~" {
+        return host_path_to_shell_path(&home_dir.to_string_lossy());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!(
+            "{}/{}",
+            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
+            rest
+        );
+    }
+    if let Some(rest) = path.strip_prefix("$HOME/") {
+        return format!(
+            "{}/{}",
+            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
+            rest
+        );
+    }
+    if let Some(rest) = path.strip_prefix("${HOME}/") {
+        return format!(
+            "{}/{}",
+            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
+            rest
+        );
+    }
+    path.to_string()
 }
 
 fn is_cd_command(command: &rubash::parser::CommandNode) -> bool {
@@ -1741,6 +2086,13 @@ fn is_forbidden_dotenv_key(key: &str) -> bool {
     )
 }
 
+fn shell_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
 fn default_last_working_dir_cache_path(home_dir: &Path) -> PathBuf {
     let mut file_name = "last-working-dir".to_string();
     if let Ok(ssh_user) = std::env::var("SSH_USER") {
@@ -1894,6 +2246,52 @@ fn shell_path_to_host_path(value: &str) -> String {
     value.to_string()
 }
 
+fn sync_executor_path_from_process_path(executor: &mut Executor) {
+    if let Ok(path) = std::env::var("PATH") {
+        executor.set_env("PATH", &path);
+    }
+}
+
+fn process_path_from_shell_path_list(value: &str) -> String {
+    if !cfg!(windows) {
+        return value.to_string();
+    }
+
+    split_shell_path_list(value)
+        .into_iter()
+        .map(|entry| shell_path_entry_to_process_path(&entry))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn split_shell_path_list(value: &str) -> Vec<String> {
+    if value.contains(';') {
+        return value
+            .split(';')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+
+    if cfg!(windows) && is_windows_drive_path(value) {
+        return vec![value.to_string()];
+    }
+
+    value
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn shell_path_entry_to_process_path(entry: &str) -> String {
+    if cfg!(windows) {
+        shell_path_to_host_path(entry).replace('/', "\\")
+    } else {
+        entry.to_string()
+    }
+}
+
 fn host_path_to_shell_path(value: &str) -> String {
     if cfg!(windows) {
         return value.replace('\\', "/");
@@ -1977,6 +2375,57 @@ alias hello='echo from-alias'
         assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn zsh_setopt_lines_are_accepted_in_startup_rc() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-setopt-startup");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            r#"
+plugins=(
+    git
+    completion
+)
+setopt hist_ignore_dups
+setopt hist_ignore_space prompt_subst prompt_percent brace_expand tilde_expand variable_expand command_subst arith_expand monitor
+unsetopt prompt_percent
+export AFTER_SETOPT=ok
+"#,
+        )
+        .unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        assert_eq!(shell.executor.get_env("AFTER_SETOPT"), Some("ok"));
+        assert!(shell.history_ignore_space_prefixed);
+        assert_eq!(shell.executor.get_env("WINUXSH_HIST_IGNORE_DUPS"), Some("1"));
+        assert!(shell.zsh_options.contains("hist_ignore_space"));
+        assert!(shell.zsh_options.contains("prompt_subst"));
+        assert!(!shell.zsh_options.contains("prompt_percent"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn zsh_setopt_no_prefix_flips_option_state() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let mut shell = test_shell(HookConfig::default());
+
+        assert_eq!(shell.execute_script("setopt hist_ignore_space").unwrap(), 0);
+        assert!(shell.history_ignore_space_prefixed);
+        assert!(shell.zsh_options.contains("hist_ignore_space"));
+
+        assert_eq!(shell.execute_script("setopt no_hist_ignore_space").unwrap(), 0);
+        assert!(!shell.history_ignore_space_prefixed);
+        assert!(!shell.zsh_options.contains("hist_ignore_space"));
     }
 
     #[test]
@@ -2085,6 +2534,21 @@ alias hello='echo from-alias'
             );
         } else {
             assert_eq!(host_path_to_shell_path("/home/me/project"), "/home/me/project");
+        }
+    }
+
+    #[test]
+    fn process_path_from_shell_path_list_converts_msys_drive_entries() {
+        if cfg!(windows) {
+            assert_eq!(
+                process_path_from_shell_path_list("/c/Users/me/bin;C:/Windows/System32"),
+                r"C:\Users\me\bin;C:\Windows\System32"
+            );
+        } else {
+            assert_eq!(
+                process_path_from_shell_path_list("/home/me/bin:/usr/bin"),
+                "/home/me/bin:/usr/bin"
+            );
         }
     }
 
@@ -2622,6 +3086,7 @@ BACKTICK_VALUE=`whoami`
             native_plugins: NativePluginConfig::default(),
             hooks,
             aliases: HashMap::new(),
+            zsh_options: HashSet::new(),
             zoxide_last_tracked_dir: None,
             last_working_dir_cache_path: PathBuf::from(".winuxsh/cache/last-working-dir"),
             last_working_dir_restored: false,

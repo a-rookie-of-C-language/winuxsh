@@ -2,7 +2,7 @@
 // Integrates command, path, and variable completion
 
 use std::path::PathBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use reedline::{Completer, Span, Suggestion};
 use crate::completion::{
@@ -18,6 +18,7 @@ use crate::completion::external::{
 pub struct CompletionState {
     pub current_dir: PathBuf,
     pub env_vars: HashMap<String, String>,
+    pub aliases: HashSet<String>,
     pub behavior: CompletionBehavior,
     /// Registered completion plugins (e.g. command completion, external tool completion)
     pub plugins: Vec<Arc<dyn CompletionPlugin>>,
@@ -28,6 +29,7 @@ impl CompletionState {
         Self {
             current_dir,
             env_vars: HashMap::new(),
+            aliases: HashSet::new(),
             behavior: CompletionBehavior::default(),
             plugins: Vec::new(),
         }
@@ -92,10 +94,11 @@ impl WinuxshCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, behavior, plugins) = if let Ok(state) = self.state.lock() {
+        let (current_dir, env_vars, aliases, behavior, plugins) = if let Ok(state) = self.state.lock() {
             (
                 state.current_dir.clone(),
                 state.env_vars.clone(),
+                state.aliases.clone(),
                 state.behavior,
                 state.plugins.clone(),
             )
@@ -117,6 +120,7 @@ impl WinuxshCompleter {
         // containing `winuxsh/` should offer `winuxsh/` first, instead of
         // only showing PATH executables like `winver` or `winrm`.
         let cwd_dir_suggestions = self.cwd_directory_suggestions_at_command_position(&context);
+        let alias_suggestions = self.alias_suggestions_at_command_position(&context, &aliases);
 
         // Try each plugin in order; only the first non-None result is used
         for plugin in &plugins {
@@ -131,6 +135,11 @@ impl WinuxshCompleter {
         // `cd winuxsh`/open `winuxsh/` without typing `./` first.
         if !cwd_dir_suggestions.is_empty() {
             let mut combined = cwd_dir_suggestions;
+            combined.extend(alias_suggestions.clone());
+            combined.extend(all_suggestions);
+            all_suggestions = combined;
+        } else if !alias_suggestions.is_empty() {
+            let mut combined = alias_suggestions;
             combined.extend(all_suggestions);
             all_suggestions = combined;
         }
@@ -226,6 +235,47 @@ impl WinuxshCompleter {
             })
             .collect()
     }
+
+    fn alias_suggestions_at_command_position(
+        &self,
+        context: &CompletionContext,
+        aliases: &HashSet<String>,
+    ) -> Vec<Suggestion> {
+        if !context.is_command_position() {
+            return Vec::new();
+        }
+        let Some(word) = context.get_current_word() else {
+            return Vec::new();
+        };
+        if word.contains('/') || word.contains('\\') || word.starts_with('.') {
+            return Vec::new();
+        }
+
+        let (span_start, span_end) = context
+            .current_word_span()
+            .unwrap_or((context.cursor_pos, context.cursor_pos));
+        let mut candidates: Vec<_> = aliases
+            .iter()
+            .filter(|alias| context.behavior.matches(alias, &word))
+            .cloned()
+            .collect();
+        candidates.sort();
+
+        candidates
+            .into_iter()
+            .map(|candidate| Suggestion {
+                value: candidate,
+                description: Some("alias".to_string()),
+                style: None,
+                extra: None,
+                span: Span {
+                    start: span_start,
+                    end: span_end,
+                },
+                append_whitespace: true,
+            })
+            .collect()
+    }
     fn format_completions(
         &self,
         result: CompletionResult,
@@ -251,12 +301,20 @@ impl WinuxshCompleter {
                     start: span_start,
                     end: span_end,
                 },
-                append_whitespace: true,
+                append_whitespace: should_append_completion_whitespace(completion),
             });
         }
 
         suggestions
     }
+}
+
+fn should_append_completion_whitespace(completion: &str) -> bool {
+    let value = completion
+        .trim_end_matches('"')
+        .trim_end_matches('\'')
+        .trim_end();
+    !(value.ends_with('/') || value.ends_with('\\'))
 }
 
 impl Completer for WinuxshCompleter {

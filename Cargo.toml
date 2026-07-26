@@ -1,6 +1,6 @@
 [package]
 name = "winuxsh"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
@@ -12,7 +12,7 @@ repository = "https://github.com/unixwin/winuxsh"
 
 [dependencies]
 winuxsh-runtime = { path = "crates/winuxsh-runtime" }
-rubash = { git = "https://github.com/unixwin/rubash.git", rev = "e8b5b7a037754579d13b29573e7a4d6cdfba7a98" }
+rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"

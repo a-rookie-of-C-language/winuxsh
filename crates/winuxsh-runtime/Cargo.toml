@@ -1,13 +1,13 @@
 [package]
 name = "winuxsh-runtime"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
 description = "Runtime crate for winuxsh: rubash-backed shell REPL on Windows"
 
 [dependencies]
-rubash = { git = "https://github.com/unixwin/rubash.git", rev = "e8b5b7a037754579d13b29573e7a4d6cdfba7a98" }
+rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 reedline = "0.33"
 anyhow = "1.0"
 thiserror = "1.0"
