@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later"
 description = "Runtime crate for winuxsh: rubash-backed shell REPL on Windows"
 
 [dependencies]
-rubash = { git = "https://github.com/unixwin/rubash.git", rev = "8caab03257d9902f2d5215fe9b72f05052b204a4" }
+rubash = { git = "https://github.com/unixwin/rubash.git", rev = "e8b5b7a037754579d13b29573e7a4d6cdfba7a98" }
 reedline = "0.33"
 anyhow = "1.0"
 thiserror = "1.0"

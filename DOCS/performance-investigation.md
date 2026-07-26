@@ -55,6 +55,10 @@ Measure-Command { bash .tmp/perf-nested-loops.sh }
   avoids process-env sync for function call state, conditionally syncs
   diagnostic line numbers, and reuses function body ASTs across calls. It was
   merged as `8caab03257d9902f2d5215fe9b72f05052b204a4`.
+- `rubash` PR #12 moved Bash call-stack arrays out of the function-call hot
+  path and materializes them only when read. It also adds a narrow fast path
+  for common assignment RHS forms like `$1` and `$((x + y))`. It was merged as
+  `e8b5b7a037754579d13b29573e7a4d6cdfba7a98`.
 
 ## 2026-07-26 benchmark snapshot
 
@@ -104,6 +108,35 @@ rubash-executor dominated, so the next profiling targets should be
 `expand_embedded_parameters`, command/function dispatch overhead that remains
 after PR #11, arithmetic evaluation, and any Windows process/environment calls
 still reached from hot shell loops.
+
+## 2026-07-26 call-stack array follow-up
+
+After `rubash` PR #12, direct `rubash` release medians improved further on the
+same 80x80 scripts:
+
+| Script | rubash baseline ms | rubash patched ms | Change |
+| --- | ---: | ---: | ---: |
+| `loop.sh` | 346.09 | 347.59 | +0.4% |
+| `arith.sh` | 401.66 | 386.89 | -3.7% |
+| `function-noop.sh` | 523.39 | 430.38 | -17.8% |
+| `function-args-arith.sh` | 824.77 | 697.68 | -15.4% |
+
+After pinning `winuxsh` to
+`rubash` `e8b5b7a037754579d13b29573e7a4d6cdfba7a98`, release medians are:
+
+| Script | Bash ms | winuxsh release ms | Median ratio |
+| --- | ---: | ---: | ---: |
+| `loop.sh` | 119.17 | 402.54 | 3.4x |
+| `arith.sh` | 139.50 | 494.38 | 3.5x |
+| `function-noop.sh` | 157.77 | 535.09 | 3.4x |
+| `function-args-arith.sh` | 209.26 | 804.35 | 3.8x |
+
+Compared with the PR #11 `winuxsh` snapshot, this reduces median wall time by
+about 28% on loop-only, 36% on arithmetic-heavy, 39% on function-noop, and 36%
+on function-plus-args-plus-arithmetic. The remaining gap is narrower but still
+large enough to keep issue #18 open; the next useful pass should use a real
+sampling profiler or narrowly scoped internal timers around command dispatch
+and arithmetic evaluation.
 
 ## Follow-up
 
