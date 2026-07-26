@@ -48,6 +48,13 @@ Measure-Command { bash .tmp/perf-nested-loops.sh }
 - `rubash` PR #10 moved repeated loop body/condition AST construction out of
   per-iteration hot paths and was merged as
   `8026e3bfa81f694646f13786242d8d8ebca79ab4`.
+- `rubash` PR #11 targeted the larger remaining hot path: per-command
+  bookkeeping in `Executor::execute_command`. Windows WPR and `samply` were
+  blocked locally, so temporary internal timing was used and removed before the
+  PR. The patch avoids unconditional `BASH_COMMAND` text construction,
+  avoids process-env sync for function call state, conditionally syncs
+  diagnostic line numbers, and reuses function body ASTs across calls. It was
+  merged as `8caab03257d9902f2d5215fe9b72f05052b204a4`.
 
 ## 2026-07-26 benchmark snapshot
 
@@ -68,9 +75,35 @@ function-plus-args-plus-arithmetic case improving from roughly 1655-1710 ms to
 1498-1550 ms. That confirms the merged `rubash` optimization helps, but the
 remaining gap is still large enough to keep issue #18 open for more profiling.
 
-Next profiling targets should be `Executor::execute_ast`,
-`expand_embedded_parameters`, shell function dispatch, and arithmetic evaluation
-before changing `winuxsh` host code.
+## 2026-07-26 command bookkeeping follow-up
+
+After `rubash` PR #11, direct `rubash` release medians improved materially on
+the same 80x80 scripts:
+
+| Script | rubash baseline ms | rubash patched ms | Change |
+| --- | ---: | ---: | ---: |
+| `loop.sh` | 448.28 | 330.83 | -26.2% |
+| `arith.sh` | 519.30 | 428.06 | -17.6% |
+| `function-noop.sh` | 732.08 | 545.44 | -25.5% |
+| `function-args-arith.sh` | 1126.39 | 827.02 | -26.6% |
+
+After pinning `winuxsh` to
+`rubash` `8caab03257d9902f2d5215fe9b72f05052b204a4`, release medians are:
+
+| Script | Bash ms | winuxsh release ms | Median ratio |
+| --- | ---: | ---: | ---: |
+| `loop.sh` | 167.84 | 560.63 | 3.3x |
+| `arith.sh` | 177.31 | 771.40 | 4.4x |
+| `function-noop.sh` | 237.48 | 879.30 | 3.7x |
+| `function-args-arith.sh` | 276.67 | 1260.52 | 4.6x |
+
+Compared with the prior `winuxsh` snapshot, the new pin reduces median wall
+time by about 17% on loop-only, 6% on arithmetic-heavy, 21% on function-noop,
+and 23% on function-plus-args-plus-arithmetic. The remaining gap still appears
+rubash-executor dominated, so the next profiling targets should be
+`expand_embedded_parameters`, command/function dispatch overhead that remains
+after PR #11, arithmetic evaluation, and any Windows process/environment calls
+still reached from hot shell loops.
 
 ## Follow-up
 
