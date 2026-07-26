@@ -36,6 +36,8 @@ case "$1" in
     echo
     echo "Creates command links next to winuxcmd.exe so ls/cat/grep/etc"
     echo "resolve through PATH when winuxsh starts."
+    echo "Modern WinuxCmd builds use WPM for link discovery; older builds"
+    echo "fall back to this script's bundled command list."
     echo
     echo "Options:"
     echo "  --remove    Remove generated command links"
@@ -50,6 +52,15 @@ case "$1" in
     exit 1
     ;;
 esac
+
+if [ "$link_flag" = "" ] && "$winuxcmd_exe" wpm version >/dev/null 2>&1; then
+  if [ "$mode" = "remove" ]; then
+    "$winuxcmd_exe" wpm links remove --root "$winuxcmd_dir"
+  else
+    "$winuxcmd_exe" wpm links rebuild --root "$winuxcmd_dir" --force
+  fi
+  exit $?
+fi
 
 commands="
 arch b2sum base32 base64 basename basenc cal cat

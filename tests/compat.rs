@@ -112,6 +112,10 @@ macro_rules! compat_test {
 compat_test!(var_expansion, "var_expansion");
 compat_test!(command_substitution, "command_substitution");
 compat_test!(
+    command_substitution_quoted_newline,
+    "command_substitution_quoted_newline"
+);
+compat_test!(
     command_substitution_function_pipeline,
     "command_substitution_function_pipeline"
 );

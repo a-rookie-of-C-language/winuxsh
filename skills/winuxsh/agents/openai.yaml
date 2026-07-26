@@ -1,0 +1,7 @@
+interface:
+  display_name: "Winuxsh"
+  short_description: "Use Winuxsh as a Windows-native Bash/sh shell"
+  default_prompt: "Use $winuxsh to run Bash/sh commands through Winuxsh, discover WinuxCmd tools through WPM first and executable inspection second, and keep configuration guidance minimal unless asked."
+
+policy:
+  allow_implicit_invocation: true

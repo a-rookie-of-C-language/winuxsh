@@ -35,6 +35,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
     if let Err(e) = run(&args) {
+        if is_broken_pipe_error(&e) {
+            return ExitCode::from(1);
+        }
         eprintln!("winuxsh: {}", e);
         return ExitCode::from(1);
     }
@@ -109,6 +112,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("-c requires an argument");
             }
             let mut shell = winuxsh_runtime::Shell::new()?;
+            shell.executor.inherit_process_stdin();
+            if let Some(command_name) = args.get(3) {
+                shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+                shell.executor.set_positional_params(args[4..].to_vec());
+            }
             let code = shell.execute_script(&args[2])?;
             if code != 0 {
                 std::process::exit(code);
@@ -122,8 +130,14 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("unknown argument '{}' (not a script file)", first);
             }
             let mut shell = winuxsh_runtime::Shell::new()?;
+            shell.executor.set_env("__RUBASH_SCRIPT_NAME", first);
+            shell.executor.inherit_process_stdin();
+            shell.executor.set_positional_params(args[2..].to_vec());
             let content = std::fs::read_to_string(&script)?;
-            shell.execute_script(&content)?;
+            let code = shell.execute_script(&content)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
             Ok(())
         }
     }
@@ -379,5 +393,19 @@ fn print_version() {
 }
 
 fn rubash_revision() -> &'static str {
-    "f451e16937437d49a2575fbc197345a498d68576"
+    "df626e2905ce1337849db6aff5405f14db168a9e"
+}
+
+fn is_broken_pipe_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(is_broken_pipe_io_error)
+            || cause.to_string().contains("os error 232")
+            || cause.to_string().contains("管道正在被关闭")
+    })
+}
+
+fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
 }

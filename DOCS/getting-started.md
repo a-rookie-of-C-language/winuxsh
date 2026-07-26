@@ -127,7 +127,10 @@ matching = "prefix"
 
 [winuxcmd]
 # auto-detected from PATH; override only if needed
+# enabled = true
 # path = "D:/tools/winuxcmd/winuxcmd.exe"
+# Set enabled = false if you prefer uutils, GNU, BusyBox, or another
+# coreutils directory already on PATH.
 ```
 
 ## 6b. Segment-based prompt (experimental)
