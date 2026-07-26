@@ -453,6 +453,7 @@ struct CompletionsToml {
 
 #[derive(Debug, Deserialize)]
 struct WinuxCmdToml {
+    enabled: Option<bool>,
     path: Option<String>,
 }
 
@@ -589,6 +590,7 @@ pub struct FullConfig {
     pub aliases: HashMap<String, String>,
     pub completion_dirs: Vec<PathBuf>,
     pub completion_behavior: CompletionBehavior,
+    pub winuxcmd_enabled: bool,
     pub winuxcmd_path: Option<PathBuf>,
     pub hooks: HookConfig,
     pub zsh: ZshConfig,
@@ -609,6 +611,7 @@ impl Default for FullConfig {
             aliases: HashMap::new(),
             completion_dirs: Vec::new(),
             completion_behavior: CompletionBehavior::default(),
+            winuxcmd_enabled: true,
             winuxcmd_path: None,
             hooks: HookConfig::default(), 
             zsh: ZshConfig::default(), 
@@ -708,6 +711,11 @@ fn build_config(parsed: WinshrcToml) -> FullConfig {
             .as_ref()
             .map(build_completion_behavior)
             .unwrap_or_default(),
+        winuxcmd_enabled: parsed
+            .winuxcmd
+            .as_ref()
+            .and_then(|w| w.enabled)
+            .unwrap_or(true),
         winuxcmd_path: parsed.winuxcmd.and_then(|w| w.path).map(PathBuf::from),
         hooks: parsed.hooks.map(build_hook_config).unwrap_or_default(),
         zsh,
@@ -1180,6 +1188,23 @@ chpwd = ["echo directory changed"]
         assert_eq!(config.hooks.precmd, vec!["echo before prompt"]);
         assert_eq!(config.hooks.preexec, vec!["echo before command"]);
         assert_eq!(config.hooks.chpwd, vec!["echo directory changed"]);
+    }
+
+    #[test]
+    fn parses_winuxcmd_enabled_and_path() {
+        let config = parse_config(
+            r#"
+[winuxcmd]
+enabled = false
+path = "D:/tools/winuxcmd/winuxcmd.exe"
+"#,
+        );
+
+        assert!(!config.winuxcmd_enabled);
+        assert_eq!(
+            config.winuxcmd_path,
+            Some(PathBuf::from("D:/tools/winuxcmd/winuxcmd.exe"))
+        );
     }
 
     #[test]

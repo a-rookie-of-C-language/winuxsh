@@ -83,8 +83,12 @@ impl Shell {
         };
 
         // 3. WinuxCmd PATH injection (best-effort), honoring config override.
-        if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref()) {
-            log::warn!("winuxcmd not on PATH: {}", e);
+        if config.winuxcmd_enabled {
+            if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref()) {
+                log::debug!("winuxcmd not on PATH: {}", e);
+            }
+        } else {
+            log::debug!("winuxcmd PATH injection disabled by config");
         }
 
         // 4. Build rubash Executor after PATH injection.
@@ -371,7 +375,9 @@ impl Shell {
                     127
                 }
                 Err(e) => {
-                    eprintln!("winuxsh: {}", e);
+                    if !is_broken_pipe_execute_error(&e) {
+                        eprintln!("winuxsh: {}", e);
+                    }
                     1
                 }
             }
@@ -389,7 +395,9 @@ impl Shell {
                     127
                 }
                 Err(e) => {
-                    eprintln!("winuxsh: {}", e);
+                    if !is_broken_pipe_execute_error(&e) {
+                        eprintln!("winuxsh: {}", e);
+                    }
                     1
                 }
             }
@@ -1028,7 +1036,9 @@ impl Shell {
                 127
             }
             Err(e) => {
-                eprintln!("winuxsh: {}", e);
+                if !is_broken_pipe_execute_error(&e) {
+                    eprintln!("winuxsh: {}", e);
+                }
                 1
             }
         };
@@ -1567,6 +1577,20 @@ fn is_package_search_candidate(command: &str) -> bool {
         && !command.contains('/')
         && !command.contains('\\')
         && !command.contains(':')
+}
+
+fn is_broken_pipe_execute_error(error: &rubash::executor::ExecuteError) -> bool {
+    match error {
+        rubash::executor::ExecuteError::IoError(error) => is_broken_pipe_io_error(error),
+        _ => {
+            let message = error.to_string();
+            message.contains("os error 232") || message.contains("管道正在被关闭")
+        }
+    }
+}
+
+fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
 }
 
 fn parse_dotenv_assignments(content: &str) -> Vec<(String, String)> {

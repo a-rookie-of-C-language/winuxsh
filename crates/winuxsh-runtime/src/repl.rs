@@ -1,6 +1,6 @@
 //! Reedline REPL loop
 
-use std::borrow::Cow;
+use std::{borrow::Cow, io::Write};
 
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
@@ -713,6 +713,7 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                 } else {
                     let _ = shell.execute_interactive_line(script.trim());
                 }
+                flush_repl_output();
             }
             Ok(Signal::CtrlD) => {
                 println!();
@@ -735,6 +736,11 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn flush_repl_output() {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
 }
 
 #[cfg(test)]
@@ -824,6 +830,13 @@ mod tests {
         assert!(!is_repl_input_complete("for item in a b; do"));
         assert!(is_repl_input_complete(
             "for item in a b; do\n  echo $item\ndone"
+        ));
+
+        assert!(is_repl_input_complete(
+            "for ((i=0; i<height; i++)); do\n  echo $i\ndone"
+        ));
+        assert!(!is_repl_input_complete(
+            "for ((i=0; i<height; i++); do\n  echo $i\ndone"
         ));
 
         assert!(!is_repl_input_complete("while true; do"));

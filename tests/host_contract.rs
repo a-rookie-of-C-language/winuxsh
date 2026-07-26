@@ -3,7 +3,7 @@
 //! These tests intentionally exercise the built binary instead of internal
 //! helpers: this is the contract humans and agents rely on.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -103,9 +103,16 @@ fn native_backslash_drive_paths_work_for_winuxcmd_and_cd() {
     std::fs::create_dir_all(&start).unwrap();
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("marker.txt"), "ok").unwrap();
+    let winuxcmd = real_winuxcmd_for_test()
+        .unwrap_or_else(|| panic!("real winuxcmd.exe with command links is required"));
 
     let target_native_path = native_path(&target);
-    let output = run_winuxsh(&format!("ls {}", target_native_path), &start, &home, &[]);
+    let output = run_winuxsh(
+        &format!("ls {}", target_native_path),
+        &start,
+        &home,
+        &[("WINUXCMD_PATH", native_path(&winuxcmd))],
+    );
     assert_success(&output, "native backslash path ls");
     let stdout = stdout_lines(&output);
     assert!(
@@ -298,6 +305,202 @@ fn command_mode_grep_capture_stays_plain() {
     let _ = std::fs::remove_dir_all(temp);
 }
 
+#[test]
+fn command_mode_pipeline_first_stage_reads_host_stdin() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-pipeline-stdin");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg("-c")
+        .arg("grep alpha | cat")
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"alpha\nbeta\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "command mode host stdin pipeline");
+    assert_eq!(normalize_text(&output.stdout), "alpha");
+    assert_eq!(normalize_text(&output.stderr), "");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn script_file_args_populate_positional_parameters() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-script-args");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let script = start.join("args.sh");
+    std::fs::write(
+        &script,
+        "printf 'zero=%s n=%s one=%s all=%s\\n' \"$0\" \"$#\" \"$1\" \"$*\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(winuxsh_binary())
+        .arg(&script)
+        .arg("first")
+        .arg("second")
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .output()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+
+    assert_success(&output, "script args");
+    let stdout = normalize_text(&output.stdout);
+    assert!(stdout.contains("zero="), "{stdout}");
+    assert!(stdout.contains("n=2"), "{stdout}");
+    assert!(stdout.contains("one=first"), "{stdout}");
+    assert!(stdout.contains("all=first second"), "{stdout}");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn command_mode_accepts_base_prefixed_arithmetic_in_function_body() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-arithmetic-base");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        "f() { value=$((16#de)); printf '%s\\n' \"$value\"; }; f",
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "base-prefixed arithmetic");
+    assert_eq!(normalize_text(&output.stdout), "222");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn command_mode_parameter_pattern_removal_handles_escaped_quotes() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-param-pattern");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        r##"line='<rect x="0" fill="#fe0000"/>'; rest=${line#*fill=\"}; printf '%s\n' "${rest%%\"*}""##,
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "parameter pattern removal");
+    assert_eq!(normalize_text(&output.stdout), "#fe0000");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn command_mode_set_positional_splits_custom_ifs() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-custom-ifs");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        r#"line='a"b"c'; old=$IFS; IFS='"'; set -- $line; IFS=$old; printf 'n=%s one=%s two=%s three=%s\n' "$#" "$1" "$2" "$3""#,
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "custom IFS set --");
+    assert_eq!(normalize_text(&output.stdout), "n=3 one=a two=b three=c");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-broken-pipe");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg("-c")
+        .arg("i=0; while true; do echo line-$i; i=$((i+1)); done")
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut buffer = [0_u8; 32];
+    let _ = stdout.read(&mut buffer).unwrap_or(0);
+    drop(stdout);
+
+    let mut stderr = String::new();
+    if let Some(mut child_stderr) = child.stderr.take() {
+        child_stderr.read_to_string(&mut stderr).unwrap();
+    }
+    let _ = child.wait().unwrap();
+
+    assert!(
+        !stderr.contains("Broken pipe")
+            && !stderr.contains("os error 232")
+            && !stderr.contains("管道正在被关闭"),
+        "stderr should not contain scary broken pipe text: {stderr:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
 fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String)]) -> Output {
     let mut command = Command::new(winuxsh_binary());
     command
@@ -371,6 +574,64 @@ fn comparable_path(value: &str) -> String {
 
 fn shell_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn real_winuxcmd_for_test() -> Option<PathBuf> {
+    std::env::var_os("WINUXCMD_PATH")
+        .and_then(|path| resolve_winuxcmd_test_path(PathBuf::from(path)))
+        .or_else(|| {
+            let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()?
+                .to_path_buf();
+            [
+                repo_root.join("WinuxCmd/build-vs/winuxcmd.exe"),
+                repo_root.join("WinuxCmd/build-vs-release/winuxcmd.exe"),
+                repo_root.join("winuxsh/dist/winuxsh-v0.7.1-win-x64/winuxcmd/winuxcmd.exe"),
+                repo_root.join("winuxsh/dist/winuxsh-v0.7.0-win-x64/winuxcmd/winuxcmd.exe"),
+            ]
+            .into_iter()
+            .find(|path| winuxcmd_test_path_has_command_links(path))
+        })
+        .or_else(|| find_winuxcmd_on_path())
+}
+
+fn resolve_winuxcmd_test_path(path: PathBuf) -> Option<PathBuf> {
+    if path.is_dir() {
+        let exe = path.join("winuxcmd.exe");
+        return winuxcmd_test_path_has_command_links(&exe).then_some(exe);
+    }
+    winuxcmd_test_path_has_command_links(&path).then_some(path)
+}
+
+fn winuxcmd_test_path_has_command_links(path: &Path) -> bool {
+    if !path.is_file()
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("winuxcmd.exe"))
+    {
+        return false;
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    ["ls.exe", "cat.exe", "grep.exe", "ln.exe"]
+        .into_iter()
+        .all(|name| dir.join(name).is_file())
+}
+
+fn find_winuxcmd_on_path() -> Option<PathBuf> {
+    let output = Command::new("where.exe")
+        .arg("winuxcmd.exe")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| PathBuf::from(line.trim()))
+        .find(|path| winuxcmd_test_path_has_command_links(path))
 }
 
 fn native_path(path: &Path) -> String {

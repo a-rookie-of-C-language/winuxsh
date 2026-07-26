@@ -11,44 +11,100 @@ use anyhow::{anyhow, Result};
 
 /// Locate `winuxcmd.exe` by checking, in order:
 ///   1. `$WINUXCMD_PATH` env var (file or directory)
-///   2. `<exe_dir>/winuxcmd/winuxcmd.exe`
-///   3. `<exe_dir>/utils/winuxcmd/winuxcmd.exe`
-///   4. `winuxcmd.exe` reachable via current `PATH`
+///   2. `<exe_dir>/winuxcmd.exe`
+///   3. `<exe_dir>/winuxcmd/winuxcmd.exe`
+///   4. `<exe_dir>/utils/winuxcmd/winuxcmd.exe`
+///   5. `winuxcmd.exe` reachable via current `PATH`
 pub fn find_winuxcmd() -> Option<PathBuf> {
+    find_winuxcmd_with_report().found
+}
+
+#[derive(Debug)]
+struct WinuxCmdSearchReport {
+    found: Option<PathBuf>,
+    checked: Vec<String>,
+}
+
+fn find_winuxcmd_with_report() -> WinuxCmdSearchReport {
+    let override_path = std::env::var("WINUXCMD_PATH").ok().map(PathBuf::from);
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+
+    find_winuxcmd_with_report_from_sources(override_path.as_deref(), exe_dir.as_deref(), |checked| {
+        find_winuxcmd_on_path(checked)
+    })
+}
+
+fn find_winuxcmd_with_report_from_sources<F>(
+    override_path: Option<&Path>,
+    exe_dir: Option<&Path>,
+    path_lookup: F,
+) -> WinuxCmdSearchReport
+where
+    F: FnOnce(&mut Vec<String>) -> Option<PathBuf>,
+{
+    let mut checked = Vec::new();
+
     // 1. WINUXCMD_PATH override
-    if let Ok(p) = std::env::var("WINUXCMD_PATH") {
-        let path = PathBuf::from(&p);
-        if let Some(exe) = resolve_winuxcmd_override(&path) {
-            return Some(exe);
+    if let Some(path) = override_path {
+        checked.extend(override_search_descriptions(path));
+        if let Some(exe) = resolve_winuxcmd_override(path) {
+            return WinuxCmdSearchReport {
+                found: Some(exe),
+                checked,
+            };
         }
     }
 
-    // 2/3. Relative to current executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for rel in ["winuxcmd/winuxcmd.exe", "utils/winuxcmd/winuxcmd.exe"] {
-                let candidate = exe_dir.join(rel);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+    // 2/3/4. Relative to current executable
+    if let Some(exe_dir) = exe_dir {
+        for candidate in bundled_winuxcmd_candidates(exe_dir) {
+            checked.push(candidate.display().to_string());
+            if candidate.is_file() {
+                return WinuxCmdSearchReport {
+                    found: Some(candidate),
+                    checked,
+                };
             }
         }
     }
 
-    // 4. PATH lookup using `where.exe` on Windows
+    // 5. PATH lookup using `where.exe` on Windows
+    if let Some(exe) = path_lookup(&mut checked) {
+        return WinuxCmdSearchReport {
+            found: Some(exe),
+            checked,
+        };
+    }
+
+    WinuxCmdSearchReport {
+        found: None,
+        checked,
+    }
+}
+
+fn find_winuxcmd_on_path(checked: &mut Vec<String>) -> Option<PathBuf> {
     #[cfg(windows)]
     {
+        checked.push("PATH lookup via where.exe winuxcmd.exe".to_string());
         if let Ok(out) = Command::new("where.exe").arg("winuxcmd.exe").output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
                 if let Some(line) = text.lines().next() {
                     let p = PathBuf::from(line.trim());
+                    checked.push(p.display().to_string());
                     if p.is_file() {
                         return Some(p);
                     }
                 }
             }
         }
+    }
+
+    #[cfg(not(windows))]
+    {
+        checked.push("PATH lookup for winuxcmd.exe is only available on Windows".to_string());
     }
 
     None
@@ -67,16 +123,50 @@ pub fn ensure_on_path_with_override(override_path: Option<&Path>) -> Result<Path
     let exe = match override_path {
         Some(path) => resolve_winuxcmd_override(path).ok_or_else(|| {
             anyhow!(
-                "configured winuxcmd path '{}' does not point to winuxcmd.exe or a containing directory",
-                path.display()
+                "configured winuxcmd path '{}' does not point to winuxcmd.exe or a containing directory; checked: {}",
+                path.display(),
+                format_checked_paths(&override_search_descriptions(path))
             )
         })?,
-        None => find_winuxcmd().ok_or_else(|| {
-            anyhow!("winuxcmd.exe not found (looked in WINUXCMD_PATH, exe dir, and PATH)")
-        })?,
+        None => {
+            let report = find_winuxcmd_with_report();
+            report.found.ok_or_else(|| {
+                anyhow!(
+                    "winuxcmd.exe not found; checked: {}",
+                    format_checked_paths(&report.checked)
+                )
+            })?
+        }
     };
     auto_activate_bundled_winuxcmd(&exe);
     prepend_exe_dir_to_path(&exe)
+}
+
+fn bundled_winuxcmd_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    [
+        "winuxcmd.exe",
+        "winuxcmd/winuxcmd.exe",
+        "utils/winuxcmd/winuxcmd.exe",
+    ]
+    .into_iter()
+    .map(|rel| exe_dir.join(rel))
+    .collect()
+}
+
+fn override_search_descriptions(path: &Path) -> Vec<String> {
+    if path.is_dir() {
+        vec![path.join("winuxcmd.exe").display().to_string()]
+    } else {
+        vec![path.display().to_string()]
+    }
+}
+
+fn format_checked_paths(paths: &[String]) -> String {
+    if paths.is_empty() {
+        "(none)".to_string()
+    } else {
+        paths.join(", ")
+    }
 }
 
 fn resolve_winuxcmd_override(path: &Path) -> Option<PathBuf> {
@@ -292,6 +382,109 @@ mod tests {
         assert_eq!(resolve_winuxcmd_override(&dir), None);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bundled_candidates_check_sibling_exe_first() {
+        let exe_dir = PathBuf::from("bundle");
+        let candidates = bundled_winuxcmd_candidates(&exe_dir);
+
+        assert_eq!(candidates[0], exe_dir.join("winuxcmd.exe"));
+        assert_eq!(candidates[1], exe_dir.join("winuxcmd").join("winuxcmd.exe"));
+        assert_eq!(
+            candidates[2],
+            exe_dir.join("utils").join("winuxcmd").join("winuxcmd.exe")
+        );
+    }
+
+    #[test]
+    fn override_error_reports_concrete_checked_path() {
+        let dir = unique_temp_dir("winuxcmd-empty-override");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let error = ensure_on_path_with_override(Some(&dir)).unwrap_err();
+        let text = error.to_string();
+
+        assert!(text.contains("checked:"), "{text}");
+        assert!(text.contains(&dir.join("winuxcmd.exe").display().to_string()), "{text}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_order_prefers_winuxcmd_path_override() {
+        let override_dir = unique_temp_dir("winuxcmd-search-override");
+        let bundle_dir = unique_temp_dir("winuxcmd-search-override-bundle");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let override_exe = override_dir.join("winuxcmd.exe");
+        let bundle_exe = bundle_dir.join("winuxcmd.exe");
+        std::fs::write(&override_exe, b"").unwrap();
+        std::fs::write(&bundle_exe, b"").unwrap();
+
+        let report = find_winuxcmd_with_report_from_sources(
+            Some(&override_dir),
+            Some(&bundle_dir),
+            |_checked| None,
+        );
+
+        assert_eq!(report.found, Some(override_exe));
+        let _ = std::fs::remove_dir_all(override_dir);
+        let _ = std::fs::remove_dir_all(bundle_dir);
+    }
+
+    #[test]
+    fn search_order_finds_direct_sibling_bundle() {
+        let exe_dir = unique_temp_dir("winuxcmd-search-sibling");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let sibling = exe_dir.join("winuxcmd.exe");
+        std::fs::write(&sibling, b"").unwrap();
+
+        let report = find_winuxcmd_with_report_from_sources(None, Some(&exe_dir), |_checked| None);
+
+        assert_eq!(report.found, Some(sibling));
+        let _ = std::fs::remove_dir_all(exe_dir);
+    }
+
+    #[test]
+    fn search_order_finds_nested_bundle_when_sibling_missing() {
+        let exe_dir = unique_temp_dir("winuxcmd-search-nested");
+        let nested_dir = exe_dir.join("winuxcmd");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let nested = nested_dir.join("winuxcmd.exe");
+        std::fs::write(&nested, b"").unwrap();
+
+        let report = find_winuxcmd_with_report_from_sources(None, Some(&exe_dir), |_checked| None);
+
+        assert_eq!(report.found, Some(nested));
+        let _ = std::fs::remove_dir_all(exe_dir);
+    }
+
+    #[test]
+    fn search_order_uses_path_fallback_after_bundle_locations() {
+        let exe_dir = unique_temp_dir("winuxcmd-search-path");
+        let path_dir = unique_temp_dir("winuxcmd-search-path-fallback");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let path_exe = path_dir.join("winuxcmd.exe");
+        std::fs::write(&path_exe, b"").unwrap();
+
+        let report = find_winuxcmd_with_report_from_sources(None, Some(&exe_dir), |checked| {
+            checked.push(path_exe.display().to_string());
+            Some(path_exe.clone())
+        });
+
+        assert_eq!(report.found, Some(path_exe));
+        assert!(
+            report
+                .checked
+                .iter()
+                .any(|path| path.contains("utils") && path.ends_with("winuxcmd.exe")),
+            "{:?}",
+            report.checked
+        );
+        let _ = std::fs::remove_dir_all(exe_dir);
+        let _ = std::fs::remove_dir_all(path_dir);
     }
 
     #[test]
