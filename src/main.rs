@@ -149,18 +149,65 @@ fn run_repl() -> anyhow::Result<()> {
 }
 
 fn run_stdin_script() -> anyhow::Result<()> {
-    let mut script = String::new();
-    std::io::stdin().read_to_string(&mut script)?;
-    if script.trim().is_empty() {
-        return Ok(());
+    let mut shell = winuxsh_runtime::Shell::new_for_stdin_script()?;
+    shell.executor.inherit_process_stdin();
+    let mut line = String::new();
+    let mut pending = Vec::new();
+
+    loop {
+        line.clear();
+        match read_unbuffered_line(&mut line)? {
+            0 => {
+                if !pending.is_empty() {
+                    let code = shell.execute_script(&pending.join("\n"))?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                }
+                break;
+            }
+            _ => {}
+        }
+
+        let line = line.trim_end_matches(['\r', '\n']);
+        if pending.is_empty() && line.trim().is_empty() {
+            continue;
+        }
+        pending.push(line.to_string());
+        let script = pending.join("\n");
+        if !winuxsh_runtime::repl::is_script_input_complete(&script) {
+            continue;
+        }
+
+        let code = shell.execute_script(&script)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        pending.clear();
     }
 
-    let mut shell = winuxsh_runtime::Shell::new()?;
-    let code = shell.execute_script(&script)?;
-    if code != 0 {
-        std::process::exit(code);
-    }
     Ok(())
+}
+
+fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
+    let mut stdin = std::io::stdin().lock();
+    let mut bytes = [0_u8; 1];
+    let mut read = 0;
+
+    loop {
+        match stdin.read(&mut bytes)? {
+            0 => break,
+            count => {
+                read += count;
+                output.push(bytes[0] as char);
+                if bytes[0] == b'\n' {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(read)
 }
 
 fn print_usage() {
@@ -394,7 +441,7 @@ fn print_version() {
 }
 
 fn rubash_revision() -> &'static str {
-    "df626e2905ce1337849db6aff5405f14db168a9e"
+    option_env!("WINUXSH_RUBASH_REV").unwrap_or("master")
 }
 
 fn is_broken_pipe_error(error: &anyhow::Error) -> bool {

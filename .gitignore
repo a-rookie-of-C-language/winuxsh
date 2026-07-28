@@ -40,7 +40,6 @@ mvp5-*/
 mvp6-*/
 
 # Internal documentation
-AGENTS.md
 
 # Temporary and test files
 *.exe

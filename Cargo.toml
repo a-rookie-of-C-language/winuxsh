@@ -10,6 +10,10 @@ readme = "README.md"
 homepage = "https://github.com/unixwin/winuxsh"
 repository = "https://github.com/unixwin/winuxsh"
 
+[workspace]
+members = [".", "crates/winuxsh-runtime"]
+resolver = "2"
+
 [dependencies]
 winuxsh-runtime = { path = "crates/winuxsh-runtime" }
 rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }

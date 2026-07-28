@@ -13,6 +13,8 @@ status: active
 ## Development Principles
 
 - Keep shell syntax, parser, executor, builtins, and job-related semantics in rubash.
+- Track the latest `unixwin/rubash` `master`; fix shell semantics upstream in
+  rubash rather than carrying long-term host-layer workarounds.
 - Keep coreutils in `winuxcmd.exe`, discovered through PATH injection.
 - Keep the terminal process native to Windows:
   - no filesystem root isolation
@@ -23,9 +25,11 @@ status: active
   - stable stdout/stderr separation
   - exact exit code propagation
   - deterministic `-c` and script execution
-- Use zsh/Oh My Zsh as the primary UX and compatibility reference:
-  completion, history, prompt, menus, themes, packages, `.zshrc`, and
-  plugin-layout ergonomics.
+- Treat zsh / Oh My Zsh compatibility as a migration adapter and maintenance
+  surface, not the primary future roadmap. Keep import/report behavior safe and
+  reviewable, but do not grow winuxsh toward a zsh interpreter or ZLE runtime.
+- Use Winuxsh-native WASM/WASI plugins as the v3 extension target for
+  completion, prompt, lifecycle hooks, and helper commands.
 - Use Nushell only as a secondary reference for modern config/menu design and
   reedline integration, not shell language or pipeline semantics.
 
@@ -98,7 +102,8 @@ Verification:
 
 ## Phase 4 - Zsh Compatibility Foundation
 
-- Make zsh the primary UX compatibility reference.
+- Maintain the zsh UX compatibility work that already exists, but keep this
+  phase scoped to migration safety and diagnostics.
 - Add a zsh profile scanner before implementing broad plugin compatibility.
   The scanner reads and translates, but does not execute arbitrary zsh scripts:
   - `.zshrc`
@@ -194,7 +199,8 @@ Verification:
 
 ## Phase 6 - v3 Design Gate
 
-- Plugin framework remains a v3 design topic, but only for UX/package extension:
+- Plugin framework is the v3 design topic, with WASM/WASI as the preferred
+  long-term execution model and only for UX/package extension:
   - completion providers
   - prompt/theme providers
   - helper commands as external processes
@@ -208,3 +214,5 @@ Definition of ready for v3:
 - winuxcmd completion coverage is broad enough for daily use.
 - agent non-interactive behavior is stable.
 - master CI is green and warning-light.
+- zsh compatibility is clearly framed as migration/maintenance, not the core
+  growth engine.
