@@ -32,5 +32,6 @@
 - Fast loop: `winuxsh -c 'cargo fmt --check -p winuxsh; cargo build --locked; cargo test --workspace --locked'`
 - Runtime library: `winuxsh -c 'cargo test -p winuxsh-runtime --lib --locked'`
 - Zsh/import maintenance: `winuxsh -c 'cargo test -p winuxsh-runtime --test zsh_compat --locked'`
+- Host contract requiring winuxcmd command links: ensure command links are in `PATH`, then run `winuxsh -c 'cargo test --test host_contract --locked -- --ignored'`
 - Compat suite: ensure winuxcmd command links are in `PATH`, then run `winuxsh -c 'cargo test --test compat --locked -- --ignored'`
 - Local GNU Bash upstream gate: `winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'` must report `86` total, `86` passed, `0` failed for the Winuxsh binary under test. Keep this local-only; do not add it to normal CI, and do not vendor Bash upstream tests into this repo. See `DOCS/bash-upstream-local.md`.
