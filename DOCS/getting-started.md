@@ -4,17 +4,18 @@ A short walkthrough from zero to a working prompt with git status.
 
 ## 1. Build or download
 
-```pwsh
+```sh
 git clone https://github.com/unixwin/winuxsh.git
 cd winuxsh
 cargo build --release
 ```
 
-After building, the binary is at `target\release\winuxsh.exe`. You can add it
-to your `PATH`:
+After building, the binary is at `target\release\winuxsh.exe`. You can run it
+directly, or add `target\release` to your user `PATH` using your normal Windows
+environment settings:
 
-```pwsh
-$env:PATH += ";$pwd\target\release"
+```sh
+target/release/winuxsh.exe
 ```
 
 If you are using the release zip, winuxsh automatically runs the activation
@@ -29,14 +30,14 @@ friends resolve normally. Once the links exist, startup skips activation.
 
 ## 2. Start the shell
 
-```pwsh
+```sh
 winuxsh
 ```
 
 You should see something like:
 
 ```text
-caomengxuan@DESKTOP C:\Users\you
+user@DESKTOP C:\Users\you
 %
 ```
 
@@ -46,10 +47,10 @@ Type `exit` or press Ctrl+D to quit.
 
 `cd` into any git repository:
 
-```pwsh
+```sh
 cd C:\Users\you\repo
 # if inside a repo, the prompt changes:
-caomengxuan@DESKTOP C:\Users\you\repo  git:(main) ●1 ✚2 ?1
+user@DESKTOP C:\Users\you\repo  git:(main) ●1 ✚2 ?1
 %
 ```
 
@@ -175,14 +176,14 @@ Restart winuxsh to pick up the changes.
 
 If you already have a `.zshrc` with Oh My Zsh, let winuxsh inspect it:
 
-```pwsh
+```sh
 winuxsh --zsh-compat-report
 winuxsh --zsh-compat-import-plan
 ```
 
 Review the plan. If it looks safe (it scans, does not blindly source):
 
-```pwsh
+```sh
 winuxsh --zsh-compat-import-apply
 winuxsh --zsh-compat-doctor
 ```

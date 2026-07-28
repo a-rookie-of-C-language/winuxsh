@@ -6,7 +6,7 @@
 Cygwin、WSL 隔离层，也不走 PowerShell 语义。写给人类和 coding agent 用。
 
 ```text
-caomengxuan@DESKTOP C:\Users\me\repo\winuxsh  git:(master) ●2 ✚1 ↑1 ?3
+me@DESKTOP C:\Users\me\repo\winuxsh  git:(master) ●2 ✚1 ↑1 ?3
 %
 ```
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PATH="/c/Users/caomengxuan/.cargo/bin:/usr/bin:/bin:$PATH"
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_BASH_UPSTREAM_DIR="$ROOT_DIR/../rubash/third_party/bash"
 BASH_UPSTREAM_DIR="${BASH_UPSTREAM_DIR:-$DEFAULT_BASH_UPSTREAM_DIR}"

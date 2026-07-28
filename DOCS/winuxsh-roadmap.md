@@ -170,7 +170,7 @@ status: active
       `scripts/run-bash-upstream-with-winuxsh.sh`，shell under test 指向
       `winuxsh/target/debug/winuxsh.exe`，结果 86 total / 86 pass / 0 fail，
       summary 位于
-      `C:/Users/caomengxuan/repo/winuxsh/target/bash-upstream-tests/summary.md`；
+      `target/bash-upstream-tests/summary.md`；
       本地执行说明见 `DOCS/bash-upstream-local.md`，不纳入默认 CI，也不 vendor
       Bash upstream tests
 - [x] Phase 17 host contract matrix: 为 winuxsh host 层补充 PATH/env/cwd/home/stdout/stderr/exit-code 二进制级集成测试

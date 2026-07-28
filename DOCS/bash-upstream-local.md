@@ -10,8 +10,8 @@ Windows CI loop.
 Keep a sibling rubash checkout with its existing Bash upstream fixture:
 
 ```text
-C:/Users/caomengxuan/repo/winuxsh
-C:/Users/caomengxuan/repo/rubash/third_party/bash/tests
+<workspace>/winuxsh
+<workspace>/rubash/third_party/bash/tests
 ```
 
 The runner can be pointed at another Bash upstream checkout with
@@ -22,8 +22,12 @@ The runner can be pointed at another Bash upstream checkout with
 Run through the installed Winuxsh command runner:
 
 ```sh
-C:/Users/caomengxuan/tools/winuxsh.exe -c '"C:/Program Files/Git/bin/bash.exe" scripts/run-bash-upstream-with-winuxsh.sh'
+winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'
 ```
+
+If the Bash runner is not named `bash` on your machine, set `BASH_RUNNER` in
+your local environment or replace it in your local command. Keep that path out
+of committed files.
 
 The gate passes only when it reports:
 
@@ -36,17 +40,17 @@ Failed: 0
 Results are written under:
 
 ```text
-C:/Users/caomengxuan/repo/winuxsh/target/bash-upstream-tests
+target/bash-upstream-tests
 ```
 
 ## Performance guardrails
 
 The runner is test infrastructure and must not move into normal startup, `-c`,
 script-file, or REPL hot paths. When touching Winuxsh host execution, follow the
-Rubash performance process from the local perf worktree:
+Rubash performance process from the local rubash checkout:
 
 ```text
-C:/Users/caomengxuan/repo/wt-rubash-baseline/docs/performance-debugging-process.md
+../rubash/docs/performance-debugging-process.md
 ```
 
 In practice:
