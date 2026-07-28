@@ -54,6 +54,18 @@ try {
     if (-not (Test-Path -LiteralPath $activationScript)) {
         throw "Activation script not found at $activationScript"
     }
+    $iconFiles = @(
+        Join-Path $RepoRoot "assets\winuxsh-icon.ico"
+        Join-Path $RepoRoot "assets\winuxsh-icon-256.png"
+        Join-Path $RepoRoot "assets\winuxsh-icon-64.png"
+        Join-Path $RepoRoot "assets\winuxsh-icon.png"
+        Join-Path $RepoRoot "assets\winuxsh-icon.svg"
+    )
+    foreach ($iconFile in $iconFiles) {
+        if (-not (Test-Path -LiteralPath $iconFile)) {
+            throw "Icon asset not found at $iconFile"
+        }
+    }
 
     $distDir = Join-Path $RepoRoot "dist"
     if ($Arch) {
@@ -68,10 +80,14 @@ try {
     Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-Null
 
     Copy-Item -LiteralPath $winuxshExe -Destination (Join-Path $stageDir "winuxsh.exe") -Force
     Copy-Item -LiteralPath $WinuxCmdPath -Destination (Join-Path $stageDir "winuxcmd\winuxcmd.exe") -Force
     Copy-Item -LiteralPath $activationScript -Destination (Join-Path $stageDir "winuxcmd\activate-winuxcmd.sh") -Force
+    foreach ($iconFile in $iconFiles) {
+        Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
+    }
 
     Compress-Archive -LiteralPath $stageDir -DestinationPath $zipPath -Force
 

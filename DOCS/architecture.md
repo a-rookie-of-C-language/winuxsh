@@ -130,7 +130,8 @@ winuxsh/
 - v2.2: rubash rewrite 稳定化、补全增强、Vi/Ctrl+R、配置一致性、用户主题
 - v2.3: Windows 原生 terminal contract、agent 友好的非交互式行为、history/prompt/completion UX
 - v2.4: zsh-like 交互体验 polish（右 prompt、提示、补全菜单、默认配置）
-- v3: 插件/Oh-My-Winuxsh/package layer；shell 语义与作业控制仍优先由 rubash 提供
+- v3: Winuxsh-native WASM/WASI 插件系统；zsh/Oh My Zsh 兼容保持迁移层，
+  shell 语义与作业控制仍优先由 rubash 提供
 - 非目标: Linux/macOS 原生 shell 产品；rubash 可跨平台复用，但 winuxsh 产品目标是 Windows
 
 ---

@@ -66,6 +66,15 @@ impl Shell {
     /// Construct a fresh shell: load config, install Ctrl+C handler, inject
     /// winuxcmd onto PATH, set up completion state and history.
     pub fn new() -> anyhow::Result<Self> {
+        Self::new_with_script_name(Some("winuxsh"))
+    }
+
+    /// Construct a shell for scripts arriving on process stdin.
+    pub fn new_for_stdin_script() -> anyhow::Result<Self> {
+        Self::new_with_script_name(None)
+    }
+
+    fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
         // 1. Load config from ~/.winshrc.toml.
         let config = load_config();
 
@@ -95,7 +104,9 @@ impl Shell {
 
         // 4. Build rubash Executor after PATH injection.
         let mut executor = Executor::new();
-        executor.set_env("__RUBASH_SCRIPT_NAME", "winuxsh");
+        if let Some(script_name) = script_name {
+            executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
+        }
         sync_executor_path_from_process_path(&mut executor);
 
         // 5. Apply imported aliases first, then native config aliases so

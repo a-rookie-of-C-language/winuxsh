@@ -3,15 +3,16 @@
 //! Each `<name>.sh` in `tests/compat/fixtures/` is executed via the built
 //! `winuxsh` binary, and its stdout is compared against `<name>.expected`.
 //!
-//! Tests are marked `#[ignore]` because they require winuxcmd.exe to be
-//! discoverable in PATH (which is the case on developer machines and CI when
-//! winuxcmd is installed). Run with:
+//! Tests are marked `#[ignore]` because they require winuxcmd command links
+//! (for example `grep.exe` and `tr.exe`) to be discoverable in PATH. A bare
+//! `winuxcmd.exe` is not enough because rubash resolves external pipeline
+//! stages by command name. Run with:
 //!
 //!   cargo test --test compat -- --ignored
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -57,6 +58,8 @@ fn normalize(s: &str) -> String {
 }
 
 fn run_case(name: &str) {
+    ensure_winuxcmd_command_links();
+
     let dir = fixtures_dir();
     let script = dir.join(format!("{name}.sh"));
     let expected_path = dir.join(format!("{name}.expected"));
@@ -99,10 +102,33 @@ fn run_case(name: &str) {
     );
 }
 
+fn ensure_winuxcmd_command_links() {
+    let required = ["grep", "tr", "cat", "ls"];
+    let missing = required
+        .iter()
+        .copied()
+        .filter(|cmd| {
+            Command::new(cmd)
+                .arg("--help")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_err()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "compat tests require winuxcmd command links in PATH, not just winuxcmd.exe; missing: {:?}. Run the bundled activation script or `winuxcmd.exe wpm links rebuild --root <winuxcmd-dir>` before `cargo test --test compat -- --ignored`.",
+        missing
+    );
+}
+
 macro_rules! compat_test {
     ($name:ident, $label:literal) => {
         #[test]
-        #[ignore = "requires winuxcmd in PATH; run with --ignored"]
+        #[ignore = "requires winuxcmd command links in PATH; run with --ignored"]
         fn $name() {
             run_case($label);
         }

@@ -200,12 +200,42 @@ export SETOPT_RC_OK=ok
 }
 
 #[test]
-fn native_backslash_drive_paths_work_for_winuxcmd_and_cd() {
+fn native_backslash_drive_paths_work_for_cd() {
     if !cfg!(windows) {
         return;
     }
 
     let temp = unique_temp_dir("winuxsh-host-native-path");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let target = temp.join("target");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+
+    let target_native_path = native_path(&target);
+    let output = run_winuxsh(
+        &format!("cd {}; pwd", target_native_path),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "native backslash path cd");
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 1, "stdout was {stdout:?}");
+    assert_same_path(&stdout[0], &shell_path(&target));
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+#[ignore = "requires real winuxcmd.exe command links; run with --ignored"]
+fn native_backslash_drive_paths_work_for_winuxcmd() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-native-path-winuxcmd");
     let home = temp.join("home");
     let start = temp.join("start");
     let target = temp.join("target");
@@ -229,17 +259,6 @@ fn native_backslash_drive_paths_work_for_winuxcmd_and_cd() {
         stdout.iter().any(|line| line.contains("marker.txt")),
         "ls output did not include marker.txt: {stdout:?}"
     );
-
-    let output = run_winuxsh(
-        &format!("cd {}; pwd", target_native_path),
-        &start,
-        &home,
-        &[],
-    );
-    assert_success(&output, "native backslash path cd");
-    let stdout = stdout_lines(&output);
-    assert_eq!(stdout.len(), 1, "stdout was {stdout:?}");
-    assert_same_path(&stdout[0], &shell_path(&target));
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -436,6 +455,118 @@ fn piped_stdin_without_args_runs_plain_script_surface() {
     assert_no_terminal_controls(&output.stdout);
     assert_no_terminal_controls(&output.stderr);
 
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn piped_stdin_without_args_runs_multiline_compound_block() {
+    if !cfg!(windows) {
+        return;
+    }
+    let temp = unique_temp_dir("winuxsh-host-piped-stdin-multiline");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let mut child = Command::new(winuxsh_binary())
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"if true; then\n  echo block-ok\nfi\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "piped stdin multiline block");
+    assert_eq!(normalize_text(&output.stdout), "block-ok");
+    assert_eq!(normalize_text(&output.stderr), "");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn piped_stdin_without_args_runs_heredoc_as_one_chunk() {
+    if !cfg!(windows) {
+        return;
+    }
+    let temp = unique_temp_dir("winuxsh-host-piped-stdin-heredoc");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let mut child = Command::new(winuxsh_binary())
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"cat <<EOF\nheredoc-ok\nEOF\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "piped stdin heredoc");
+    assert_eq!(normalize_text(&output.stdout), "heredoc-ok");
+    assert_eq!(normalize_text(&output.stderr), "");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn piped_stdin_child_script_reads_unconsumed_parent_input() {
+    if !cfg!(windows) {
+        return;
+    }
+    let temp = unique_temp_dir("winuxsh-host-stdin-child");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let sub = start.join("input-line.sub");
+    std::fs::write(&sub, "read line\necho line read by $0 was \\`$line\\'\n").unwrap();
+    let sub_display = shell_path(&sub);
+    let sub_arg = shell_quote(&sub_display);
+    let script = format!(
+        "echo before calling input-line.sub\n${{THIS_SH}} {sub_arg}\nthis line for input-line.sub\necho finished with input-line.sub\n"
+    );
+    let mut child = Command::new(winuxsh_binary())
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .env("THIS_SH", shell_path(&winuxsh_binary()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "stdin child inherits unread input");
+    assert_eq!(
+        normalize_text(&output.stdout),
+        format!(
+            "before calling input-line.sub\nline read by {sub_display} was `this line for input-line.sub'\nfinished with input-line.sub"
+        )
+    );
+    assert_eq!(normalize_text(&output.stderr), "");
     let _ = std::fs::remove_dir_all(temp);
 }
 

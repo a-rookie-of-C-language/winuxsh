@@ -1,6 +1,6 @@
 [package]
 name = "winuxsh"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
@@ -10,10 +10,18 @@ readme = "README.md"
 homepage = "https://github.com/unixwin/winuxsh"
 repository = "https://github.com/unixwin/winuxsh"
 
+[workspace]
+members = [".", "crates/winuxsh-runtime"]
+resolver = "2"
+
 [dependencies]
 winuxsh-runtime = { path = "crates/winuxsh-runtime" }
 rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }

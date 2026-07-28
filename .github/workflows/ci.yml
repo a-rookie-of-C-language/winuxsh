@@ -26,14 +26,16 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: Update rubash to latest master
+        run: cargo update -p rubash
+
+      - name: cargo fmt --check (root package)
+        run: cargo fmt --check -p winuxsh
 
       - name: cargo build
         run: cargo build --locked
 
-      - name: cargo test (lib, runtime)
-        working-directory: ./crates/winuxsh-runtime
-        run: cargo test --lib
+      - name: cargo test (workspace)
+        run: cargo test --workspace --locked
 
 

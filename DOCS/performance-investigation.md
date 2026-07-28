@@ -14,8 +14,9 @@ execution.
 
 ## Suggested harness
 
-```powershell
-$script = @'
+```sh
+mkdir -p .tmp
+cat > .tmp/perf-nested-loops.sh <<'EOF'
 inner() {
   x=$1
   y=$2
@@ -31,12 +32,11 @@ while [ "$i" -lt 200 ]; do
   done
   i=$((i + 1))
 done
-'@
+EOF
 
-Set-Content -NoNewline .tmp/perf-nested-loops.sh $script
 cargo build --release
-Measure-Command { target/release/winuxsh.exe .tmp/perf-nested-loops.sh }
-Measure-Command { bash .tmp/perf-nested-loops.sh }
+time target/release/winuxsh.exe .tmp/perf-nested-loops.sh
+time bash .tmp/perf-nested-loops.sh
 ```
 
 ## Current findings
@@ -63,7 +63,7 @@ Measure-Command { bash .tmp/perf-nested-loops.sh }
 ## 2026-07-26 benchmark snapshot
 
 These timings use the 80x80 microbenchmarks in
-`C:\Users\caomengxuan\repo\tmp\rubash-perf` after pinning `winuxsh` to
+`tmp/rubash-perf` after pinning `winuxsh` to
 `rubash` `8026e3bfa81f694646f13786242d8d8ebca79ab4`.
 
 | Script | Bash ms | winuxsh release ms | Median ratio |

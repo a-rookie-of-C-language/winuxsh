@@ -8,6 +8,7 @@ use reedline::{
     MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
     ReedlineMenu, Signal, Vi,
 };
+use rubash::TokenKind;
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::WinuxshCompleter;
@@ -429,9 +430,16 @@ struct ReplInputScan {
     trailing_backslash: bool,
 }
 
+pub fn is_script_input_complete(input: &str) -> bool {
+    is_repl_input_complete(input)
+}
+
 fn is_repl_input_complete(input: &str) -> bool {
     let scan = scan_repl_input(input);
     if scan.open_quote.is_some() || scan.trailing_backslash {
+        return false;
+    }
+    if !heredoc_input_complete(input) {
         return false;
     }
 
@@ -528,6 +536,15 @@ fn is_repl_input_complete(input: &str) -> bool {
     }
 
     stack.is_empty() && !trailing_list_operator
+}
+
+fn heredoc_input_complete(input: &str) -> bool {
+    if !input.contains("<<") {
+        return true;
+    }
+    rubash::lexer::tokenize(input).into_iter().all(|token| {
+        token.kind != TokenKind::HereDocBody || !token.value.starts_with('\x1f')
+    })
 }
 
 fn scan_repl_input(input: &str) -> ReplInputScan {

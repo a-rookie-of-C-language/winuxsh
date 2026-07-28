@@ -16,26 +16,31 @@ zsh interpreter clone.
 
 ## Runtime shape
 
-Start with process-based plugins before WASM:
+Use Winuxsh-native WASM/WASI as the target plugin model:
 
-- Process plugins are easiest to debug on Windows and preserve current PATH,
-  stdio, and environment semantics.
-- A manifest can declare commands, completions, hooks, and required external
-  tools without extending rubash parser internals.
-- WASI/WASM can be evaluated after the host API is stable and narrow.
+- WASM plugins get a narrow, versioned host API for completion providers,
+  prompt segments, lifecycle hooks, and helper commands.
+- The host API must make capabilities explicit: filesystem, environment, PATH,
+  network, process execution, and terminal interaction are opt-in.
+- Process plugins can remain a debugging bridge or compatibility adapter for
+  existing Windows-native tools, but they are not the long-term package model.
+- No plugin model may extend rubash parser or executor internals.
 
 ## Minimum manifest surface
 
 ```toml
 name = "example"
 version = "0.1.0"
+kind = "wasm"
+module = "example-plugin.wasm"
+permissions = ["cwd:read", "env:read"]
 
 [commands]
-hello = "example-plugin.exe hello"
+hello = "plugin example hello"
 
 [hooks]
-precmd = ["example-plugin.exe precmd"]
-chpwd = ["example-plugin.exe chpwd"]
+precmd = ["plugin example precmd"]
+chpwd = ["plugin example chpwd"]
 
 [completions]
 dirs = ["completions"]
@@ -48,3 +53,4 @@ dirs = ["completions"]
 - No automatic trust of remote plugin code.
 - No dependency on `winuxcmd`; plugin commands should work with ordinary PATH
   lookup and user-selected coreutils.
+- No direct sourcing of zsh plugin scripts as a substitute for a native plugin.

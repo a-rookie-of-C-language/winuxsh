@@ -22,6 +22,15 @@ status: active
 - [x] cargo build 零警告,14/14 测试通过
 - [x] architecture.md、v2-plan.md 落盘 vault
 
+## 当前方向更新 (2026-07-28)
+
+- Zsh / Oh My Zsh 兼容层进入迁移与维护模式：保留 scanner、import-plan、native pack，
+  但不再把“更完整地兼容 zsh/ZLE/Oh My Zsh”作为主线目标。
+- v3 主线转向 Winuxsh 自己的 WASM/WASI 插件系统：窄 host API、显式信任边界、
+  不扩展 rubash parser/executor。
+- rubash 始终跟随 `unixwin/rubash` `master` 最新版本；shell 语义缺口优先在
+  rubash 上游修复，再由 winuxsh 更新依赖验证。
+
 ## 短期 - v2.1
 
 ### CI 基础设施
@@ -95,8 +104,8 @@ status: active
 
 ### 插件框架
 - [x] v3 design doc opened: winuxsh-v3-plan.md
-- [ ] 插件加载机制选型 (WASI / WASM / Rust dynlib)
-- [ ] 插件 API 定义
+- [ ] WASM/WASI 插件 host 与加载机制
+- [ ] 窄插件 API 定义（completion、prompt、hooks、helper command）
 - [ ] 插件市场
 
 ### Oh-My-Winuxsh
@@ -147,15 +156,23 @@ status: active
 - [x] Phase 29 bash smoke fixture: 将用户手工 20 段 bash/zsh-like smoke 脚本整理为可持续 compat fixture，优先覆盖条件判断、循环、函数、重定向、路径与 exit status
 - [x] Phase 30 rubash AND/OR status semantics: 修复 `false && a || b` / `[ ... ] && a || b` 这类 AND/OR list 跳过语义，保持 shell 语义在 rubash，不在 winuxsh 重建执行器
 - [x] Phase 31 native zsh plugin pack manifest: 列出内置 git/docker/kubectl/npm/widget/lifecycle packs，并提供只读 CLI inventory (`--zsh-native-packs` / `--zsh-native-packs-json`)
-- [ ] Phase 32 zsh-lite profile plan: 基于现有 `[zsh]` / `[zsh.native_widgets]` / `[zsh.native_plugins]` 生成可审阅默认 zsh-like 配置块
+- [x] Phase 32 zsh-lite profile plan: 基于现有 `[zsh]` / `[zsh.native_widgets]` / `[zsh.native_plugins]` 生成可审阅默认 zsh-like 配置块
 - [ ] Phase 33 Git daily-use polish: 内置 git completion + alias pack 测试 + prompt 文档，让 git 插件成为第一等 daily shell 能力
 - [x] Phase 33a oh-my-zsh-style git prompt status: 新增 `crates/winuxsh-runtime/src/git_status.rs` 通过 `git status --porcelain -b` / rev-list / stash list 收集 branch/dirty/staged/unstaged/untracked/deleted/ahead/behind/stashes/conflicts；prompt 模板新增 `{git_dirty}` / `{git_staged}` / `{git_unstaged}` / `{git_untracked}` / `{git_deleted}` / `{git_ahead}` / `{git_behind}` / `{git_stashes}` / `{git_conflicts}` / `{git_status}` 紧凑串；theme 新增 `git_clean` / `git_dirty` / `git_status_detail` 着色；`{git_prompt}` 默认形如 `git:(main) ●2 ↑1 ↓1 ?3`，clean=green / dirty=yellow；`completions/defaults/git.toml` 内置 add/commit/push/pull/checkout/switch/branch/merge/rebase/reset/restore/stash/status/log/diff/init/clone 子命令补全
 - [x] Phase 34 p10k-style segment-based prompt engine: new prompt_segments.rs module with 5 presets (lean/classic/rainbow/pure/robbyrussell), powerline separators, multiline prefixes
 - [x] README / tutorial documentation baseline: README.md / README-zh.md 重写为用户入口，新增 `DOCS/zsh-migration-guide.md` 迁移教程
-- [ ] zsh/Oh My Zsh 兼容导入层（completion/theme/alias/native UX modules）
+- [ ] WASM plugin system design spike: host ABI、manifest、sandbox、capability permissions、versioning
+- [ ] zsh/Oh My Zsh 兼容导入层维护：只修 bug、保安全导入，不继续扩大为 zsh runtime
 
 ### Rubash 能力验证
 - [ ] 梳理 rubash 已通过的 bash 上游测试能力矩阵
+- [x] Winuxsh host GNU Bash upstream gate (2026-07-28): 新增
+      `scripts/run-bash-upstream-with-winuxsh.sh`，shell under test 指向
+      `winuxsh/target/debug/winuxsh.exe`，结果 86 total / 86 pass / 0 fail，
+      summary 位于
+      `target/bash-upstream-tests/summary.md`；
+      本地执行说明见 `DOCS/bash-upstream-local.md`，不纳入默认 CI，也不 vendor
+      Bash upstream tests
 - [x] Phase 17 host contract matrix: 为 winuxsh host 层补充 PATH/env/cwd/home/stdout/stderr/exit-code 二进制级集成测试
 - [x] Phase 18 completion probe tests: 通过 `winuxsh --completion-probe` 验证真实 Shell 初始化后的 REPL 补全候选
 - [x] Phase 19 path completion tests: 覆盖空参数位路径补全，并保持管道后空命令位仍补命令
@@ -172,7 +189,7 @@ status: active
 - [x] Phase 29 bash smoke tests: 增加聚合 smoke fixture，并确保失败用例先拆成小回归修复后再纳入 smoke
 - [x] Phase 30 AND/OR tests: 覆盖 `true &&`, `false &&`, `true ||`, `false ||`, 以及 `[ 1 -eq 2 ] && yes || no`
 - [x] Phase 31 native pack inventory tests: 覆盖 pack registry text/json 输出，不改变启动行为
-- [ ] Phase 32 profile plan tests: 覆盖 `agent` / `zsh-lite` 生成 TOML 与 managed-block apply/status/rollback 兼容性
+- [x] Phase 32 profile plan tests: 覆盖 `agent` / `zsh-lite` 生成 TOML 与 managed-block apply/status/rollback 兼容性
 - [ ] Phase 33 git pack tests: 覆盖 `git <Tab>`、常见子命令/flag 补全与用户 alias override
 - [ ] 作业控制/内建命令语义优先走 rubash，不在 winuxsh 重复实现
 
@@ -184,8 +201,8 @@ status: active
 - 配置文件: .winshrc.toml (保留向后兼容)
 - 历史文件: .winuxsh_history
 - rust-version: 1.70 (minimum)
-- rubash 锁定版本: f451e16937437d49a2575fbc197345a498d68576 (AND/OR list 左结合短路修复)
-- 插件框架 + Oh-My-Winuxsh: v1 排除,plan for v2/v3
+- rubash 版本策略: 跟随 `unixwin/rubash` `master` 最新版本；更新 root `Cargo.lock` 后验证 winuxsh
+- 插件框架: v3 以 Winuxsh-native WASM/WASI 为主线；Oh-My-Zsh 兼容保持迁移/维护层
 
 ---
 
