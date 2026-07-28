@@ -345,6 +345,7 @@ impl Shell {
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
 
+        let mut printed_command_not_found_hints = false;
         let code = if self.native_plugin_enabled("zoxide")
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -390,7 +391,9 @@ impl Shell {
                         self.print_native_command_not_found(&cmd);
                     } else {
                         eprintln!("winuxsh: {}: command not found", cmd);
+                        self.print_command_not_found_hints(&cmd);
                     }
+                    printed_command_not_found_hints = true;
                     127
                 }
                 Err(e) => {
@@ -410,7 +413,9 @@ impl Shell {
                         self.print_native_command_not_found(&cmd);
                     } else {
                         eprintln!("winuxsh: {}: command not found", cmd);
+                        self.print_command_not_found_hints(&cmd);
                     }
+                    printed_command_not_found_hints = true;
                     127
                 }
                 Err(e) => {
@@ -421,6 +426,10 @@ impl Shell {
                 }
             }
         };
+
+        if code == 127 && !printed_command_not_found_hints {
+            self.print_command_not_found_hints_if_missing(&ast);
+        }
 
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
@@ -813,9 +822,30 @@ impl Shell {
     }
 
     fn print_native_command_not_found(&self, command: &str) {
-        for line in native_command_not_found_lines(command, |candidate| {
+        for line in native_command_not_found_lines(command, true, |candidate| {
             resolve_native_command_path(candidate).is_some()
         }) {
+            eprintln!("{}", line);
+        }
+    }
+
+    fn print_command_not_found_hints_if_missing(&self, ast: &Ast) {
+        let Some(command) = single_command_word(ast) else {
+            return;
+        };
+        if resolve_native_command_path(command).is_some() {
+            return;
+        }
+
+        self.print_command_not_found_hints(command);
+    }
+
+    fn print_command_not_found_hints(&self, command: &str) {
+        for line in native_command_not_found_hint_lines(
+            command,
+            self.native_plugin_enabled("command-not-found"),
+            |candidate| resolve_native_command_path(candidate).is_some(),
+        ) {
             eprintln!("{}", line);
         }
     }
@@ -1930,24 +1960,59 @@ fn first_command_word(line: &str) -> Option<String> {
     ast.commands[0].words.first().cloned()
 }
 
-fn native_command_not_found_lines<F>(command: &str, mut command_exists: F) -> Vec<String>
+fn single_command_word(ast: &Ast) -> Option<&str> {
+    if ast.commands.len() != 1 {
+        return None;
+    }
+    ast.commands[0].words.first().map(String::as_str)
+}
+
+fn native_command_not_found_lines<F>(
+    command: &str,
+    include_package_search: bool,
+    mut command_exists: F,
+) -> Vec<String>
 where
     F: FnMut(&str) -> bool,
 {
     let mut lines = vec![format!("winuxsh: {}: command not found", command)];
+    lines.extend(native_command_not_found_hint_lines(
+        command,
+        include_package_search,
+        &mut command_exists,
+    ));
+    lines
+}
+
+fn native_command_not_found_hint_lines<F>(
+    command: &str,
+    include_package_search: bool,
+    mut command_exists: F,
+) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut lines = Vec::new();
     if !is_package_search_candidate(command) {
         return lines;
     }
 
     let search = shell_quote(command);
+    if let Some(package) = wpm_package_for_command(command) {
+        lines.push(format!(
+            "winuxsh: try 'wpm install {}' to add {}",
+            package, command
+        ));
+    }
+
     let mut hints = Vec::new();
-    if command_exists("winget") {
+    if include_package_search && command_exists("winget") {
         hints.push(format!("  winget search --name {}", search));
     }
-    if command_exists("scoop") {
+    if include_package_search && command_exists("scoop") {
         hints.push(format!("  scoop search {}", search));
     }
-    if command_exists("choco") {
+    if include_package_search && command_exists("choco") {
         hints.push(format!("  choco search {}", search));
     }
 
@@ -1957,6 +2022,75 @@ where
     }
 
     lines
+}
+
+fn wpm_package_for_command(command: &str) -> Option<&'static str> {
+    match command {
+        "awk" => Some("awk"),
+        "gawk" => Some("gawk"),
+        "jq" => Some("jq"),
+        "yq" => Some("yq"),
+        "ncat" => Some("ncat"),
+        "7z" | "7zz" => Some("7zip"),
+        "zstd" | "unzstd" | "zstdcat" => Some("zstd"),
+        "rg" => Some("ripgrep"),
+        "fd" => Some("fd"),
+        "fzf" => Some("fzf"),
+        "bat" => Some("bat"),
+        "delta" => Some("delta"),
+        "sd" => Some("sd"),
+        "hyperfine" => Some("hyperfine"),
+        "just" => Some("just"),
+        "dust" => Some("dust"),
+        "duf" => Some("duf"),
+        "procs" => Some("procs"),
+        "btm" => Some("bottom"),
+        "wget" => Some("wget"),
+        "aria2c" => Some("aria2"),
+        "rclone" => Some("rclone"),
+        "eza" => Some("eza"),
+        "lsd" => Some("lsd"),
+        "zoxide" => Some("zoxide"),
+        "starship" => Some("starship"),
+        "chezmoi" => Some("chezmoi"),
+        "gh" => Some("gh"),
+        "glab" => Some("glab"),
+        "lazygit" => Some("lazygit"),
+        "lazydocker" => Some("lazydocker"),
+        "kubectl" => Some("kubectl"),
+        "helm" => Some("helm"),
+        "k9s" => Some("k9s"),
+        "tofu" => Some("opentofu"),
+        "sqlite3" => Some("sqlite"),
+        "duckdb" => Some("duckdb"),
+        "pandoc" => Some("pandoc"),
+        "shellcheck" => Some("shellcheck"),
+        "shfmt" => Some("shfmt"),
+        "hadolint" => Some("hadolint"),
+        "tokei" => Some("tokei"),
+        "scc" => Some("scc"),
+        "watchexec" => Some("watchexec"),
+        "miniserve" => Some("miniserve"),
+        "xh" => Some("xh"),
+        "grpcurl" => Some("grpcurl"),
+        "age" | "age-keygen" => Some("age"),
+        "sops" => Some("sops"),
+        "cosign" => Some("cosign"),
+        "trivy" => Some("trivy"),
+        "syft" => Some("syft"),
+        "grype" => Some("grype"),
+        "oras" => Some("oras"),
+        "crane" => Some("crane"),
+        "restic" => Some("restic"),
+        "yazi" => Some("yazi"),
+        "ouch" => Some("ouch"),
+        "erd" => Some("erdtree"),
+        "micro" => Some("micro"),
+        "hx" => Some("helix"),
+        "busybox" => Some("busybox"),
+        "ffmpeg" | "ffprobe" => Some("ffmpeg"),
+        _ => None,
+    }
 }
 
 fn is_package_search_candidate(command: &str) -> bool {
@@ -2470,11 +2604,12 @@ export AFTER_SETOPT=ok
 
     #[test]
     fn native_command_not_found_lines_include_available_windows_package_managers() {
-        let lines = native_command_not_found_lines("rg", |command| {
+        let lines = native_command_not_found_lines("rg", true, |command| {
             matches!(command, "winget" | "scoop")
         });
 
         assert_eq!(lines[0], "winuxsh: rg: command not found");
+        assert!(lines.contains(&"winuxsh: try 'wpm install ripgrep' to add rg".to_string()));
         assert!(lines.contains(&"winuxsh: package search hints:".to_string()));
         assert!(lines.contains(&"  winget search --name 'rg'".to_string()));
         assert!(lines.contains(&"  scoop search 'rg'".to_string()));
@@ -2482,8 +2617,15 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
+    fn native_command_not_found_hint_lines_include_wpm_without_search() {
+        let lines = native_command_not_found_hint_lines("awk", false, |_| true);
+
+        assert_eq!(lines, vec!["winuxsh: try 'wpm install awk' to add awk"]);
+    }
+
+    #[test]
     fn native_command_not_found_lines_skip_package_hints_for_paths() {
-        let lines = native_command_not_found_lines("./missing", |_| true);
+        let lines = native_command_not_found_lines("./missing", true, |_| true);
 
         assert_eq!(lines, vec!["winuxsh: ./missing: command not found"]);
     }
