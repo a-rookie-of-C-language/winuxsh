@@ -17,10 +17,14 @@
 //!   winuxsh --zsh-native-packs-json → list built-in native zsh plugin packs as JSON
 //!   winuxsh --zsh-profile-plan <profile> → print a native zsh profile TOML plan
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
+//!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
+//!   winuxsh --self-update → download and run the latest installer
 
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+mod self_update;
 
 fn main() -> ExitCode {
     // Initialize logging (only error level by default)
@@ -107,6 +111,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             print_completion_probe(args)?;
             Ok(())
         }
+        "--install-wt-profile" => {
+            install_windows_terminal_profile(args)?;
+            Ok(())
+        }
+        "--self-update" => self_update::run(&args[2..]),
         "-c" => {
             if args.len() < 3 {
                 anyhow::bail!("-c requires an argument");
@@ -225,6 +234,13 @@ fn print_usage() {
     println!("  -V, --version             Version and component info");
     println!("  -c <command>              Execute a command ad-hoc");
     println!();
+    println!("  --install-wt-profile      Add/update the Windows Terminal profile");
+    println!("      --set-default         Also set Winuxsh as the WT default profile");
+    println!("      --quiet               Suppress non-error profile output");
+    println!("  --self-update             Download and run the latest release installer");
+    println!("      --check               Only report the latest release");
+    println!("      --dry-run             Download installer without running it");
+    println!();
     println!("  --zsh-compat-report       Scan ~/.zshrc, show safe-import report");
     println!("  --zsh-compat-report-json  Same, as JSON");
     println!("  --zsh-compat-import-plan  Generate a .winshrc.toml import patch");
@@ -240,6 +256,51 @@ fn print_usage() {
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
     println!("Configuration: ~/.winshrc.toml for settings, ~/.winshrc for REPL shell code");
+}
+
+fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
+    let mut set_default = false;
+    let mut quiet = false;
+
+    for arg in &args[2..] {
+        match arg.as_str() {
+            "--set-default" => set_default = true,
+            "--quiet" => quiet = true,
+            unknown => anyhow::bail!("unknown --install-wt-profile option '{}'", unknown),
+        }
+    }
+
+    let commandline = std::env::current_exe()?;
+    let icon = windows_terminal_icon_path(&commandline);
+    let summary = winuxsh_runtime::windows_terminal::install_winuxsh_profile(
+        &commandline,
+        icon.as_deref(),
+        set_default,
+    )?;
+
+    if !quiet {
+        if summary.updated.is_empty() {
+            println!("No Windows Terminal settings path was found.");
+        } else {
+            for path in summary.updated {
+                println!("Updated Windows Terminal profile: {}", path.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn windows_terminal_icon_path(commandline: &std::path::Path) -> Option<PathBuf> {
+    let app_dir = commandline.parent()?;
+    [
+        app_dir.join("assets").join("winuxsh-icon-256.png"),
+        app_dir.join("assets").join("winuxsh-icon.png"),
+        app_dir.join("winuxsh-icon-256.png"),
+        app_dir.join("winuxsh-icon.png"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {

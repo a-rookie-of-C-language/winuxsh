@@ -60,7 +60,11 @@ jobs:
 
       - name: Preserve current release packager
         shell: pwsh
-        run: Copy-Item -LiteralPath scripts/package-release.ps1 -Destination (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Force
+        run: |
+          Copy-Item -LiteralPath scripts/package-release.ps1 -Destination (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "installer") | Out-Null
+          Copy-Item -LiteralPath installer/winuxsh.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Force
+          Copy-Item -LiteralPath assets/winuxsh-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Force
 
       - name: Checkout release tag
         shell: pwsh
@@ -68,6 +72,20 @@ jobs:
           git fetch --tags --force
           git checkout "${{ steps.release.outputs.tag }}"
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Destination scripts/package-release.ps1 -Force
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Destination installer/winuxsh.iss -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Destination assets/winuxsh-icon.ico -Force
+
+      - name: Validate Cargo version matches release tag
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw "Could not read package version from Cargo.toml"
+          }
+          if ($Matches[1] -ne "${{ steps.release.outputs.version }}") {
+            throw "Cargo.toml version $($Matches[1]) does not match release tag ${{ steps.release.outputs.tag }}"
+          }
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1.11
@@ -132,11 +150,36 @@ jobs:
             -Target "${{ matrix.rust_target }}" `
             -Arch "${{ matrix.arch }}"
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $isccCandidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $isccCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            throw "ISCC.exe not found after installing Inno Setup"
+          }
+          $sourceDir = Join-Path (Resolve-Path dist) "winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}"
+          $outputDir = Resolve-Path dist
+          & $iscc installer\winuxsh.iss `
+            "/DAppVersion=${{ steps.release.outputs.version }}" `
+            "/DAppArch=${{ matrix.arch }}" `
+            "/DSourceDir=$sourceDir" `
+            "/DOutputDir=$outputDir"
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
           name: winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
-          path: dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
+          path: |
+            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
+            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -172,8 +215,10 @@ jobs:
           body: |
             Winuxsh ${{ steps.release.outputs.tag }} Windows packages.
 
-            Packages are built remotely for x64 and ARM64, and each zip bundles the matching WinuxCmd release binary under `winuxcmd/` for isolated shell use.
-          files: artifacts/**/*.zip
+            Packages are built remotely for x64 and ARM64. Portable zip packages remain available, and installer packages add user PATH and Windows Terminal profile integration.
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.exe
           fail_on_unmatched_files: true
           overwrite_files: true
           generate_release_notes: true

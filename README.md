@@ -237,13 +237,16 @@ Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.
 - Report a bug?  Open an issue.
 - Want a feature?  Check [the roadmap](DOCS/winuxsh-roadmap.md).
 - Build from source: `cargo build --release`.
-- Release zip includes `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, and `winuxcmd/activate-winuxcmd.sh`.
+- Installer releases add Winuxsh to the user PATH and add/update a Windows Terminal profile.
+- Portable release zips remain available and include `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, icon assets, and `winuxcmd/activate-winuxcmd.sh`.
 - On first start, winuxsh runs the activation script once if command links are missing.
+- Self-update: run `winuxsh --self-update` to download and launch the latest installer via native WinHTTP.
 - Run the tests: `cargo test`.
 
 ## Documentation
 
 - [Getting Started](DOCS/getting-started.md) — full config reference
+- [Installer and Self-Update](DOCS/installer.md)
 - [Zsh Migration Guide](DOCS/zsh-migration-guide.md)
 - [Roadmap](DOCS/winuxsh-roadmap.md)
 - [Architecture](DOCS/architecture.md)

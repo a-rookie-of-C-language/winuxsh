@@ -55,13 +55,13 @@ Winuxsh 给你：
 
 从源码构建：
 
-```pwsh
+```sh
 cargo build --release
 ```
 
 启动交互式 shell：
 
-```pwsh
+```sh
 target\release\winuxsh.exe
 ```
 
@@ -73,6 +73,10 @@ winuxsh winuxcmd/activate-winuxcmd.sh
 
 它只在缺少命令链接时运行一次，在 `winuxcmd/` 目录下生成本地链接，之后
 `ls`、`cat`、`grep` 就能直接用。
+
+发布包同时提供安装器和 portable zip。安装器会安装到用户目录、加入用户 PATH、
+写入 Windows Terminal profile，并支持 `winuxsh --self-update` 通过原生 WinHTTP 拉取最新安装器。
+portable zip 继续保留，适合 agent、脚本和不想写入系统配置的用户。
 
 试一下：
 

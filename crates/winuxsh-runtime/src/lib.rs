@@ -17,6 +17,7 @@ pub mod setup_wizard;
 pub mod syntax_highlighting;
 pub mod terminal;
 pub mod theme;
+pub mod windows_terminal;
 pub mod winuxcmd;
 pub mod zsh_compat;
 
