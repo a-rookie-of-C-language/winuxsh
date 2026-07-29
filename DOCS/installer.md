@@ -32,8 +32,9 @@ the Windows Terminal default profile, run:
 winuxsh --install-wt-profile --set-default
 ```
 
-Self-update uses Windows WinHTTP directly to download the latest GitHub Release
-installer for the current architecture and starts it silently:
+Self-update uses Windows WinHTTP directly to follow the GitHub Release
+`releases/latest` redirect, download the latest installer for the current
+architecture, and start it silently. It does not depend on the GitHub REST API.
 
 ```sh
 winuxsh --self-update
@@ -45,6 +46,11 @@ Useful dry-run modes:
 winuxsh --self-update --check
 winuxsh --self-update --dry-run
 ```
+
+Interactive shells check for updates at most once per day. The check is
+best-effort and silent on network failures; when a newer release exists, Winuxsh
+prints a short hint to run `winuxsh --self-update`. Set
+`WINUXSH_UPDATE_CHECK=0` or `WINUXSH_NO_UPDATE_CHECK=1` to disable the reminder.
 
 The portable zip keeps the same first-start WinuxCmd activation flow: if command
 links are missing, Winuxsh runs `winuxcmd/activate-winuxcmd.sh` once from the

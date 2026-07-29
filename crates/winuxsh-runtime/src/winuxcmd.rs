@@ -248,8 +248,13 @@ fn auto_activate_bundled_winuxcmd(exe: &Path) {
         }
     };
 
+    let script_name = script
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("activate-winuxcmd.sh"));
+
     match Command::new(current_exe)
-        .arg(&script)
+        .arg(script_name)
+        .current_dir(dir)
         .env("WINUXSH_SKIP_WINUXCMD_ACTIVATION", "1")
         .output()
     {
