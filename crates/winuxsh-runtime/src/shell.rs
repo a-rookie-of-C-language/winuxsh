@@ -4,7 +4,6 @@
 //! (prompt, history, completion). All shell language semantics are delegated
 //! to rubash; this layer only adds the Windows-facing UX.
 
-
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,12 +21,14 @@ use crate::config::{
     NativeWidgetConfig, SyntaxHighlightConfig,
 };
 use crate::prompt::{PromptBackend, WinuxshPrompt};
-use crate::prompt_segments::{SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig, SegmentId, SegmentPreset};
+use crate::prompt_segments::{
+    SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
+};
 use crate::zsh_compat::{
     apply_alias, apply_safe_env, completion_defs_from_report,
-    dynamic_completion_defs_from_report_with_options, git_prompt_format_from_report, scan,
-    runtime_completion_commands_from_report, DynamicCompletionRunOptions, NativeWidgetSuggestion,
-    ZshImportOptions,
+    dynamic_completion_defs_from_report_with_options, git_prompt_format_from_report,
+    runtime_completion_commands_from_report, scan, DynamicCompletionRunOptions,
+    NativeWidgetSuggestion, ZshImportOptions,
 };
 
 use crate::winuxcmd;
@@ -95,7 +96,8 @@ impl Shell {
 
         // 3. WinuxCmd PATH injection (best-effort), honoring config override.
         if config.winuxcmd_enabled {
-            if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref()) {
+            if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref())
+            {
                 log::debug!("winuxcmd not on PATH: {}", e);
             }
         } else {
@@ -231,8 +233,7 @@ impl Shell {
             DynamicCompletionRunOptions::from_zsh_config(&config.zsh),
         ) {
             zsh_completion_defs.extend(dynamic_completion_defs_from_report_with_options(
-                report,
-                &options,
+                report, &options,
             ));
         }
 
@@ -267,16 +268,15 @@ impl Shell {
                     .or_insert_with(|| style.value.clone());
             }
         }
-        let native_widget_bindings = if config.zsh.native_widgets.enabled
-            && config.zsh.native_widgets.import_bindkeys
-        {
-            zsh_report
-                .as_ref()
-                .map(|report| report.native_widgets.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let native_widget_bindings =
+            if config.zsh.native_widgets.enabled && config.zsh.native_widgets.import_bindkeys {
+                zsh_report
+                    .as_ref()
+                    .map(|report| report.native_widgets.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
         let mut shell = Self {
             executor,
@@ -328,9 +328,7 @@ impl Shell {
         if tokens.is_empty() {
             return Ok(0);
         }
-        if interactive_terminal_colors {
-            enable_interactive_terminal_grep_colors(&mut tokens);
-        }
+        rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
         // If the user just ran a `git ...` command, invalidate the prompt's
         // cached git status so the next prompt re-reads the live state.
@@ -763,7 +761,10 @@ impl Shell {
         }
 
         let correction = String::from_utf8_lossy(&output.stdout);
-        let Some(correction) = correction.lines().map(str::trim).find(|line| !line.is_empty())
+        let Some(correction) = correction
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
         else {
             return Ok(1);
         };
@@ -813,11 +814,17 @@ impl Shell {
             return;
         };
         if let Err(err) = std::fs::create_dir_all(parent) {
-            log::debug!("native last-working-dir preset could not create cache dir: {}", err);
+            log::debug!(
+                "native last-working-dir preset could not create cache dir: {}",
+                err
+            );
             return;
         }
         if let Err(err) = std::fs::write(&self.last_working_dir_cache_path, format!("{pwd}\n")) {
-            log::debug!("native last-working-dir preset could not write cache: {}", err);
+            log::debug!(
+                "native last-working-dir preset could not write cache: {}",
+                err
+            );
         }
     }
 
@@ -861,7 +868,11 @@ impl Shell {
             .iter()
             .filter_map(|(name, value)| {
                 if normalize_alias_finder_command(value) == command && name != &command {
-                    Some(format!("winuxsh: alias available: {}={}", name, shell_quote(value)))
+                    Some(format!(
+                        "winuxsh: alias available: {}={}",
+                        name,
+                        shell_quote(value)
+                    ))
                 } else {
                     None
                 }
@@ -921,8 +932,10 @@ impl Shell {
             if name.is_empty() {
                 continue;
             }
-            self.aliases
-                .insert(name.to_string(), strip_rubash_alias_quote_marker(value).to_string());
+            self.aliases.insert(
+                name.to_string(),
+                strip_rubash_alias_quote_marker(value).to_string(),
+            );
         }
     }
 
@@ -1105,9 +1118,7 @@ impl Shell {
         if tokens.is_empty() {
             return Ok(0);
         }
-        if interactive_terminal_colors {
-            enable_interactive_terminal_grep_colors(&mut tokens);
-        }
+        rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
         let mut ast = parse(&tokens);
         normalize_cd_windows_drive_args(&mut ast);
@@ -1248,7 +1259,10 @@ impl Shell {
         Some(Ok(code))
     }
 
-    fn execute_winuxsh_builtin_command(&mut self, command: &rubash::parser::CommandNode) -> Option<i32> {
+    fn execute_winuxsh_builtin_command(
+        &mut self,
+        command: &rubash::parser::CommandNode,
+    ) -> Option<i32> {
         let (name, args) = winuxsh_builtin_words(command)?;
         match name {
             "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
@@ -1336,7 +1350,10 @@ impl Shell {
             return None;
         }
 
-        let line = line.split_once('#').map(|(before, _)| before).unwrap_or(line);
+        let line = line
+            .split_once('#')
+            .map(|(before, _)| before)
+            .unwrap_or(line);
         let mut words = line.split_whitespace();
         let command = words.next()?;
         let command = if command == "builtin" {
@@ -1370,7 +1387,10 @@ impl Shell {
                 match arg.as_str() {
                     "-m" | "-o" => continue,
                     _ => {
-                        eprintln!("winuxsh: {}: unsupported option", if enable { "setopt" } else { "unsetopt" });
+                        eprintln!(
+                            "winuxsh: {}: unsupported option",
+                            if enable { "setopt" } else { "unsetopt" }
+                        );
                         code = 1;
                         continue;
                     }
@@ -1378,7 +1398,11 @@ impl Shell {
             }
 
             let Some((option, option_enable)) = resolve_zsh_option_arg(arg, enable) else {
-                eprintln!("winuxsh: {}: no such option: {}", if enable { "setopt" } else { "unsetopt" }, arg);
+                eprintln!(
+                    "winuxsh: {}: no such option: {}",
+                    if enable { "setopt" } else { "unsetopt" },
+                    arg
+                );
                 code = 1;
                 continue;
             };
@@ -1400,10 +1424,8 @@ impl Shell {
                 self.history_ignore_space_prefixed = enable;
             }
             "hist_ignore_dups" => {
-                self.executor.set_env(
-                    "WINUXSH_HIST_IGNORE_DUPS",
-                    if enable { "1" } else { "0" },
-                );
+                self.executor
+                    .set_env("WINUXSH_HIST_IGNORE_DUPS", if enable { "1" } else { "0" });
             }
             _ => {}
         }
@@ -1443,8 +1465,8 @@ fn normalize_cd_windows_drive_args(ast: &mut Ast) {
         }
 
         for word in command.words.iter_mut().skip(1) {
-            if let Some(normalized) =
-                cd_tilde_path_to_slash_drive(word).or_else(|| windows_drive_path_to_slash_drive(word))
+            if let Some(normalized) = cd_tilde_path_to_slash_drive(word)
+                .or_else(|| windows_drive_path_to_slash_drive(word))
             {
                 *word = normalized;
             }
@@ -1636,7 +1658,7 @@ fn is_cd_command(command: &rubash::parser::CommandNode) -> bool {
         .is_some_and(|word| word.eq_ignore_ascii_case("cd"))
 }
 
-fn enable_interactive_terminal_grep_colors(tokens: &mut Vec<Token>) {
+fn rewrite_winuxcmd_command_shims(tokens: &mut Vec<Token>, interactive_terminal_colors: bool) {
     if !cfg!(windows) {
         return;
     }
@@ -1646,9 +1668,12 @@ fn enable_interactive_terminal_grep_colors(tokens: &mut Vec<Token>) {
         let command_end = find_command_separator(tokens, command_start).unwrap_or(tokens.len());
         let separator = tokens.get(command_end).map(|token| &token.kind);
         let terminal_output = !matches!(separator, Some(TokenKind::Background));
-        if terminal_output {
-            enable_terminal_grep_colors_in_command(tokens, command_start, command_end);
-        }
+        rewrite_winuxcmd_command_shims_in_command(
+            tokens,
+            command_start,
+            command_end,
+            interactive_terminal_colors && terminal_output,
+        );
         if command_end == tokens.len() {
             break;
         }
@@ -1674,14 +1699,24 @@ fn find_command_separator(tokens: &[Token], start: usize) -> Option<usize> {
         })
 }
 
-fn enable_terminal_grep_colors_in_command(tokens: &mut Vec<Token>, start: usize, end: usize) {
+fn rewrite_winuxcmd_command_shims_in_command(
+    tokens: &mut Vec<Token>,
+    start: usize,
+    end: usize,
+    interactive_terminal_colors: bool,
+) {
     let mut stage_start = start;
     while stage_start < end {
         let stage_end = find_pipeline_separator(tokens, stage_start, end).unwrap_or(end);
-        if stage_end == end && stage_outputs_to_terminal(tokens, stage_start, stage_end) {
-            enable_terminal_grep_colors_in_stage(tokens, stage_start, stage_end);
-            return;
-        }
+        let add_terminal_grep_color = interactive_terminal_colors
+            && stage_end == end
+            && stage_outputs_to_terminal(tokens, stage_start, stage_end);
+        rewrite_winuxcmd_command_shims_in_stage(
+            tokens,
+            stage_start,
+            stage_end,
+            add_terminal_grep_color,
+        );
         stage_start = stage_end + 1;
     }
 }
@@ -1699,25 +1734,41 @@ fn stage_outputs_to_terminal(tokens: &[Token], start: usize, end: usize) -> bool
         .any(|token| matches!(token.kind, TokenKind::RedirectOut | TokenKind::Append))
 }
 
-fn enable_terminal_grep_colors_in_stage(tokens: &mut Vec<Token>, start: usize, end: usize) {
+fn rewrite_winuxcmd_command_shims_in_stage(
+    tokens: &mut Vec<Token>,
+    start: usize,
+    end: usize,
+    add_terminal_grep_color: bool,
+) {
     let Some(command_index) = simple_command_word_index(tokens, start, end) else {
         return;
     };
-    let Some(needs_exe_shim) = grep_command_needs_exe_shim(&tokens[command_index]) else {
-        return;
-    };
-    let has_color_option = grep_stage_has_color_option(tokens, command_index + 1, end);
 
-    // rubash has a no-color optimized pipeline implementation for bare `grep`.
-    // Use the winuxcmd shim so terminal-facing interactive grep reaches grep.exe.
-    if needs_exe_shim {
-        tokens[command_index].value = "grep.exe".to_string();
-        tokens[command_index].raw = "grep.exe".to_string();
+    match winuxcmd_command_shim(&tokens[command_index]) {
+        Some(WinuxCmdShim::Grep { needs_exe_shim }) => {
+            if needs_exe_shim {
+                tokens[command_index].value = "grep.exe".to_string();
+                tokens[command_index].raw = "grep.exe".to_string();
+            }
+        }
+        Some(WinuxCmdShim::Pwd) => {
+            tokens[command_index].value = "pwd.exe".to_string();
+            tokens[command_index].raw = "pwd.exe".to_string();
+        }
+        None => return,
     }
-    if !has_color_option {
+
+    if add_terminal_grep_color
+        && grep_command_name(&tokens[command_index])
+        && !grep_stage_has_color_option(tokens, command_index + 1, end)
+    {
         tokens.insert(
             command_index + 1,
-            Token::new(TokenKind::Word, "--color=always", tokens[command_index].position),
+            Token::new(
+                TokenKind::Word,
+                "--color=always",
+                tokens[command_index].position,
+            ),
         );
     }
 }
@@ -1738,17 +1789,33 @@ fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Opti
     None
 }
 
-fn grep_command_needs_exe_shim(token: &Token) -> Option<bool> {
+enum WinuxCmdShim {
+    Grep { needs_exe_shim: bool },
+    Pwd,
+}
+
+fn winuxcmd_command_shim(token: &Token) -> Option<WinuxCmdShim> {
     if !matches!(token.kind, TokenKind::Word) {
         return None;
     }
     if token.value.eq_ignore_ascii_case("grep") && token.raw.eq_ignore_ascii_case("grep") {
-        return Some(true);
+        return Some(WinuxCmdShim::Grep {
+            needs_exe_shim: true,
+        });
     }
     if token.value.eq_ignore_ascii_case("grep.exe") && token.raw.eq_ignore_ascii_case("grep.exe") {
-        return Some(false);
+        return Some(WinuxCmdShim::Grep {
+            needs_exe_shim: false,
+        });
+    }
+    if token.value.eq_ignore_ascii_case("pwd") && token.raw.eq_ignore_ascii_case("pwd") {
+        return Some(WinuxCmdShim::Pwd);
     }
     None
+}
+
+fn grep_command_name(token: &Token) -> bool {
+    token.value.eq_ignore_ascii_case("grep") || token.value.eq_ignore_ascii_case("grep.exe")
 }
 
 fn grep_stage_has_color_option(tokens: &[Token], start: usize, end: usize) -> bool {
@@ -1799,16 +1866,7 @@ fn is_winuxcmd_path_command(command: &str) -> bool {
     let command = command.strip_suffix(".exe").unwrap_or(command);
     matches!(
         command,
-        "ls" | "cat"
-            | "grep"
-            | "find"
-            | "cp"
-            | "mv"
-            | "rm"
-            | "mkdir"
-            | "touch"
-            | "chmod"
-            | "tar"
+        "ls" | "cat" | "grep" | "find" | "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "tar"
     )
 }
 
@@ -1940,7 +1998,11 @@ fn is_native_windows_path_literal_start(chars: &[char], index: usize) -> bool {
 }
 
 fn is_windows_path_literal_boundary(ch: char) -> bool {
-    ch.is_ascii_whitespace() || matches!(ch, '=' | '(' | '[' | '{' | ',' | ';' | '|' | '&' | '<' | '>')
+    ch.is_ascii_whitespace()
+        || matches!(
+            ch,
+            '=' | '(' | '[' | '{' | ',' | ';' | '|' | '&' | '<' | '>'
+        )
 }
 
 fn is_shell_word_boundary(ch: char) -> bool {
@@ -2372,10 +2434,7 @@ fn shell_path_to_host_path(value: &str) -> String {
     let normalized = value.replace('\\', "/");
     if cfg!(windows) {
         let bytes = normalized.as_bytes();
-        if bytes.len() == 2
-            && bytes[0] == b'/'
-            && (bytes[1] as char).is_ascii_alphabetic()
-        {
+        if bytes.len() == 2 && bytes[0] == b'/' && (bytes[1] as char).is_ascii_alphabetic() {
             let drive = (bytes[1] as char).to_ascii_uppercase();
             return format!("{}:/", drive);
         }
@@ -2455,10 +2514,9 @@ fn normalize_shell_visible_path(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::test_support::PROCESS_STATE_LOCK;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
-
 
     #[test]
     fn native_lifecycle_hooks_run_for_interactive_commands() {
@@ -2516,7 +2574,10 @@ alias hello='echo from-alias'
         shell.run_startup_rc();
 
         assert_eq!(shell.executor.get_env("WINSHRC_VALUE"), Some("from-rc"));
-        assert_eq!(shell.aliases.get("hello").map(String::as_str), Some("echo from-alias"));
+        assert_eq!(
+            shell.aliases.get("hello").map(String::as_str),
+            Some("echo from-alias")
+        );
         assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
 
         let _ = std::fs::remove_dir_all(temp);
@@ -2550,7 +2611,10 @@ export AFTER_SETOPT=ok
 
         assert_eq!(shell.executor.get_env("AFTER_SETOPT"), Some("ok"));
         assert!(shell.history_ignore_space_prefixed);
-        assert_eq!(shell.executor.get_env("WINUXSH_HIST_IGNORE_DUPS"), Some("1"));
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_HIST_IGNORE_DUPS"),
+            Some("1")
+        );
         assert!(shell.zsh_options.contains("hist_ignore_space"));
         assert!(shell.zsh_options.contains("prompt_subst"));
         assert!(!shell.zsh_options.contains("prompt_percent"));
@@ -2568,7 +2632,10 @@ export AFTER_SETOPT=ok
         assert!(shell.history_ignore_space_prefixed);
         assert!(shell.zsh_options.contains("hist_ignore_space"));
 
-        assert_eq!(shell.execute_script("setopt no_hist_ignore_space").unwrap(), 0);
+        assert_eq!(
+            shell.execute_script("setopt no_hist_ignore_space").unwrap(),
+            0
+        );
         assert!(!shell.history_ignore_space_prefixed);
         assert!(!shell.zsh_options.contains("hist_ignore_space"));
     }
@@ -2636,8 +2703,13 @@ export AFTER_SETOPT=ok
         let _cwd_guard = CwdGuard::capture();
         let mut shell = test_shell(HookConfig::default());
 
-        shell.execute_interactive_line("alias gst='git status'").unwrap();
-        assert_eq!(shell.aliases.get("gst").map(String::as_str), Some("git status"));
+        shell
+            .execute_interactive_line("alias gst='git status'")
+            .unwrap();
+        assert_eq!(
+            shell.aliases.get("gst").map(String::as_str),
+            Some("git status")
+        );
         assert_eq!(
             shell.native_alias_finder_matches("git status"),
             vec!["winuxsh: alias available: gst='git status'"]
@@ -2655,9 +2727,7 @@ export AFTER_SETOPT=ok
 
         shell.execute_interactive_line("HTTP_CODE=200").unwrap();
         let code = shell
-            .execute_interactive_script(
-                "if [ $HTTP_CODE -eq 200 ]; then\n  RESULT=OK\nfi",
-            )
+            .execute_interactive_script("if [ $HTTP_CODE -eq 200 ]; then\n  RESULT=OK\nfi")
             .unwrap();
 
         assert_eq!(code, 0);
@@ -2667,10 +2737,16 @@ export AFTER_SETOPT=ok
     #[test]
     fn shell_path_to_host_path_converts_drive_style_paths() {
         if cfg!(windows) {
-            assert_eq!(shell_path_to_host_path("/c/Users/me/project"), "C:/Users/me/project");
+            assert_eq!(
+                shell_path_to_host_path("/c/Users/me/project"),
+                "C:/Users/me/project"
+            );
             assert_eq!(shell_path_to_host_path("/d"), "D:/");
         } else {
-            assert_eq!(shell_path_to_host_path("/c/Users/me/project"), "/c/Users/me/project");
+            assert_eq!(
+                shell_path_to_host_path("/c/Users/me/project"),
+                "/c/Users/me/project"
+            );
         }
     }
 
@@ -2686,7 +2762,10 @@ export AFTER_SETOPT=ok
                 "C:/Users/me/project"
             );
         } else {
-            assert_eq!(host_path_to_shell_path("/home/me/project"), "/home/me/project");
+            assert_eq!(
+                host_path_to_shell_path("/home/me/project"),
+                "/home/me/project"
+            );
         }
     }
 
@@ -2774,7 +2853,7 @@ export AFTER_SETOPT=ok
         }
 
         let mut tokens = tokenize("ls -la | grep map");
-        enable_interactive_terminal_grep_colors(&mut tokens);
+        rewrite_winuxcmd_command_shims(&mut tokens, true);
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
@@ -2791,7 +2870,7 @@ export AFTER_SETOPT=ok
         }
 
         let mut tokens = tokenize("ls -la | grep --color=never map");
-        enable_interactive_terminal_grep_colors(&mut tokens);
+        rewrite_winuxcmd_command_shims(&mut tokens, true);
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
@@ -2808,7 +2887,7 @@ export AFTER_SETOPT=ok
         }
 
         let mut tokens = tokenize("ls -la | grep.exe map");
-        enable_interactive_terminal_grep_colors(&mut tokens);
+        rewrite_winuxcmd_command_shims(&mut tokens, true);
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
@@ -2825,11 +2904,11 @@ export AFTER_SETOPT=ok
         }
 
         let mut tokens = tokenize("ls -la | grep map > out.txt");
-        enable_interactive_terminal_grep_colors(&mut tokens);
+        rewrite_winuxcmd_command_shims(&mut tokens, true);
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
-        assert_eq!(pipeline.stages[1].words, vec!["grep", "map"]);
+        assert_eq!(pipeline.stages[1].words, vec!["grep.exe", "map"]);
     }
 
     #[test]
@@ -2839,13 +2918,42 @@ export AFTER_SETOPT=ok
         }
 
         let mut tokens = tokenize("grep map README.md");
-        enable_interactive_terminal_grep_colors(&mut tokens);
+        rewrite_winuxcmd_command_shims(&mut tokens, true);
         let ast = parse(&tokens);
 
         assert_eq!(
             ast.commands[0].words,
             vec!["grep.exe", "--color=always", "map", "README.md"]
         );
+    }
+
+    #[test]
+    fn script_grep_rewrite_forces_external_grep_without_color() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("printf \"abc\\n\" | grep -E \"a.+c\"");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+
+        assert_eq!(pipeline.stages[1].words, vec!["grep.exe", "-E", "a.+c"]);
+    }
+
+    #[test]
+    fn bare_pwd_rewrites_to_winuxcmd_pwd_but_builtin_pwd_does_not() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("pwd; builtin pwd; command pwd");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands[0].words, vec!["pwd.exe"]);
+        assert_eq!(ast.commands[1].words, vec!["builtin", "pwd"]);
+        assert_eq!(ast.commands[2].words, vec!["command", "pwd.exe"]);
     }
 
     #[test]
@@ -2983,7 +3091,10 @@ BACKTICK_VALUE=`whoami`
         assert!(shell.executor.get_env("EXPAND_VALUE").is_none());
         assert!(shell.executor.get_env("BACKTICK_VALUE").is_none());
         assert_ne!(shell.executor.get_env("PATH"), Some("bad"));
-        assert_ne!(shell.executor.get_env("NODE_OPTIONS"), Some("--require bad"));
+        assert_ne!(
+            shell.executor.get_env("NODE_OPTIONS"),
+            Some("--require bad")
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -3315,7 +3426,11 @@ BACKTICK_VALUE=`whoami`
                 target_path, log_path
             )
         };
-        let exe = bin.join(if cfg!(windows) { "zoxide.cmd" } else { "zoxide" });
+        let exe = bin.join(if cfg!(windows) {
+            "zoxide.cmd"
+        } else {
+            "zoxide"
+        });
         std::fs::write(&exe, script).unwrap();
         #[cfg(unix)]
         {
@@ -3339,7 +3454,11 @@ BACKTICK_VALUE=`whoami`
                 shell_quote(correction)
             )
         };
-        let exe = bin.join(if cfg!(windows) { "thefuck.cmd" } else { "thefuck" });
+        let exe = bin.join(if cfg!(windows) {
+            "thefuck.cmd"
+        } else {
+            "thefuck"
+        });
         std::fs::write(&exe, script).unwrap();
         #[cfg(unix)]
         {
@@ -3352,7 +3471,10 @@ BACKTICK_VALUE=`whoami`
 
     fn write_fake_fzf(bin: &std::path::Path, selected_path: &str) {
         let script = if cfg!(windows) {
-            format!("@echo off\r\n<nul set /p ={}\r\nexit /b 0\r\n", selected_path)
+            format!(
+                "@echo off\r\n<nul set /p ={}\r\nexit /b 0\r\n",
+                selected_path
+            )
         } else {
             format!("#!/bin/sh\nprintf '%s\\n' {}\n", shell_quote(selected_path))
         };

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use std::ffi::c_void;
@@ -10,20 +10,22 @@ use std::mem::size_of;
 #[cfg(windows)]
 use std::ptr;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE, WINHTTP_FLAG_SECURE,
-    WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS,
-    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpQueryOption, WinHttpReadData,
+    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
+    WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS,
+    WINHTTP_OPTION_URL, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 const DEFAULT_REPO: &str = "unixwin/winuxsh";
 const USER_AGENT: &str = concat!("winuxsh/", env!("CARGO_PKG_VERSION"));
 const HTTP_TIMEOUT_MS: i32 = 30_000;
+const UPDATE_CHECK_TIMEOUT_MS: i32 = 2_500;
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfUpdateOptions {
@@ -44,14 +46,13 @@ impl Default for SelfUpdateOptions {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitHubRelease {
     tag_name: String,
     html_url: String,
-    assets: Vec<GitHubAsset>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
@@ -59,7 +60,7 @@ struct GitHubAsset {
 
 pub fn run(args: &[String]) -> Result<()> {
     let options = parse_options(args)?;
-    let release = fetch_latest_release(&options.repo)?;
+    let release = resolve_latest_release(&options.repo, HTTP_TIMEOUT_MS)?;
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
 
     if !options.force && !release_is_newer(&release.tag_name, &current_tag) {
@@ -80,22 +81,10 @@ pub fn run(args: &[String]) -> Result<()> {
         release.tag_name, release.html_url
     );
 
-    let Some(asset) = select_installer_asset(&release.assets, arch) else {
-        let portable = select_portable_asset(&release.assets, arch)
-            .map(|asset| asset.browser_download_url.as_str())
-            .unwrap_or(&release.html_url);
-        if options.check {
-            println!("Installer: unavailable for {arch}");
-            println!("Portable package: {portable}");
-            return Ok(());
-        }
-        anyhow::bail!(
-            "latest release {} has no {} installer asset; portable package: {}",
-            release.tag_name,
-            arch,
-            portable
-        );
-    };
+    let assets = installer_assets(&options.repo, &release.tag_name, arch);
+    let asset = assets
+        .first()
+        .expect("installer_assets always returns at least one asset");
 
     println!("Installer: {}", asset.name);
 
@@ -103,7 +92,7 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let installer_path = download_asset(&options.repo, &release.tag_name, asset)?;
+    let installer_path = download_first_available_asset(&options.repo, &release.tag_name, &assets)?;
     println!("Downloaded: {}", installer_path.display());
 
     if options.dry_run {
@@ -128,6 +117,30 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn maybe_print_update_hint() {
+    if update_check_disabled() || !update_check_due() {
+        return;
+    }
+
+    let result = resolve_latest_release(DEFAULT_REPO, UPDATE_CHECK_TIMEOUT_MS);
+    match result {
+        Ok(release) => {
+            let _ = write_update_check_stamp();
+            let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+            if release_is_newer(&release.tag_name, &current_tag) {
+                eprintln!(
+                    "winuxsh: update available: {} (run 'winuxsh --self-update')",
+                    release.tag_name
+                );
+            }
+        }
+        Err(err) => {
+            log::debug!("winuxsh update check failed: {err}");
+            let _ = write_update_check_stamp();
+        }
+    }
+}
+
 fn parse_options(args: &[String]) -> Result<SelfUpdateOptions> {
     let mut options = SelfUpdateOptions::default();
     let mut i = 0;
@@ -150,10 +163,20 @@ fn parse_options(args: &[String]) -> Result<SelfUpdateOptions> {
     Ok(options)
 }
 
-fn fetch_latest_release(repo: &str) -> Result<GitHubRelease> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let bytes = http_get_bytes(&url)?;
-    serde_json::from_slice::<GitHubRelease>(&bytes).with_context(|| format!("parse {url}"))
+fn resolve_latest_release(repo: &str, timeout_ms: i32) -> Result<GitHubRelease> {
+    let url = format!("https://github.com/{repo}/releases/latest");
+    let response = http_get(&url, timeout_ms)?;
+    let tag_name = latest_tag_from_url(&response.final_url).with_context(|| {
+        format!(
+            "GitHub latest release redirect did not point at a tag: {}",
+            response.final_url
+        )
+    })?;
+
+    Ok(GitHubRelease {
+        tag_name,
+        html_url: response.final_url,
+    })
 }
 
 fn download_asset(repo: &str, tag: &str, asset: &GitHubAsset) -> Result<PathBuf> {
@@ -176,8 +199,36 @@ fn download_asset(repo: &str, tag: &str, asset: &GitHubAsset) -> Result<PathBuf>
     Ok(path)
 }
 
-#[cfg(windows)]
+fn download_first_available_asset(
+    repo: &str,
+    tag: &str,
+    assets: &[GitHubAsset],
+) -> Result<PathBuf> {
+    let mut errors = Vec::new();
+    for asset in assets {
+        match download_asset(repo, tag, asset) {
+            Ok(path) => return Ok(path),
+            Err(err) => errors.push(format!("{}: {err}", asset.name)),
+        }
+    }
+
+    anyhow::bail!(
+        "failed to download installer for {tag}; tried {}",
+        errors.join("; ")
+    )
+}
+
+struct HttpResponse {
+    body: Vec<u8>,
+    final_url: String,
+}
+
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
+    Ok(http_get(url, HTTP_TIMEOUT_MS)?.body)
+}
+
+#[cfg(windows)]
+fn http_get(url: &str, timeout_ms: i32) -> Result<HttpResponse> {
     let parsed = ParsedUrl::parse(url)?;
     let user_agent = wide_null(USER_AGENT);
     let host = wide_null(&parsed.host);
@@ -200,10 +251,10 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     if unsafe {
         WinHttpSetTimeouts(
             session.raw(),
-            HTTP_TIMEOUT_MS,
-            HTTP_TIMEOUT_MS,
-            HTTP_TIMEOUT_MS,
-            HTTP_TIMEOUT_MS,
+            timeout_ms,
+            timeout_ms,
+            timeout_ms,
+            timeout_ms,
         )
     } == 0
     {
@@ -280,11 +331,13 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
         anyhow::bail!("HTTP status {status} for {url}: {detail}");
     }
 
-    read_response_body(request.raw())
+    let final_url = query_final_url(request.raw()).unwrap_or_else(|_| url.to_string());
+    let body = read_response_body(request.raw())?;
+    Ok(HttpResponse { body, final_url })
 }
 
 #[cfg(not(windows))]
-fn http_get_bytes(_url: &str) -> Result<Vec<u8>> {
+fn http_get(_url: &str, _timeout_ms: i32) -> Result<HttpResponse> {
     anyhow::bail!("self-update downloads require Windows WinHTTP")
 }
 
@@ -352,6 +405,38 @@ fn read_response_body(request: *mut c_void) -> Result<Vec<u8>> {
     }
 
     Ok(data)
+}
+
+#[cfg(windows)]
+fn query_final_url(request: *mut c_void) -> Result<String> {
+    let mut size = 0_u32;
+    if unsafe { WinHttpQueryOption(request, WINHTTP_OPTION_URL, ptr::null_mut(), &mut size) } != 0 {
+        return Ok(String::new());
+    }
+    let error = unsafe { GetLastError() };
+    if error != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+        return Err(winhttp_error("WinHttpQueryOption URL"));
+    }
+
+    let mut buffer = vec![0_u16; (size as usize + 1) / 2];
+    if unsafe {
+        WinHttpQueryOption(
+            request,
+            WINHTTP_OPTION_URL,
+            buffer.as_mut_ptr() as *mut c_void,
+            &mut size,
+        )
+    } == 0
+    {
+        return Err(winhttp_error("WinHttpQueryOption URL"));
+    }
+
+    let len = (size as usize) / 2;
+    buffer.truncate(len);
+    while buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    Ok(String::from_utf16_lossy(&buffer))
 }
 
 #[cfg(windows)]
@@ -453,7 +538,7 @@ fn request_headers() -> String {
 
 fn request_headers_for_token(token: Option<&str>) -> String {
     let mut headers = format!(
-        "User-Agent: {USER_AGENT}\r\nAccept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
+        "User-Agent: {USER_AGENT}\r\nAccept: application/octet-stream, text/html;q=0.9, */*;q=0.8\r\n"
     );
     if let Some(token) = token.and_then(clean_header_value) {
         headers.push_str("Authorization: Bearer ");
@@ -461,6 +546,110 @@ fn request_headers_for_token(token: Option<&str>) -> String {
         headers.push_str("\r\n");
     }
     headers
+}
+
+fn latest_tag_from_url(url: &str) -> Option<String> {
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let marker = "/releases/tag/";
+    let tag = without_query.split(marker).nth(1)?;
+    let tag = tag.split('/').next().unwrap_or(tag);
+    if parse_version_tag(tag).is_some() {
+        Some(tag.to_string())
+    } else {
+        None
+    }
+}
+
+fn installer_assets(repo: &str, tag: &str, arch: &str) -> Vec<GitHubAsset> {
+    let stable_name = format!("winuxsh-win-{arch}-setup.exe");
+    vec![
+        GitHubAsset {
+            name: stable_name.clone(),
+            browser_download_url: format!(
+                "https://github.com/{repo}/releases/latest/download/{stable_name}"
+            ),
+        },
+        versioned_installer_asset(repo, tag, arch),
+    ]
+}
+
+fn versioned_installer_asset(repo: &str, tag: &str, arch: &str) -> GitHubAsset {
+    let version = tag.trim_start_matches('v');
+    let name = format!("winuxsh-v{version}-win-{arch}-setup.exe");
+    GitHubAsset {
+        name: name.clone(),
+        browser_download_url: format!("https://github.com/{repo}/releases/download/{tag}/{name}"),
+    }
+}
+
+fn update_check_disabled() -> bool {
+    env_flag_is_disabled("WINUXSH_UPDATE_CHECK")
+        || env_flag_is_enabled("WINUXSH_NO_UPDATE_CHECK")
+        || std::env::var_os("CI").is_some()
+}
+
+fn env_flag_is_disabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn env_flag_is_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn update_check_due() -> bool {
+    let Ok(metadata) = std::fs::metadata(update_check_stamp_path()) else {
+        return true;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return true;
+    };
+    modified
+        .elapsed()
+        .map(|elapsed| elapsed >= UPDATE_CHECK_INTERVAL)
+        .unwrap_or(true)
+}
+
+fn write_update_check_stamp() -> Result<()> {
+    let path = update_check_stamp_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    std::fs::write(&path, format!("{now}\n")).with_context(|| format!("write {}", path.display()))
+}
+
+fn update_check_stamp_path() -> PathBuf {
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("Winuxsh")
+            .join("update-check.stamp");
+    }
+    std::env::temp_dir()
+        .join("winuxsh")
+        .join("update-check.stamp")
 }
 
 fn github_token() -> Option<String> {
@@ -534,22 +723,6 @@ fn safe_asset_name(name: &str) -> String {
         .collect()
 }
 
-fn select_installer_asset<'a>(assets: &'a [GitHubAsset], arch: &str) -> Option<&'a GitHubAsset> {
-    let needle = format!("-win-{arch}-setup.exe");
-    assets.iter().find(|asset| {
-        let name = asset.name.to_ascii_lowercase();
-        name.starts_with("winuxsh-v") && name.ends_with(&needle)
-    })
-}
-
-fn select_portable_asset<'a>(assets: &'a [GitHubAsset], arch: &str) -> Option<&'a GitHubAsset> {
-    let needle = format!("-win-{arch}.zip");
-    assets.iter().find(|asset| {
-        let name = asset.name.to_ascii_lowercase();
-        name.starts_with("winuxsh-v") && name.ends_with(&needle)
-    })
-}
-
 fn release_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -583,29 +756,27 @@ fn parse_version_tag(tag: &str) -> Option<(u64, u64, u64)> {
 mod tests {
     use super::*;
 
-    fn asset(name: &str) -> GitHubAsset {
-        GitHubAsset {
-            name: name.to_string(),
-            browser_download_url: format!("https://example.invalid/{name}"),
-        }
+    #[test]
+    fn builds_versioned_installer_asset() {
+        let asset = versioned_installer_asset("unixwin/winuxsh", "v0.8.2", "x64");
+
+        assert_eq!(asset.name, "winuxsh-v0.8.2-win-x64-setup.exe");
+        assert_eq!(
+            asset.browser_download_url,
+            "https://github.com/unixwin/winuxsh/releases/download/v0.8.2/winuxsh-v0.8.2-win-x64-setup.exe"
+        );
     }
 
     #[test]
-    fn selects_matching_installer_asset() {
-        let assets = vec![
-            asset("winuxsh-v0.8.1-win-x64.zip"),
-            asset("winuxsh-v0.8.1-win-x64-setup.exe"),
-            asset("winuxsh-v0.8.1-win-arm64-setup.exe"),
-        ];
+    fn builds_stable_installer_asset_before_versioned_fallback() {
+        let assets = installer_assets("unixwin/winuxsh", "v0.8.2", "x64");
 
+        assert_eq!(assets[0].name, "winuxsh-win-x64-setup.exe");
         assert_eq!(
-            select_installer_asset(&assets, "x64").map(|asset| asset.name.as_str()),
-            Some("winuxsh-v0.8.1-win-x64-setup.exe")
+            assets[0].browser_download_url,
+            "https://github.com/unixwin/winuxsh/releases/latest/download/winuxsh-win-x64-setup.exe"
         );
-        assert_eq!(
-            select_installer_asset(&assets, "arm64").map(|asset| asset.name.as_str()),
-            Some("winuxsh-v0.8.1-win-arm64-setup.exe")
-        );
+        assert_eq!(assets[1].name, "winuxsh-v0.8.2-win-x64-setup.exe");
     }
 
     #[test]
@@ -614,12 +785,11 @@ mod tests {
     }
 
     #[test]
-    fn request_headers_include_github_rest_defaults() {
+    fn request_headers_include_generic_download_defaults() {
         let headers = request_headers_for_token(None);
 
         assert!(headers.contains("User-Agent: winuxsh/"));
-        assert!(headers.contains("Accept: application/vnd.github+json"));
-        assert!(headers.contains("X-GitHub-Api-Version: 2022-11-28"));
+        assert!(headers.contains("Accept: application/octet-stream"));
         assert!(!headers.contains("Authorization:"));
     }
 
@@ -642,6 +812,24 @@ mod tests {
         let detail = response_error_detail(b"\n first line \nsecond line\nthird line\nfourth line");
 
         assert_eq!(detail, "first line second line third line");
+    }
+
+    #[test]
+    fn extracts_latest_release_tag_from_redirect_url() {
+        assert_eq!(
+            latest_tag_from_url("https://github.com/unixwin/winuxsh/releases/tag/v0.8.2"),
+            Some("v0.8.2".to_string())
+        );
+        assert_eq!(
+            latest_tag_from_url(
+                "https://github.com/unixwin/winuxsh/releases/tag/v0.8.2?expanded=true"
+            ),
+            Some("v0.8.2".to_string())
+        );
+        assert_eq!(
+            latest_tag_from_url("https://github.com/unixwin/winuxsh/releases/latest"),
+            None
+        );
     }
 
     #[cfg(windows)]

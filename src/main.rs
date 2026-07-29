@@ -153,6 +153,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_repl() -> anyhow::Result<()> {
+    self_update::maybe_print_update_hint();
     let mut shell = winuxsh_runtime::Shell::new()?;
     winuxsh_runtime::repl::run_repl(&mut shell)
 }

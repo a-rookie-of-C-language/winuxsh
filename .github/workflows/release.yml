@@ -173,6 +173,14 @@ jobs:
             "/DSourceDir=$sourceDir" `
             "/DOutputDir=$outputDir"
 
+      - name: Add latest-compatible asset aliases
+        shell: pwsh
+        run: |
+          $versionedZip = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip"
+          $versionedSetup = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
+          Copy-Item -LiteralPath $versionedZip -Destination "dist/winuxsh-win-${{ matrix.arch }}.zip" -Force
+          Copy-Item -LiteralPath $versionedSetup -Destination "dist/winuxsh-win-${{ matrix.arch }}-setup.exe" -Force
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
@@ -180,6 +188,8 @@ jobs:
           path: |
             dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
             dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+            dist/winuxsh-win-${{ matrix.arch }}.zip
+            dist/winuxsh-win-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           retention-days: 1
 
