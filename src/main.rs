@@ -122,6 +122,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             }
             let mut shell = winuxsh_runtime::Shell::new()?;
             shell.executor.inherit_process_stdin();
+            shell.enable_process_stdin_pipeline_bridge();
             if let Some(command_name) = args.get(3) {
                 shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
                 shell.executor.set_positional_params(args[4..].to_vec());
@@ -141,6 +142,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             let mut shell = winuxsh_runtime::Shell::new()?;
             shell.executor.set_env("__RUBASH_SCRIPT_NAME", first);
             shell.executor.inherit_process_stdin();
+            shell.enable_process_stdin_pipeline_bridge();
             shell.executor.set_positional_params(args[2..].to_vec());
             let content = std::fs::read_to_string(&script)?;
             let code = shell.execute_script(&content)?;

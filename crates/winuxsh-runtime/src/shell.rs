@@ -5,7 +5,7 @@
 //! to rubash; this layer only adds the Windows-facing UX.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -61,6 +61,7 @@ pub struct Shell {
     pub last_interactive_command: Option<String>,
     pub last_interactive_exit_code: Option<i32>,
     pub line_editor: Option<Reedline>,
+    process_stdin_pipeline_bridge: bool,
 }
 
 impl Shell {
@@ -302,10 +303,15 @@ impl Shell {
             last_interactive_command: None,
             last_interactive_exit_code: None,
             line_editor: None,
+            process_stdin_pipeline_bridge: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell.update_completion_state();
         Ok(shell)
+    }
+
+    pub fn enable_process_stdin_pipeline_bridge(&mut self) {
+        self.process_stdin_pipeline_bridge = true;
     }
 
     /// Execute a single input line via rubash. Returns the exit code.
@@ -1123,6 +1129,7 @@ impl Shell {
         let mut ast = parse(&tokens);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
+        self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
         let execution = self
             .execute_winuxsh_simple_ast(&ast)
@@ -1151,6 +1158,28 @@ impl Shell {
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
         Ok(code)
+    }
+
+    fn inject_process_stdin_for_rewritten_pipeline(&mut self, ast: &mut Ast) -> anyhow::Result<()> {
+        if !self.process_stdin_pipeline_bridge
+            || self.executor.get_env("__RUBASH_INHERIT_PROCESS_STDIN") != Some("1")
+        {
+            return Ok(());
+        }
+
+        let Some(stage) = process_stdin_pipeline_bridge_stage(ast) else {
+            return Ok(());
+        };
+
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        stage.heredoc = Some(format!("\x1e{input}"));
+        stage.heredoc_delimiter = Some("WINUXSH_PROCESS_STDIN".to_string());
+        Ok(())
     }
     /// Built-in git aliases (oh-my-zsh style).
     fn default_git_aliases() -> Vec<(&'static str, &'static str)> {
@@ -1268,8 +1297,42 @@ impl Shell {
             "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
             "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
             "source" => Some(self.execute_source_builtin(args)),
+            "pwd" => Some(self.execute_native_pwd_builtin(args)),
             _ => None,
         }
+    }
+
+    fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
+        let mut physical = false;
+        for arg in args {
+            if arg == "--" {
+                break;
+            }
+            if !arg.starts_with('-') || arg == "-" {
+                break;
+            }
+            for option in arg[1..].chars() {
+                match option {
+                    'L' => physical = false,
+                    'P' => physical = true,
+                    other => {
+                        eprintln!("winuxsh: pwd: -{}: invalid option", other);
+                        eprintln!("pwd: usage: pwd [-LP]");
+                        return 2;
+                    }
+                }
+            }
+        }
+
+        let directory = if physical {
+            std::env::current_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|_| self.executor.get_env("PWD").unwrap_or(".").to_string())
+        } else {
+            self.executor.get_env("PWD").unwrap_or(".").to_string()
+        };
+        println!("{}", native_pwd_display_path(&directory));
+        0
     }
 
     fn execute_source_builtin(&mut self, args: &[String]) -> i32 {
@@ -1542,12 +1605,67 @@ fn is_plain_simple_command(command: &rubash::parser::CommandNode) -> bool {
         && command.coproc_command.is_none()
 }
 
+fn command_has_redirects(command: &rubash::parser::CommandNode) -> bool {
+    !command.redirects.is_empty()
+        || command.redirect_in.is_some()
+        || command.redirect_out.is_some()
+        || command.append.is_some()
+        || command.redirect_err.is_some()
+        || command.redirect_err_append.is_some()
+        || command.heredoc.is_some()
+        || command.heredoc_delimiter.is_some()
+        || !command.heredoc_redirects.is_empty()
+        || command.here_string.is_some()
+}
+
+fn process_stdin_pipeline_bridge_stage(ast: &mut Ast) -> Option<&mut rubash::parser::CommandNode> {
+    if ast.commands.len() != 1 {
+        return None;
+    }
+
+    let pipeline = ast.commands[0].pipeline_command.as_mut()?;
+    let first = pipeline.stages.first_mut()?;
+    if command_has_redirects(first) {
+        return None;
+    }
+
+    let command_name = first.words.first()?;
+    let command_name = command_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command_name);
+    matches!(
+        command_name.to_ascii_lowercase().as_str(),
+        "awk.exe"
+            | "cat.exe"
+            | "grep.exe"
+            | "head.exe"
+            | "sed.exe"
+            | "sort.exe"
+            | "tail.exe"
+            | "tr.exe"
+            | "uniq.exe"
+            | "wc.exe"
+    )
+    .then_some(first)
+}
+
 fn is_winuxsh_builtin_command(command: &rubash::parser::CommandNode) -> bool {
     winuxsh_builtin_words(command).is_some()
 }
 
 fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str, &[String])> {
+    if command_has_redirects(command) {
+        return None;
+    }
+
     let words = command.words.as_slice();
+    if let [command_name, pwd_name, args @ ..] = words {
+        if command_name == "command" && pwd_name == "pwd" {
+            return Some(("pwd", args));
+        }
+    }
+
     let (name, args) = match words {
         [name, args @ ..] => (name.as_str(), args),
         [] => return None,
@@ -1555,7 +1673,11 @@ fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str,
     if name == "builtin" {
         match args {
             [builtin_name, builtin_args @ ..] => {
-                return winuxsh_builtin_name(builtin_name).map(|name| (name, builtin_args));
+                return match winuxsh_builtin_name(builtin_name) {
+                    Some("pwd") => None,
+                    Some(name) => Some((name, builtin_args)),
+                    None => None,
+                };
             }
             [] => return None,
         }
@@ -1566,6 +1688,7 @@ fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str,
 fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
     match name {
         "." | "source" => Some("source"),
+        "pwd" => Some("pwd"),
         "setopt" => Some("setopt"),
         "unsetopt" => Some("unsetopt"),
         _ => None,
@@ -1751,10 +1874,6 @@ fn rewrite_winuxcmd_command_shims_in_stage(
                 tokens[command_index].raw = "grep.exe".to_string();
             }
         }
-        Some(WinuxCmdShim::Pwd) => {
-            tokens[command_index].value = "pwd.exe".to_string();
-            tokens[command_index].raw = "pwd.exe".to_string();
-        }
         None => return,
     }
 
@@ -1791,7 +1910,6 @@ fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Opti
 
 enum WinuxCmdShim {
     Grep { needs_exe_shim: bool },
-    Pwd,
 }
 
 fn winuxcmd_command_shim(token: &Token) -> Option<WinuxCmdShim> {
@@ -1807,9 +1925,6 @@ fn winuxcmd_command_shim(token: &Token) -> Option<WinuxCmdShim> {
         return Some(WinuxCmdShim::Grep {
             needs_exe_shim: false,
         });
-    }
-    if token.value.eq_ignore_ascii_case("pwd") && token.raw.eq_ignore_ascii_case("pwd") {
-        return Some(WinuxCmdShim::Pwd);
     }
     None
 }
@@ -2511,6 +2626,14 @@ fn normalize_shell_visible_path(value: &str) -> String {
     }
 }
 
+fn native_pwd_display_path(value: &str) -> String {
+    if cfg!(windows) {
+        shell_path_to_host_path(value).replace('/', "\\")
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2942,7 +3065,7 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn bare_pwd_rewrites_to_winuxcmd_pwd_but_builtin_pwd_does_not() {
+    fn bare_pwd_stays_internal_without_winuxcmd_path_dependency() {
         if !cfg!(windows) {
             return;
         }
@@ -2951,9 +3074,58 @@ export AFTER_SETOPT=ok
         rewrite_winuxcmd_command_shims(&mut tokens, false);
         let ast = parse(&tokens);
 
-        assert_eq!(ast.commands[0].words, vec!["pwd.exe"]);
+        assert_eq!(ast.commands[0].words, vec!["pwd"]);
         assert_eq!(ast.commands[1].words, vec!["builtin", "pwd"]);
-        assert_eq!(ast.commands[2].words, vec!["command", "pwd.exe"]);
+        assert_eq!(ast.commands[2].words, vec!["command", "pwd"]);
+        assert_eq!(
+            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
+            Some("pwd")
+        );
+        assert!(winuxsh_builtin_words(&ast.commands[1]).is_none());
+        assert_eq!(
+            winuxsh_builtin_words(&ast.commands[2]).map(|(name, _)| name),
+            Some("pwd")
+        );
+    }
+
+    #[test]
+    fn redirected_pwd_uses_rubash_redirection_path() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let ast = parse(&tokenize("pwd > out.txt"));
+
+        assert!(winuxsh_builtin_words(&ast.commands[0]).is_none());
+    }
+
+    #[test]
+    fn rewritten_grep_exe_first_pipeline_stage_gets_stdin_bridge() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("grep -E alpha | cat");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let mut ast = parse(&tokens);
+
+        {
+            let stage = process_stdin_pipeline_bridge_stage(&mut ast).unwrap();
+            assert_eq!(stage.words[0], "grep.exe");
+        }
+    }
+
+    #[test]
+    fn redirected_grep_exe_pipeline_stage_does_not_get_stdin_bridge() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("grep alpha < input.txt | cat");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let mut ast = parse(&tokens);
+
+        assert!(process_stdin_pipeline_bridge_stage(&mut ast).is_none());
     }
 
     #[test]
@@ -3357,6 +3529,7 @@ BACKTICK_VALUE=`whoami`
             last_interactive_command: None,
             last_interactive_exit_code: None,
             line_editor: None,
+            process_stdin_pipeline_bridge: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
         shell
