@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout rubash path dependency
-        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
 
       - name: Resolve release inputs
         id: release
