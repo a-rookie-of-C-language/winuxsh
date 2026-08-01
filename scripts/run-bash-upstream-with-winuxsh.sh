@@ -198,8 +198,18 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 PATH="/usr/bin:/bin:\$PATH"
-allowed="$workdir_real"
-cwd="\$(realpath -m "\$PWD")"
+normalize_real_path() {
+  local path="\${1//\\\\//}"
+  if [[ "\$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
+    local drive="\${BASH_REMATCH[1]^^}"
+    local rest="\${BASH_REMATCH[2]:-/}"
+    printf '%s:%s\n' "\$drive" "\$rest"
+    return
+  fi
+  printf '%s\n' "\$path"
+}
+allowed="\$(normalize_real_path "$workdir_real")"
+cwd="\$(normalize_real_path "\$(realpath -m "\$PWD")")"
 case "\$cwd" in
   "\$allowed"|"\$allowed"/*) ;;
   *)
@@ -220,7 +230,7 @@ for arg in "\$@"; do
   case "\$arg" in
     "") continue ;;
   esac
-  candidate="\$(realpath -m -- "\$arg")"
+  candidate="\$(normalize_real_path "\$(realpath -m -- "\$arg")")"
   if [[ "$guarded_cmd" == "cp" && "\$candidate" == "/dev/null" ]]; then
     continue
   fi
@@ -242,8 +252,18 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 PATH="$guard_bin:/usr/bin:/bin:\$PATH"
-allowed="$workdir_real"
-cwd="\$(realpath -m "\$PWD")"
+normalize_real_path() {
+  local path="\${1//\\\\//}"
+  if [[ "\$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
+    local drive="\${BASH_REMATCH[1]^^}"
+    local rest="\${BASH_REMATCH[2]:-/}"
+    printf '%s:%s\n' "\$drive" "\$rest"
+    return
+  fi
+  printf '%s\n' "\$path"
+}
+allowed="\$(normalize_real_path "$workdir_real")"
+cwd="\$(normalize_real_path "\$(realpath -m "\$PWD")")"
 case "\$cwd" in
   "\$allowed"|"\$allowed"/*) ;;
   *)

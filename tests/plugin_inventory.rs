@@ -698,6 +698,28 @@ fn plugin_info_reads_installed_process_pack_contract() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
+fn plugin_info_reads_installed_source_pack_contract() {
+    let temp = temp_dir("plugin-installed-source-info");
+    let bundle = temp.join("bundle");
+    write_source_test_bundle(&bundle, "9.9.7", "init.winux");
+    let output = run_winuxsh_with_env(
+        &["plugin", "info", "source-test"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
+    );
+    assert_success(&output, "plugin info installed source pack");
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("Plugin: source-test"), "{stdout}");
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(stdout.contains("Execution model: shell_source"), "{stdout}");
+    assert!(stdout.contains("Permissions: shell:source"), "{stdout}");
+    assert!(stdout.contains("Source:"), "{stdout}");
+    assert!(
+        stdout.contains("  entry: packs/source-test/init.winux"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
 fn plugin_info_reads_installed_wasm_pack_contract() {
     let temp = temp_dir("plugin-installed-wasm-info");
     let bundle = temp.join("bundle");
@@ -1685,6 +1707,68 @@ fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
+fn plugin_update_accepts_source_bundle_with_winux_entry() {
+    let temp = temp_dir("plugin-update-source-winux");
+    let bundle = temp.join("bundle");
+    let envs = plugin_bundle_env(&temp);
+    write_source_test_bundle(&bundle, "9.9.21", "init.winux");
+    let update = run_winuxsh_with_env_owned(
+        &[
+            "plugin".to_string(),
+            "update".to_string(),
+            "oh-my-winuxsh".to_string(),
+            "--from".to_string(),
+            bundle.display().to_string(),
+        ],
+        &envs,
+    );
+    assert_success(&update, "plugin update source bundle");
+    let stdout = stdout_text(&update);
+    assert!(
+        stdout.contains("Updated bundle 'oh-my-winuxsh' to 9.9.21"),
+        "{stdout}"
+    );
+    let info = run_winuxsh_with_env(&["plugin", "info", "source-test"], &envs);
+    assert_success(&info, "plugin info after source bundle update");
+    let stdout = stdout_text(&info);
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(
+        stdout.contains("  entry: packs/source-test/init.winux"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
+fn plugin_update_rejects_source_bundle_without_winux_entry() {
+    let temp = temp_dir("plugin-update-source-bad-suffix");
+    let bundle = temp.join("bundle");
+    let envs = plugin_bundle_env(&temp);
+    write_source_test_bundle(&bundle, "9.9.22", "init.winsh");
+    let update = run_winuxsh_with_env_owned(
+        &[
+            "plugin".to_string(),
+            "update".to_string(),
+            "oh-my-winuxsh".to_string(),
+            "--from".to_string(),
+            bundle.display().to_string(),
+        ],
+        &envs,
+    );
+    assert!(
+        !update.status.success(),
+        "bad source suffix update should fail\nstdout={}\nstderr={}",
+        stdout_text(&update),
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&update.stderr);
+    assert!(stderr.contains("must end in .winux"), "stderr={stderr}");
+    let status = run_winuxsh_with_env(&["plugin", "bundle", "status"], &envs);
+    assert_success(&status, "plugin bundle status after bad source suffix");
+    let stdout = stdout_text(&status);
+    assert!(stdout.contains("State: compiled_fallback"), "{stdout}");
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
 fn plugin_update_installs_zip_archive_from_cli() {
     let temp = temp_dir("plugin-update-zip-cli");
     let bundle = temp.join("bundle");
@@ -2538,6 +2622,67 @@ action = "vi-normal-mode"
 }
 fn write_process_test_bundle(path: &Path, version: &str) {
     write_process_test_bundle_with_timeout(path, version, 1000);
+}
+fn write_source_test_bundle(path: &Path, version: &str, source_file: &str) {
+    fs::create_dir_all(path.join("packs").join("source-test")).unwrap();
+    fs::write(
+        path.join("bundle.toml"),
+        format!(
+            r#"name = "oh-my-winuxsh"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = []
+available = ["source-test"]
+[layout]
+packs_dir = "packs"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("packs").join("source-test").join("plugin.toml"),
+        format!(
+            r#"name = "source-test"
+bundle = "oh-my-winuxsh"
+version = {version:?}
+kind = "source"
+api = "winuxsh:plugin@0.1.0"
+category = "workflow"
+summary = "Source plugin startup fixture."
+default = false
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+aliases = true
+completions = []
+prompt_segments = []
+hooks = ["startup"]
+commands = []
+keybindings = []
+[source]
+entry = "packs/source-test/{source_file}"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("packs").join("source-test").join(source_file),
+        "alias source_test='echo source plugin'\n",
+    )
+    .unwrap();
+    write_test_bundle_index(
+        path,
+        version,
+        "source-test",
+        "source",
+        "workflow",
+        "Source plugin startup fixture.",
+        false,
+        &["shell:source"],
+        &[],
+    );
 }
 fn write_external_process_test_bundle(path: &Path, version: &str) {
     write_external_process_test_bundle_with_pack_bundle(path, version, "community-tools");

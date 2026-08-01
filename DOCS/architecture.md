@@ -65,16 +65,21 @@ rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 插件加载、权限和 bundle 更新不依赖执行 rc。rc 继续用于 `export`、`alias`、
 函数和其他交互式 shell 初始化逻辑。
 
-### 5. 内置插件系统
+### 5. 插件系统
 
 v3 插件系统是 Winuxsh 自己的插件系统，不是 zsh 插件兼容层。
 
 - `oh-my-winuxsh` 作为官方 bundled plugin distribution 随 winuxsh 发行。
-- 现有 git/docker/kubectl/npm/zoxide/direnv/dotenv/fzf 等能力先作为
-  `kind = "builtin"` 的 first-party pack 注册。
+- git/docker/kubectl/npm 这类 Oh My 风格 shell helper 可以作为
+  `kind = "source"` 的 first-party pack，从 bundle 内 `init.winux` 加载。
+- zoxide/direnv/dotenv/fzf 等需要更强 host 行为的能力继续由
+  `kind = "builtin"` 或后续显式 effect/runtime API 承接。
 - WASM/WASI 是第三方插件的长期运行时。
 - process/IPC 插件是外部工具桥和调试后端。
-- 插件不能扩展 rubash parser/executor，也不能 source 任意 zsh 插件脚本。
+- 插件不能扩展 rubash parser/executor，也不能 source 任意 zsh、legacy
+  `.winsh`、或用户目录里发现的 rc 片段。source pack 只能加载
+  manifest 声明的 bundle-local `.winux` 文件，并且需要 `shell:source`
+  权限。
 - Winuxsh 不支持 ZLE runtime；只允许把少量 zsh 风格键位名翻译到 reedline
   原生编辑动作。
 

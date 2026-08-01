@@ -217,7 +217,7 @@ load = ["git", "prompts", "keybindings"]
 
 [plugins.git]
 enabled = true
-permissions = ["cwd:read", "process:run:git"]
+permissions = ["shell:source", "cwd:read", "process:run:git"]
 
 [plugins.zoxide]
 enabled = false
@@ -226,6 +226,9 @@ permissions = ["cwd:read", "process:run:zoxide"]
 
 Existing `[zsh.native_plugins]` and `[zsh.native_widgets]` config remains a
 legacy migration compatibility surface, but new config should use `[plugins]`.
+Official shell helper packs can ship reviewed bundle-local `init.winux` source
+scripts. Those scripts load for interactive startup and `winuxsh -C`, before
+your `~/.winshrc`, so your personal rc aliases and functions still win.
 Use `winuxsh plugin list`, `winuxsh plugin search`, `winuxsh plugin themes`,
 and `winuxsh plugin review` for current inventory, theme sources, and
 permission checks; legacy `--zsh-native-packs` remains migration-only.

@@ -25,7 +25,6 @@ use crate::config::{
     load as load_config, AutosuggestConfig, EditorMode, HookConfig, MenuConfig, NativePluginConfig,
     NativeWidgetConfig, SyntaxHighlightConfig,
 };
-use crate::native_file_builtins;
 use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec};
 use crate::prompt::{PromptBackend, WinuxshPrompt};
 use crate::prompt_segments::{
@@ -446,10 +445,7 @@ impl Shell {
             code
         } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
             code
-        } else if let Some(execution) = self
-            .execute_winuxsh_simple_ast(&ast)
-            .or_else(|| self.execute_host_synced_simple_ast(&ast))
-        {
+        } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
             match execution {
                 Ok(code) => code,
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
@@ -503,6 +499,8 @@ impl Shell {
 
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
+        self.sync_zsh_options_from_executor();
+        self.sync_alias_mirror_from_executor();
         Ok(code)
     }
 
@@ -570,6 +568,7 @@ impl Shell {
 
     /// Source the user's REPL startup file once before the first prompt.
     pub fn run_startup_rc(&mut self) {
+        self.run_source_plugin_startup_scripts();
         self.run_process_plugin_hooks("startup", &[]);
         let path = self.home_dir.join(WINUXSH_RC_FILE);
         let Ok(script) = std::fs::read_to_string(&path) else {
@@ -577,7 +576,7 @@ impl Shell {
         };
 
         self.executor.set_env("WINUXSH_REPL_STARTUP", "1");
-        match self.execute_script(&script) {
+        match self.source_file_into_current_shell(&path) {
             Ok(code) => {
                 if code != 0 {
                     log::warn!("{} exited with status {}", path.display(), code);
@@ -590,6 +589,76 @@ impl Shell {
         self.update_completion_state();
     }
 
+    fn run_source_plugin_startup_scripts(&mut self) {
+        let context = [("WINUXSH_REPL_PLUGIN_STARTUP", "1".to_string())];
+        self.run_source_plugin_scripts_for_hook("startup", &context);
+    }
+
+    fn run_source_plugin_scripts_for_hook(&mut self, hook_name: &str, context: &[(&str, String)]) {
+        for source in crate::plugins::source_plugin_scripts_for_hook(&self.plugins, hook_name) {
+            let script = match std::fs::read_to_string(&source.path) {
+                Ok(script) => script,
+                Err(err) => {
+                    log::warn!(
+                        "source plugin '{}' hook '{}' failed to read {}: {}",
+                        source.pack,
+                        hook_name,
+                        source.path.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            let plugin_dir = source
+                .path
+                .parent()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            for (name, value) in context {
+                self.executor.set_env(name, value);
+            }
+            self.executor.set_env("WINUXSH_PLUGIN_NAME", &source.pack);
+            self.executor.set_env("WINUXSH_PLUGIN_DIR", &plugin_dir);
+            self.executor
+                .set_env("WINUXSH_PLUGIN_SOURCE", &source.path.display().to_string());
+            self.executor.set_env("WINUXSH_PLUGIN_HOOK", hook_name);
+            match self.source_file_into_current_shell(&source.path) {
+                Ok(code) => {
+                    if code != 0 {
+                        log::warn!(
+                            "source plugin '{}' hook '{}' exited with status {}",
+                            source.pack,
+                            hook_name,
+                            code
+                        );
+                    }
+                    self.sync_alias_mirror_from_script(&script, code);
+                }
+                Err(err) => log::warn!(
+                    "source plugin '{}' hook '{}' failed from {}: {}",
+                    source.pack,
+                    hook_name,
+                    source.path.display(),
+                    err
+                ),
+            }
+            let mut unset_names = vec![
+                "WINUXSH_PLUGIN_NAME".to_string(),
+                "WINUXSH_PLUGIN_DIR".to_string(),
+                "WINUXSH_PLUGIN_SOURCE".to_string(),
+                "WINUXSH_PLUGIN_HOOK".to_string(),
+            ];
+            unset_names.extend(context.iter().map(|(name, _)| (*name).to_string()));
+            let _ = self.execute_script(&format!("unset {}", unset_names.join(" ")));
+        }
+        self.update_completion_state();
+    }
+
+    fn source_file_into_current_shell(&mut self, path: &Path) -> anyhow::Result<i32> {
+        let shell_path = host_path_to_shell_path(&path.to_string_lossy());
+        self.execute_script(&format!(". {}", shell_quote(&shell_path)))
+    }
+
     /// Run native hooks before rendering the next prompt.
     pub fn run_precmd_hooks(&mut self) {
         self.run_native_precmd_plugins();
@@ -598,6 +667,7 @@ impl Shell {
         // Set in process env so segment prompt can read it via std::env::var.
         std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
         let context = [("WINUXSH_LAST_EXIT_CODE", last_exit_code)];
+        self.run_source_plugin_scripts_for_hook("precmd", &context);
         self.run_process_plugin_hooks("precmd", &context);
         self.run_hook_scripts(&hooks, &context);
     }
@@ -611,6 +681,7 @@ impl Shell {
         self.run_native_preexec_plugins(command);
         let hooks = self.hooks.preexec.clone();
         let context = [("WINUXSH_PREEXEC_COMMAND", command.to_string())];
+        self.run_source_plugin_scripts_for_hook("preexec", &context);
         self.run_process_plugin_hooks("preexec", &context);
         self.run_hook_scripts(&hooks, &context);
     }
@@ -626,6 +697,7 @@ impl Shell {
             ("WINUXSH_OLDPWD", old_pwd.to_string()),
             ("WINUXSH_PWD", new_pwd.to_string()),
         ];
+        self.run_source_plugin_scripts_for_hook("chpwd", &context);
         self.run_process_plugin_hooks("chpwd", &context);
         self.run_hook_scripts(&hooks, &context);
     }
@@ -1452,6 +1524,9 @@ impl Shell {
         matches
     }
 
+    fn sync_alias_mirror_from_executor(&mut self) {
+        self.aliases = self.executor.aliases_snapshot();
+    }
     fn sync_alias_mirror_from_line(&mut self, line: &str, code: i32) {
         if code != 0 {
             return;
@@ -1659,6 +1734,29 @@ impl Shell {
         }
     }
 
+    fn sync_zsh_options_from_executor(&mut self) {
+        let Some(value) = self.executor.get_env("__RUBASH_ZSH_OPTIONS") else {
+            return;
+        };
+        self.zsh_options = value
+            .split('\x1f')
+            .filter(|option| !option.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let history_ignore_space = self.zsh_options.contains("hist_ignore_space");
+        self.history_ignore_space_prefixed = history_ignore_space;
+        self.executor.set_env(
+            "WINUXSH_HIST_IGNORE_SPACE",
+            if history_ignore_space { "1" } else { "0" },
+        );
+
+        let history_ignore_dups = self.zsh_options.contains("hist_ignore_dups");
+        self.executor.set_env(
+            "WINUXSH_HIST_IGNORE_DUPS",
+            if history_ignore_dups { "1" } else { "0" },
+        );
+    }
     /// Last exit code from rubash executor.
     pub fn last_exit_code(&self) -> i32 {
         self.executor.last_exit_code()
@@ -1702,8 +1800,7 @@ impl Shell {
         } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
             Ok(code)
         } else {
-            self.execute_winuxsh_simple_ast(&ast)
-                .or_else(|| self.execute_host_synced_simple_ast(&ast))
+            self.execute_host_synced_simple_ast(&ast)
                 .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
                     Ok(()) => Ok(self.executor.last_exit_code()),
                     Err(err) => Err(err),
@@ -1733,6 +1830,8 @@ impl Shell {
 
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
+        self.sync_zsh_options_from_executor();
+        self.sync_alias_mirror_from_executor();
         Ok(code)
     }
 
@@ -1778,279 +1877,6 @@ impl Shell {
         }
 
         Some(Ok(self.executor.last_exit_code()))
-    }
-
-    fn execute_winuxsh_simple_ast(
-        &mut self,
-        ast: &Ast,
-    ) -> Option<Result<i32, rubash::executor::ExecuteError>> {
-        if !ast.commands.iter().any(is_winuxsh_builtin_command) {
-            return None;
-        }
-        if !ast.commands.iter().all(is_plain_simple_command) {
-            return None;
-        }
-
-        let mut code = 0;
-        for command in &ast.commands {
-            if let Some(next_code) = self.execute_winuxsh_builtin_command(command) {
-                code = next_code;
-                self.sync_process_cwd_from_executor_pwd();
-                self.sync_process_path_from_executor_path();
-                continue;
-            }
-
-            match self.executor.execute_command(command) {
-                Ok(()) => {
-                    self.sync_process_cwd_from_executor_pwd();
-                    self.sync_process_path_from_executor_path();
-                    code = self.executor.last_exit_code();
-                }
-                Err(rubash::executor::ExecuteError::ExitCode(exit_code)) => {
-                    return Some(Ok(exit_code));
-                }
-                Err(rubash::executor::ExecuteError::Return(return_code)) => {
-                    return Some(Ok(return_code));
-                }
-                Err(err) => return Some(Err(err)),
-            }
-        }
-
-        Some(Ok(code))
-    }
-
-    fn execute_winuxsh_builtin_command(
-        &mut self,
-        command: &rubash::parser::CommandNode,
-    ) -> Option<i32> {
-        let (name, args) = winuxsh_builtin_words(command)?;
-        match name {
-            "self-update" => Some(self.execute_self_update_builtin(args)),
-            "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
-            "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
-            "source" => Some(self.execute_source_builtin(args)),
-            "pwd" => Some(self.execute_native_pwd_builtin(args)),
-            _ => None,
-        }
-    }
-
-    fn execute_self_update_builtin(&self, args: &[String]) -> i32 {
-        let current_exe = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("self-update: could not resolve current winuxsh executable: {err}");
-                return 1;
-            }
-        };
-
-        if self_update_should_handoff_repl(args) {
-            match Command::new(&current_exe)
-                .arg("--self-update")
-                .args(args)
-                .spawn()
-            {
-                Ok(_) => {
-                    println!("Starting Winuxsh self-update. Exiting this shell so the installer can replace it.");
-                    std::process::exit(0);
-                }
-                Err(err) => {
-                    eprintln!(
-                        "self-update: failed to start {} --self-update: {err}",
-                        current_exe.display()
-                    );
-                    return 1;
-                }
-            }
-        }
-
-        let status = match Command::new(&current_exe)
-            .arg("--self-update")
-            .args(args)
-            .status()
-        {
-            Ok(status) => status,
-            Err(err) => {
-                eprintln!(
-                    "self-update: failed to start {} --self-update: {err}",
-                    current_exe.display()
-                );
-                return 1;
-            }
-        };
-
-        status.code().unwrap_or(1)
-    }
-
-    fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_pwd(args, pwd)
-    }
-
-    fn execute_source_builtin(&mut self, args: &[String]) -> i32 {
-        let mut args = args.iter();
-        let Some(first) = args.next() else {
-            eprintln!("winuxsh: source: filename argument required");
-            return 2;
-        };
-        let file = if first == "--" {
-            let Some(next) = args.next() else {
-                eprintln!("winuxsh: source: filename argument required");
-                return 2;
-            };
-            next
-        } else {
-            first
-        };
-
-        let Some(path) = self.resolve_source_file(file) else {
-            eprintln!("winuxsh: source: {}: No such file or directory", file);
-            return 1;
-        };
-        let script = match std::fs::read_to_string(&path) {
-            Ok(script) => script,
-            Err(err) => {
-                eprintln!("winuxsh: source: {}: {}", path.display(), err);
-                return 1;
-            }
-        };
-
-        let (script, compat_code) = self.apply_source_compat_builtins(&script);
-
-        match self.execute_script(&script) {
-            Ok(code) => {
-                self.sync_alias_mirror_from_script(&script, code);
-                if code == 0 {
-                    compat_code
-                } else {
-                    code
-                }
-            }
-            Err(err) => {
-                eprintln!("winuxsh: source: {}: {}", path.display(), err);
-                1
-            }
-        }
-    }
-
-    fn resolve_source_file(&self, file: &str) -> Option<PathBuf> {
-        let expanded = expand_source_path(file, &self.home_dir);
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        let path = resolve_shell_path_argument(pwd, &expanded);
-        path.is_file().then_some(path)
-    }
-
-    fn apply_source_compat_builtins(&mut self, script: &str) -> (String, i32) {
-        let mut sanitized = String::with_capacity(script.len());
-        let mut compat_code = 0;
-
-        for line in script.lines() {
-            if let Some(code) = self.execute_source_compat_builtin_line(line) {
-                if code != 0 {
-                    compat_code = code;
-                }
-                sanitized.push_str(":");
-            } else {
-                sanitized.push_str(line);
-            }
-            sanitized.push('\n');
-        }
-
-        (sanitized, compat_code)
-    }
-
-    fn execute_source_compat_builtin_line(&mut self, line: &str) -> Option<i32> {
-        let line = line.trim_start();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-
-        let line = line
-            .split_once('#')
-            .map(|(before, _)| before)
-            .unwrap_or(line);
-        let mut words = line.split_whitespace();
-        let command = words.next()?;
-        let command = if command == "builtin" {
-            words.next()?
-        } else {
-            command
-        };
-        let enable = match command {
-            "setopt" => true,
-            "unsetopt" => false,
-            _ => return None,
-        };
-        let args = words.map(str::to_string).collect::<Vec<_>>();
-        Some(self.execute_zsh_option_builtin(enable, &args))
-    }
-
-    fn execute_zsh_option_builtin(&mut self, enable: bool, args: &[String]) -> i32 {
-        if args.is_empty() {
-            self.print_zsh_options();
-            return 0;
-        }
-
-        let mut code = 0;
-        let mut parse_options = true;
-        for arg in args {
-            if parse_options && arg == "--" {
-                parse_options = false;
-                continue;
-            }
-            if parse_options && arg.starts_with('-') {
-                match arg.as_str() {
-                    "-m" | "-o" => continue,
-                    _ => {
-                        eprintln!(
-                            "winuxsh: {}: unsupported option",
-                            if enable { "setopt" } else { "unsetopt" }
-                        );
-                        code = 1;
-                        continue;
-                    }
-                }
-            }
-
-            let Some((option, option_enable)) = resolve_zsh_option_arg(arg, enable) else {
-                eprintln!(
-                    "winuxsh: {}: no such option: {}",
-                    if enable { "setopt" } else { "unsetopt" },
-                    arg
-                );
-                code = 1;
-                continue;
-            };
-            self.apply_zsh_option(option, option_enable);
-        }
-
-        code
-    }
-
-    fn apply_zsh_option(&mut self, option: &'static str, enable: bool) {
-        if enable {
-            self.zsh_options.insert(option.to_string());
-        } else {
-            self.zsh_options.remove(option);
-        }
-
-        match option {
-            "hist_ignore_space" => {
-                self.history_ignore_space_prefixed = enable;
-            }
-            "hist_ignore_dups" => {
-                self.executor
-                    .set_env("WINUXSH_HIST_IGNORE_DUPS", if enable { "1" } else { "0" });
-            }
-            _ => {}
-        }
-    }
-
-    fn print_zsh_options(&self) {
-        let mut options: Vec<_> = self.zsh_options.iter().map(String::as_str).collect();
-        options.sort_unstable();
-        for option in options {
-            println!("{}", option);
-        }
     }
 }
 
@@ -2310,36 +2136,7 @@ fn execute_winuxsh_host_external_command(
         return None;
     }
 
-    if let Some(output) = execute_native_file_command_fallback(command, args, env) {
-        return Some(output);
-    }
-
     command_not_found_host_external_output(command, args, env, plugins)
-}
-
-fn execute_native_file_command_fallback(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> Option<HostExternalCommandOutput> {
-    let pwd = env.get("PWD").map(String::as_str).unwrap_or(".");
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let status = match command {
-        "cp" => native_file_builtins::execute_cp_with_io(
-            args,
-            |arg| resolve_shell_path_argument(pwd, arg),
-            &mut stdout,
-            &mut stderr,
-        ),
-        _ => return None,
-    };
-
-    Some(HostExternalCommandOutput {
-        stdout,
-        stderr,
-        status,
-    })
 }
 
 fn command_not_found_host_external_output(
@@ -2450,135 +2247,10 @@ fn command_not_found_process_provider_output_for_env(
     Some(parse_command_not_found_provider_output(&output.stdout))
 }
 
-fn is_winuxsh_builtin_command(command: &rubash::parser::CommandNode) -> bool {
-    winuxsh_builtin_words(command).is_some()
-}
-
+#[cfg(test)]
 fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str, &[String])> {
-    if command_has_redirects(command) {
-        return None;
-    }
-
-    let words = command.words.as_slice();
-    if let [command_name, pwd_name, args @ ..] = words {
-        if command_name == "command" && pwd_name == "pwd" {
-            return Some(("pwd", args));
-        }
-    }
-
-    let (name, args) = match words {
-        [name, args @ ..] => (name.as_str(), args),
-        [] => return None,
-    };
-    if name == "builtin" {
-        match args {
-            [builtin_name, builtin_args @ ..] => {
-                return match winuxsh_builtin_name(builtin_name) {
-                    Some("pwd") => None,
-                    Some(name) => Some((name, builtin_args)),
-                    None => None,
-                };
-            }
-            [] => return None,
-        }
-    }
-    winuxsh_builtin_name(name).map(|name| (name, args))
-}
-
-fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
-    match name {
-        "." | "source" => Some("source"),
-        "pwd" => Some("pwd"),
-        "self-update" | "update-winuxsh" => Some("self-update"),
-        "setopt" => Some("setopt"),
-        "unsetopt" => Some("unsetopt"),
-        _ => None,
-    }
-}
-
-fn self_update_should_handoff_repl(args: &[String]) -> bool {
-    !args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--check" | "--dry-run"))
-}
-
-fn resolve_zsh_option_arg(name: &str, enable: bool) -> Option<(&'static str, bool)> {
-    let key = zsh_option_key(name);
-    if let Some(stripped) = key.strip_prefix("no") {
-        if let Some(option) = canonical_zsh_option(stripped) {
-            return Some((option, !enable));
-        }
-    }
-    canonical_zsh_option(&key).map(|option| (option, enable))
-}
-
-fn zsh_option_key(name: &str) -> String {
-    name.chars()
-        .filter(|ch| *ch != '_' && *ch != '-')
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn canonical_zsh_option(key: &str) -> Option<&'static str> {
-    match key {
-        "appendhistory" => Some("append_history"),
-        "autocd" => Some("auto_cd"),
-        "autopushd" => Some("auto_pushd"),
-        "arithexpand" | "arithsubst" => Some("arith_expand"),
-        "beep" => Some("beep"),
-        "braceexpand" => Some("brace_expand"),
-        "commandsubst" => Some("command_subst"),
-        "completealiases" => Some("complete_aliases"),
-        "extendedglob" => Some("extended_glob"),
-        "globdots" => Some("glob_dots"),
-        "histfindnodups" => Some("hist_find_no_dups"),
-        "histignorealldups" => Some("hist_ignore_all_dups"),
-        "histignoredups" => Some("hist_ignore_dups"),
-        "histignorespace" => Some("hist_ignore_space"),
-        "histreduceblanks" => Some("hist_reduce_blanks"),
-        "histsavenodups" => Some("hist_save_no_dups"),
-        "histverify" => Some("hist_verify"),
-        "incappendhistory" => Some("inc_append_history"),
-        "interactivecomments" => Some("interactive_comments"),
-        "monitor" => Some("monitor"),
-        "nomatch" => Some("nomatch"),
-        "nullglob" => Some("null_glob"),
-        "promptpercent" => Some("prompt_percent"),
-        "promptsubst" => Some("prompt_subst"),
-        "pushdignoredups" => Some("pushd_ignore_dups"),
-        "sharehistory" => Some("share_history"),
-        "tildeexpand" => Some("tilde_expand"),
-        "variableexpand" => Some("variable_expand"),
-        _ => None,
-    }
-}
-
-fn expand_source_path(path: &str, home_dir: &Path) -> String {
-    if path == "~" {
-        return host_path_to_shell_path(&home_dir.to_string_lossy());
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        return format!(
-            "{}/{}",
-            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
-            rest
-        );
-    }
-    if let Some(rest) = path.strip_prefix("$HOME/") {
-        return format!(
-            "{}/{}",
-            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
-            rest
-        );
-    }
-    if let Some(rest) = path.strip_prefix("${HOME}/") {
-        return format!(
-            "{}/{}",
-            host_path_to_shell_path(&home_dir.to_string_lossy()).trim_end_matches('/'),
-            rest
-        );
-    }
-    path.to_string()
+    let _ = command;
+    None
 }
 
 fn is_cd_command(command: &rubash::parser::CommandNode) -> bool {
@@ -4330,6 +4002,134 @@ load = ["process-hook"]
     }
 
     #[test]
+    fn source_plugin_scripts_load_before_user_startup_rc() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-source-plugin-startup");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_source_plugin_test_bundle(&bundle, "9.9.8");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["source-test"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            "export SOURCE_PLUGIN_USER_RC_SEES=\"$SOURCE_PLUGIN_VALUE\"\nalias source_alias='echo user-override'\n",
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        assert_eq!(
+            shell.executor.get_env("SOURCE_PLUGIN_VALUE"),
+            Some("source-test:1")
+        );
+        assert_eq!(
+            shell.executor.get_env("SOURCE_PLUGIN_USER_RC_SEES"),
+            Some("source-test:1")
+        );
+        assert_eq!(
+            shell.aliases.get("source_alias").map(String::as_str),
+            Some("echo user-override")
+        );
+        assert!(shell
+            .executor
+            .get_env("WINUXSH_REPL_PLUGIN_STARTUP")
+            .is_none());
+        assert!(shell.executor.get_env("WINUXSH_PLUGIN_NAME").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn source_plugin_scripts_run_for_interactive_lifecycle_hooks() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-source-plugin-lifecycle");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let next_dir = temp.join("next");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&next_dir).unwrap();
+        write_source_plugin_test_bundle_with_hooks(
+            &bundle,
+            "9.9.9",
+            &["startup", "precmd", "preexec", "chpwd"],
+        );
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["source-test"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.run_precmd_hooks();
+        shell
+            .execute_interactive_line(&format!(
+                "cd {}",
+                shell_quote(&shell_display_path(&next_dir))
+            ))
+            .unwrap();
+
+        assert_eq!(
+            shell.executor.get_env("SOURCE_PLUGIN_VALUE"),
+            Some("source-test:1")
+        );
+        assert_eq!(
+            shell.executor.get_env("SOURCE_PLUGIN_PRECMD"),
+            Some("source-test:0")
+        );
+        let preexec = shell
+            .executor
+            .get_env("SOURCE_PLUGIN_PREEXEC")
+            .unwrap_or_default();
+        assert!(preexec.starts_with("source-test:cd "), "{preexec}");
+        let chpwd = shell
+            .executor
+            .get_env("SOURCE_PLUGIN_CHPWD")
+            .unwrap_or_default();
+        assert!(chpwd.starts_with("source-test:"), "{chpwd}");
+        assert!(chpwd.contains("->"), "{chpwd}");
+        assert!(shell.executor.get_env("WINUXSH_PLUGIN_HOOK").is_none());
+        assert!(shell.executor.get_env("WINUXSH_PREEXEC_COMMAND").is_none());
+        assert!(shell.executor.get_env("WINUXSH_OLDPWD").is_none());
+        assert!(shell.executor.get_env("WINUXSH_PWD").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn winshrc_runs_once_for_repl_startup_shell_customization() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
@@ -4905,7 +4705,7 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn only_shell_owned_helpers_are_winuxsh_builtins() {
+    fn source_and_file_commands_are_not_claimed_as_winuxsh_builtins() {
         let mut tokens = tokenize(
             "cat file; chmod +w file; cp src dst; kill -l; mkdir -p dir; mkfifo pipe; pwd; rm -rf dir; rmdir dir; self-update --check; source file; touch file",
         );
@@ -4919,25 +4719,12 @@ export AFTER_SETOPT=ok
             .collect();
         assert_eq!(
             names,
-            vec![
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("pwd"),
-                None,
-                None,
-                Some("self-update"),
-                Some("source"),
-                None,
-            ]
+            vec![None, None, None, None, None, None, None, None, None, None, None, None,]
         );
     }
 
     #[test]
-    fn self_update_repl_commands_are_owned_by_winuxsh() {
+    fn self_update_repl_commands_are_not_shell_builtins() {
         let ast = parse(&tokenize("self-update --check; update-winuxsh --dry-run"));
 
         let names: Vec<_> = ast
@@ -4945,20 +4732,11 @@ export AFTER_SETOPT=ok
             .iter()
             .map(|command| winuxsh_builtin_words(command).map(|(name, _)| name))
             .collect();
-        assert_eq!(names, vec![Some("self-update"), Some("self-update")]);
+        assert_eq!(names, vec![None, None]);
     }
 
     #[test]
-    fn self_update_repl_command_handoff_policy_keeps_check_modes_alive() {
-        assert!(!self_update_should_handoff_repl(&["--check".to_string()]));
-        assert!(!self_update_should_handoff_repl(&["--dry-run".to_string()]));
-        assert!(!self_update_should_handoff_repl(&["--help".to_string()]));
-        assert!(self_update_should_handoff_repl(&[]));
-        assert!(self_update_should_handoff_repl(&["--force".to_string()]));
-    }
-
-    #[test]
-    fn host_external_cp_falls_back_to_native_only_when_path_has_no_cp() {
+    fn host_external_cp_without_path_defers_to_command_not_found_surface() {
         let env = HashMap::from([
             ("PWD".to_string(), ".".to_string()),
             ("PATH".to_string(), "".to_string()),
@@ -4967,10 +4745,11 @@ export AFTER_SETOPT=ok
             &["cp".to_string(), "--version".to_string()],
             &env,
             &PluginRuntimeState::default(),
-        )
-        .expect("cp should be handled by winuxsh host hook");
-        assert_eq!(output.status, 0);
-        assert!(String::from_utf8_lossy(&output.stdout).starts_with("cp (winuxsh native) "));
+        );
+        assert!(
+            output.is_none(),
+            "missing cp should be handled by normal command-not-found flow"
+        );
     }
 
     #[test]
@@ -5038,7 +4817,17 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn bare_pwd_stays_internal_without_winuxcmd_path_dependency() {
+    fn setopt_delegates_to_rubash_builtin_surface() {
+        let ast = parse(&tokenize(
+            "setopt hist_ignore_space; builtin setopt prompt_subst; command unsetopt prompt_subst",
+        ));
+
+        assert!(winuxsh_builtin_words(&ast.commands[0]).is_none());
+        assert!(winuxsh_builtin_words(&ast.commands[1]).is_none());
+        assert!(winuxsh_builtin_words(&ast.commands[2]).is_none());
+    }
+    #[test]
+    fn pwd_delegates_to_rubash_without_winuxcmd_path_dependency() {
         if !cfg!(windows) {
             return;
         }
@@ -5050,15 +4839,9 @@ export AFTER_SETOPT=ok
         assert_eq!(ast.commands[0].words, vec!["pwd"]);
         assert_eq!(ast.commands[1].words, vec!["builtin", "pwd"]);
         assert_eq!(ast.commands[2].words, vec!["command", "pwd"]);
-        assert_eq!(
-            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
-            Some("pwd")
-        );
+        assert!(winuxsh_builtin_words(&ast.commands[0]).is_none());
         assert!(winuxsh_builtin_words(&ast.commands[1]).is_none());
-        assert_eq!(
-            winuxsh_builtin_words(&ast.commands[2]).map(|(name, _)| name),
-            Some("pwd")
-        );
+        assert!(winuxsh_builtin_words(&ast.commands[2]).is_none());
     }
 
     #[test]
@@ -5970,6 +5753,86 @@ args = ["--format", "json"]
 timeout_millis = {timeout_millis}
 "#
             ),
+        )
+        .unwrap();
+    }
+
+    fn write_source_plugin_test_bundle(path: &std::path::Path, version: &str) {
+        write_source_plugin_test_bundle_with_hooks(path, version, &["startup"]);
+    }
+
+    fn write_source_plugin_test_bundle_with_hooks(
+        path: &std::path::Path,
+        version: &str,
+        hooks: &[&str],
+    ) {
+        let hooks = hooks
+            .iter()
+            .map(|hook| format!("{hook:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::create_dir_all(path.join("packs").join("source-test")).unwrap();
+        std::fs::write(
+            path.join("bundle.toml"),
+            format!(
+                r#"name = "oh-my-winuxsh"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = []
+available = ["source-test"]
+[layout]
+packs_dir = "packs"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("packs").join("source-test").join("plugin.toml"),
+            format!(
+                r#"name = "source-test"
+bundle = "oh-my-winuxsh"
+version = {version:?}
+kind = "source"
+api = "winuxsh:plugin@0.1.0"
+category = "workflow"
+summary = "Source plugin startup fixture."
+default = false
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+aliases = true
+completions = []
+prompt_segments = []
+hooks = [{hooks}]
+commands = []
+keybindings = []
+themes = []
+[source]
+entry = "packs/source-test/init.winux"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("packs").join("source-test").join("init.winux"),
+            r#"case "$WINUXSH_PLUGIN_HOOK" in
+  startup)
+    export SOURCE_PLUGIN_VALUE="$WINUXSH_PLUGIN_NAME:$WINUXSH_REPL_PLUGIN_STARTUP"
+    alias source_alias='echo from-source-plugin'
+    ;;
+  precmd)
+    export SOURCE_PLUGIN_PRECMD="$WINUXSH_PLUGIN_NAME:$WINUXSH_LAST_EXIT_CODE"
+    ;;
+  preexec)
+    export SOURCE_PLUGIN_PREEXEC="$WINUXSH_PLUGIN_NAME:$WINUXSH_PREEXEC_COMMAND"
+    ;;
+  chpwd)
+    export SOURCE_PLUGIN_CHPWD="$WINUXSH_PLUGIN_NAME:$WINUXSH_OLDPWD->$WINUXSH_PWD"
+    ;;
+esac
+"#,
         )
         .unwrap();
     }
