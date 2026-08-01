@@ -1,7 +1,10 @@
 //! Winuxsh-native plugin inventory, bundle assets, and plugin CLI helpers.
 use crate::completion::external::{CommandDef, FlagDef, SubcommandDef};
 use crate::config::{PluginConfig, ZshConfig};
+use crate::git_status::GitPromptSymbols;
+use crate::prompt_segments::{SegmentId, SegmentPreset, SegmentPromptConfig};
 use crate::theme::Theme;
+use crate::zsh_compat::NativeWidgetSuggestion;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -316,6 +319,42 @@ pub struct PluginThemeCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginPromptCatalogEntry {
+    pub name: String,
+    pub source: String,
+    pub trust_source: String,
+    pub owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    #[serde(flatten)]
+    pub preset: PromptPresetAsset,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginKeybindingCatalogEntry {
+    pub name: String,
+    pub source: String,
+    pub trust_source: String,
+    pub owner: String,
+    pub keymap: String,
+    pub summary: String,
+    pub bindings: Vec<PluginKeybindingCatalogBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginKeybindingCatalogBinding {
+    pub key: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
 #[derive(Debug, Deserialize)]
 struct BundleToml {
     name: String,
@@ -500,11 +539,12 @@ struct BundleKeybindingsToml {
     #[serde(default)]
     bindings: Vec<BundleKeybindingToml>,
 }
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct BundleKeybindingToml {
     key: String,
     action: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 pub fn effective_plugin_state(config: &PluginConfig, zsh: &ZshConfig) -> PluginRuntimeState {
     let mut state = PluginRuntimeState::default();
@@ -972,10 +1012,10 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
     match pack.name.as_str() {
         "git" => readiness(
             "source_assets_plus_native_prompt_segment",
-            "prompt_segment_provider_abi",
+            "none",
             false,
-            true,
-            "compiled_prompt_segment",
+            false,
+            "none",
         ),
         "docker" => readiness(
             "current_shell_source_plus_declarative_assets",
@@ -993,10 +1033,10 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
         ),
         "npm" => readiness(
             "source_assets_plus_native_dynamic_completion",
-            "completion_provider_abi",
+            "none",
             false,
-            true,
-            "native_dynamic_completion",
+            false,
+            "none",
         ),
         "zoxide" => readiness(
             "native_until_effect_runtime",
@@ -1027,8 +1067,8 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
             "native_builtin",
         ),
         "command-not-found" => readiness(
-            "process_provider_available_builtin_until_migration",
-            "bundle_migration_decision,wasm_provider_abi",
+            "host_builtin_and_process_provider",
+            "wasm_provider_abi",
             false,
             true,
             "compiled_native_hints",
@@ -1048,25 +1088,25 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
             "native_builtin",
         ),
         "keybindings" => readiness(
-            "asset_only_declarative_schema_tbd",
-            "asset_only_schema_marker,reedline_actions_stay_native",
+            "declarative_asset_plus_native_reedline_actions",
+            "none",
             false,
-            true,
-            "native_reedline_actions",
+            false,
+            "none",
         ),
         "prompts" => readiness(
             "declarative_presets_plus_native_segments",
-            "prompt_segment_provider_abi",
+            "none",
             false,
-            true,
-            "native_prompt_segments",
+            false,
+            "none",
         ),
         "themes" => readiness(
-            "asset_only_declarative_schema_tbd",
-            "asset_only_schema_marker,theme_renderer_stays_native",
+            "declarative_asset_plus_native_theme_renderer",
+            "none",
             false,
-            true,
-            "native_theme_renderer",
+            false,
+            "none",
         ),
         "process-echo" => readiness("process_command_fixture", "none", false, false, "none"),
         "process-hook" => readiness(
@@ -1085,11 +1125,11 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
         ),
         _ => match plugin_externalization_class(pack) {
             "declarative_asset" => readiness(
-                "asset_only_declarative_schema_tbd",
-                "asset_only_schema_marker",
+                "declarative_asset_plus_host_consumer",
+                "none",
                 false,
-                true,
-                "compiled_or_bundle_asset_fallback",
+                false,
+                "none",
             ),
             "shell_effect_candidate" => readiness(
                 "native_until_effect_runtime",
@@ -1613,7 +1653,7 @@ pub fn plugin_permission_review(
             "Mixed pack: static bundle assets are declarative, while dynamic behavior remains Winuxsh-owned.".to_string(),
         ),
         "pure_provider_candidate" => notes.push(
-            "Provider candidate; process provider binding exists for command-not-found, while WASM providers still require a separate ABI.".to_string(),
+            "Provider pack; command-not-found is wired to the host call-site and process-provider bridge. WASM providers still need a separate ABI.".to_string(),
         ),
         "shell_effect_candidate" => notes.push(
             "Shell-effect pack remains host-owned until env/cwd/history effects are explicit and permissioned.".to_string(),
@@ -2662,6 +2702,111 @@ pub fn plugin_prompt_preset(name: &str) -> Option<PromptPresetAsset> {
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(_, preset)| resolve_prompt_segment_refs(preset, &parsed.segments))
 }
+pub fn plugin_prompt_catalog_json() -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&plugin_prompt_catalog())?)
+}
+pub fn plugin_prompt_catalog_text() -> String {
+    let mut out = String::new();
+    out.push_str("Winuxsh prompt presets\n");
+    out.push_str("Sources: built-in presets and active bundle assets\n");
+    for entry in plugin_prompt_catalog() {
+        out.push_str(&format!(
+            "- {} source={} owner={}",
+            entry.name, entry.source, entry.owner
+        ));
+        if let Some(bundle) = entry.bundle {
+            out.push_str(&format!(" bundle={bundle}"));
+        }
+        if let Some(pack) = entry.pack {
+            out.push_str(&format!(" pack={pack}"));
+        }
+        out.push_str(&format!(" trust_source={}", entry.trust_source));
+        out.push_str(&format!(
+            " left={} right={} separator={:?}",
+            list_or_none(&entry.preset.left_elements),
+            list_or_none(&entry.preset.right_elements),
+            entry.preset.separator
+        ));
+        if let Some(git_format) = entry.preset.git_prompt_format {
+            out.push_str(&format!(" git_prompt_format={git_format:?}"));
+        }
+        out.push('\n');
+    }
+    out
+}
+pub fn plugin_prompt_catalog() -> Vec<PluginPromptCatalogEntry> {
+    let mut entries = SegmentPreset::names()
+        .iter()
+        .filter_map(|name| builtin_prompt_preset_catalog_entry(name))
+        .collect::<Vec<_>>();
+    let inventory = active_plugin_inventory();
+    let Some(root) = &inventory.path else {
+        return entries;
+    };
+    let Some(parsed) = load_bundle_prompt_segments_from_path(root) else {
+        return entries;
+    };
+    let pack_name = inventory
+        .packs
+        .iter()
+        .find(|pack| !pack.exports.prompt_segments.is_empty() && pack.name == "prompts")
+        .or_else(|| {
+            inventory
+                .packs
+                .iter()
+                .find(|pack| !pack.exports.prompt_segments.is_empty())
+        })
+        .map(|pack| pack.name.clone());
+    for (name, preset) in parsed.presets {
+        entries.push(PluginPromptCatalogEntry {
+            name,
+            source: "bundle".to_string(),
+            trust_source: inventory.trust_source.clone(),
+            owner: format!("{}@{}", inventory.bundle, inventory.version),
+            bundle: Some(inventory.bundle.clone()),
+            pack: pack_name.clone(),
+            preset: resolve_prompt_segment_refs(preset, &parsed.segments),
+        });
+    }
+    entries
+}
+fn builtin_prompt_preset_catalog_entry(name: &str) -> Option<PluginPromptCatalogEntry> {
+    let preset = SegmentPreset::from_name(name)?;
+    let config = SegmentPromptConfig::from_preset(preset, "%", GitPromptSymbols::default());
+    Some(PluginPromptCatalogEntry {
+        name: name.to_string(),
+        source: "builtin".to_string(),
+        trust_source: "builtin".to_string(),
+        owner: "winuxsh".to_string(),
+        bundle: None,
+        pack: None,
+        preset: PromptPresetAsset {
+            left_elements: segment_names(&config.left_elements),
+            right_elements: segment_names(&config.right_elements),
+            separator: config.separator,
+            git_prompt_format: config.git_prompt_format,
+        },
+    })
+}
+fn segment_names(segments: &[SegmentId]) -> Vec<String> {
+    segments.iter().map(segment_name).collect()
+}
+fn segment_name(segment: &SegmentId) -> String {
+    match segment {
+        SegmentId::Dir => "dir",
+        SegmentId::Vcs => "vcs",
+        SegmentId::Status => "status",
+        SegmentId::Time => "time",
+        SegmentId::PromptChar => "prompt_char",
+        SegmentId::OsIcon => "os_icon",
+        SegmentId::Context => "context",
+        SegmentId::BackgroundJobs => "background_jobs",
+        SegmentId::CommandExecutionTime => "command_execution_time",
+        SegmentId::Newline => "newline",
+        SegmentId::Custom(name) => name,
+    }
+    .to_string()
+}
 fn load_bundle_prompt_segments_from_path(root: &Path) -> Option<BundlePromptSegmentsToml> {
     let path = bundle_asset_path(root, "prompts", "segments", "toml")?;
     let text = fs::read_to_string(path).ok()?;
@@ -2694,7 +2839,7 @@ pub fn plugin_theme_catalog_json() -> anyhow::Result<String> {
 pub fn plugin_theme_catalog_text() -> String {
     let mut out = String::new();
     out.push_str("Winuxsh themes\n");
-    out.push_str("Resolution order: builtin > user > active bundle\n");
+    out.push_str("Sources: built-in themes, user themes, and active bundle assets\n");
     for entry in plugin_theme_catalog() {
         out.push_str(&format!(
             "- {} source={} owner={}",
@@ -2788,6 +2933,109 @@ fn load_bundle_theme_from_path(root: &Path, name: &str) -> Option<Theme> {
     let path = bundle_asset_path(root, "themes", name, "toml")?;
     crate::theme::load_theme_from_file(name, &path)
 }
+pub fn plugin_keybinding_catalog_json() -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&plugin_keybinding_catalog())?)
+}
+pub fn plugin_keybinding_catalog_text() -> String {
+    let mut out = String::new();
+    out.push_str("Winuxsh keybindings\n");
+    out.push_str("Sources: Reedline defaults plus active bundle keybinding assets\n");
+    for entry in plugin_keybinding_catalog() {
+        out.push_str(&format!(
+            "- {} keymap={} source={} owner={} bindings={}",
+            entry.name,
+            entry.keymap,
+            entry.source,
+            entry.owner,
+            entry.bindings.len()
+        ));
+        if let Some(bundle) = &entry.bundle {
+            out.push_str(&format!(" bundle={bundle}"));
+        }
+        if let Some(pack) = &entry.pack {
+            out.push_str(&format!(" pack={pack}"));
+        }
+        if let Some(path) = &entry.path {
+            out.push_str(&format!(" path={}", path.display()));
+        }
+        out.push_str(&format!(" trust_source={}", entry.trust_source));
+        out.push_str(&format!(" summary={:?}\n", entry.summary));
+        for binding in &entry.bindings {
+            out.push_str(&format!("  {} -> {}", binding.key, binding.action));
+            if let Some(description) = &binding.description {
+                out.push_str(&format!(" ({description})"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+pub fn plugin_keybinding_catalog() -> Vec<PluginKeybindingCatalogEntry> {
+    let inventory = active_plugin_inventory();
+    let Some(root) = &inventory.path else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for pack in &inventory.packs {
+        for name in &pack.exports.keybindings {
+            let Some((metadata, path)) = load_bundle_keybindings_with_path(root, name) else {
+                continue;
+            };
+            entries.push(PluginKeybindingCatalogEntry {
+                name: metadata.name,
+                source: "bundle".to_string(),
+                trust_source: inventory.trust_source.clone(),
+                owner: format!("{}@{}", inventory.bundle, inventory.version),
+                keymap: metadata.keymap,
+                summary: metadata.summary,
+                bindings: metadata
+                    .bindings
+                    .into_iter()
+                    .map(|binding| PluginKeybindingCatalogBinding {
+                        key: binding.key,
+                        action: binding.action,
+                        description: binding.description,
+                    })
+                    .collect(),
+                bundle: Some(inventory.bundle.clone()),
+                pack: Some(pack.name.clone()),
+                path: Some(path),
+            });
+        }
+    }
+    entries
+}
+pub fn plugin_keybinding_suggestions() -> Vec<NativeWidgetSuggestion> {
+    plugin_keybinding_catalog()
+        .into_iter()
+        .flat_map(|entry| {
+            let keymap = plugin_keymap_to_native_keymap(&entry.keymap);
+            let origin = format!("plugin:{}", entry.name);
+            let source_file = entry.path.clone();
+            entry
+                .bindings
+                .into_iter()
+                .map(move |binding| NativeWidgetSuggestion {
+                    widget: binding.action,
+                    function: None,
+                    key: Some(binding.key),
+                    keymap: keymap.clone(),
+                    source_file: source_file.clone(),
+                    line: None,
+                    origin: origin.clone(),
+                })
+        })
+        .collect()
+}
+fn plugin_keymap_to_native_keymap(keymap: &str) -> Option<String> {
+    match keymap.to_ascii_lowercase().as_str() {
+        "all" | "main" => Some("main".to_string()),
+        "emacs" => Some("emacs".to_string()),
+        "vi" | "vi-normal" | "vi_normal" | "vicmd" => Some("vicmd".to_string()),
+        "vi-insert" | "vi_insert" | "viins" => Some("viins".to_string()),
+        _ => None,
+    }
+}
 fn plugin_keybinding_metadata_lines(
     inventory: &PluginInventory,
     pack: &PluginPackRecord,
@@ -2811,9 +3059,16 @@ fn plugin_keybinding_metadata_lines(
         .collect()
 }
 fn load_bundle_keybindings_from_path(root: &Path, name: &str) -> Option<BundleKeybindingsToml> {
+    load_bundle_keybindings_with_path(root, name).map(|(metadata, _)| metadata)
+}
+fn load_bundle_keybindings_with_path(
+    root: &Path,
+    name: &str,
+) -> Option<(BundleKeybindingsToml, PathBuf)> {
     let path = bundle_asset_path(root, "keybindings", name, "toml")?;
-    let text = fs::read_to_string(path).ok()?;
-    toml::from_str(&text).ok()
+    let text = fs::read_to_string(&path).ok()?;
+    let metadata = toml::from_str(&text).ok()?;
+    Some((metadata, path))
 }
 fn bundle_asset_path(
     root: &Path,

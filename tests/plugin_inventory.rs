@@ -104,11 +104,24 @@ fn plugin_list_json_lists_machine_readable_packs() {
         "{stdout}"
     );
     assert!(
-        stdout.contains(r#""target_runtime": "asset_only_declarative_schema_tbd""#),
+        stdout.contains(r#""target_runtime": "declarative_asset_plus_native_reedline_actions""#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""target_runtime": "declarative_asset_plus_native_theme_renderer""#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""target_runtime": "host_builtin_and_process_provider""#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""missing_host_api_or_decision": "wasm_provider_abi""#),
         "{stdout}"
     );
     assert!(stdout.contains(r#""shell_mutating": true"#), "{stdout}");
     assert!(stdout.contains(r#""fallback_needed": true"#), "{stdout}");
+    assert!(stdout.contains(r#""fallback_needed": false"#), "{stdout}");
     assert!(stdout.contains(r#""name": "thefuck""#), "{stdout}");
 }
 #[test]
@@ -279,6 +292,62 @@ fn plugin_themes_marks_external_bundle_trust_source() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
+fn plugin_prompts_lists_builtin_and_bundle_presets() {
+    let temp = temp_dir("plugin-prompts-catalog");
+    let bundle = temp.join("bundle");
+    write_minimal_test_bundle(&bundle, "9.9.11", "Prompt catalog fixture.");
+    let envs = [("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)];
+    let text = run_winuxsh_with_env(&["plugin", "prompts"], &envs);
+    assert_success(&text, "plugin prompts text");
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("Winuxsh prompt presets"), "{stdout}");
+    assert!(
+        stdout.contains("- classic source=builtin owner=winuxsh"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "- classic source=bundle owner=oh-my-winuxsh@9.9.11 bundle=oh-my-winuxsh pack=git"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("separator=\"|\""), "{stdout}");
+    let json = run_winuxsh_with_env(&["plugin", "prompts", "--json"], &envs);
+    assert_success(&json, "plugin prompts json");
+    let stdout = stdout_text(&json);
+    assert!(stdout.contains(r#""source": "bundle""#), "{stdout}");
+    assert!(
+        stdout.contains(r#""git_prompt_format": "bundle:{git_branch}""#),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
+fn plugin_keybindings_lists_bundle_assets() {
+    let temp = temp_dir("plugin-keybindings-catalog");
+    let bundle = temp.join("bundle");
+    write_keybindings_test_bundle(&bundle, "9.9.6");
+    let envs = [("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)];
+    let text = run_winuxsh_with_env(&["plugin", "keybindings"], &envs);
+    assert_success(&text, "plugin keybindings text");
+    let stdout = stdout_text(&text);
+    assert!(stdout.contains("Winuxsh keybindings"), "{stdout}");
+    assert!(
+        stdout.contains("- common keymap=all source=bundle owner=oh-my-winuxsh@9.9.6 bindings=2"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Tab -> complete-word"), "{stdout}");
+    let json = run_winuxsh_with_env(&["plugin", "keybindings", "--json"], &envs);
+    assert_success(&json, "plugin keybindings json");
+    let stdout = stdout_text(&json);
+    assert!(stdout.contains(r#""keymap": "emacs""#), "{stdout}");
+    assert!(
+        stdout.contains(r#""action": "beginning-of-line""#),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
 fn plugin_info_text_describes_one_pack() {
     let output = run_winuxsh(&["plugin", "info", "git"]);
     assert_success(&output, "plugin info text");
@@ -335,11 +404,11 @@ fn plugin_info_marks_command_not_found_provider_candidate() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Target runtime: process_provider_available_builtin_until_migration"),
+        stdout.contains("Target runtime: host_builtin_and_process_provider"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("Missing host API/decision: bundle_migration_decision,wasm_provider_abi"),
+        stdout.contains("Missing host API/decision: wasm_provider_abi"),
         "{stdout}"
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
@@ -366,16 +435,18 @@ fn plugin_review_marks_command_not_found_process_provider_readiness() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Target runtime: process_provider_available_builtin_until_migration"),
+        stdout.contains("Target runtime: host_builtin_and_process_provider"),
         "{stdout}"
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
     assert!(
-        stdout.contains("process provider binding exists for command-not-found"),
+        stdout.contains(
+            "command-not-found is wired to the host call-site and process-provider bridge"
+        ),
         "{stdout}"
     );
     assert!(
-        stdout.contains("WASM providers still require a separate ABI"),
+        stdout.contains("WASM providers still need a separate ABI"),
         "{stdout}"
     );
 }

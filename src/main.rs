@@ -313,6 +313,8 @@ fn print_usage() {
     println!("  plugin list [--json]      List official Winuxsh plugins");
     println!("  plugin info <name> [--json]  Inspect one official Winuxsh plugin");
     println!("  plugin search [query] [--json]  Discover official plugins");
+    println!("  plugin prompts [--json]   List built-in and bundle prompt presets");
+    println!("  plugin keybindings [--json]  List bundle keybinding presets");
     println!("  plugin themes [--json]    List built-in, user, and bundle themes");
     println!("  plugin bundle status [--json]  Inspect official bundle install state");
     println!("  plugin update oh-my-winuxsh --from <path>");
@@ -365,6 +367,8 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "search" => run_plugin_search_command(&args[3..]),
+        "prompts" => run_plugin_prompts_command(&args[3..]),
+        "keybindings" => run_plugin_keybindings_command(&args[3..]),
         "themes" => run_plugin_themes_command(&args[3..]),
         "info" => {
             let Some(name) = args.get(3) else {
@@ -455,6 +459,35 @@ fn run_plugin_themes_command(args: &[String]) -> anyhow::Result<()> {
         println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_json()?);
     } else {
         println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_text());
+    }
+    Ok(())
+}
+
+fn run_plugin_prompts_command(args: &[String]) -> anyhow::Result<()> {
+    let json = parse_plugin_json_flag(args)?;
+    if json {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_prompt_catalog_json()?
+        );
+    } else {
+        println!("{}", winuxsh_runtime::plugins::plugin_prompt_catalog_text());
+    }
+    Ok(())
+}
+
+fn run_plugin_keybindings_command(args: &[String]) -> anyhow::Result<()> {
+    let json = parse_plugin_json_flag(args)?;
+    if json {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_keybinding_catalog_json()?
+        );
+    } else {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_keybinding_catalog_text()
+        );
     }
     Ok(())
 }
@@ -862,6 +895,8 @@ fn print_plugin_usage() {
     println!("  list [--json]             List official Winuxsh plugins");
     println!("  info <name> [--json]      Inspect one official Winuxsh plugin");
     println!("  search [query] [--json]   Discover official plugins");
+    println!("  prompts [--json]          List built-in and bundle prompt presets");
+    println!("  keybindings [--json]      List bundle keybinding presets");
     println!("  themes [--json]           List built-in, user, and bundle themes");
     println!("  bundle status [--json]    Inspect official bundle install state");
     println!("  doctor [--json]           Diagnose plugin configuration health");

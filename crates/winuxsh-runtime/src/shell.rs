@@ -327,7 +327,8 @@ impl Shell {
             native_widgets.enabled = false;
             native_widgets.presets.clear();
         }
-        let native_widget_bindings = if native_widgets.enabled && native_widgets.import_bindkeys {
+        let mut native_widget_bindings = if native_widgets.enabled && native_widgets.import_bindkeys
+        {
             zsh_report
                 .as_ref()
                 .map(|report| report.native_widgets.clone())
@@ -335,6 +336,17 @@ impl Shell {
         } else {
             Vec::new()
         };
+        if plugin_state.is_enabled("keybindings") {
+            let plugin_keybindings = crate::plugins::plugin_keybinding_suggestions();
+            if !plugin_keybindings.is_empty() {
+                if !native_widgets.enabled {
+                    native_widgets.presets.clear();
+                }
+                native_widgets.enabled = true;
+                native_widgets.import_bindkeys = true;
+                native_widget_bindings.extend(plugin_keybindings);
+            }
+        }
 
         let mut shell = Self {
             executor,
