@@ -16,7 +16,7 @@ resolver = "2"
 
 [dependencies]
 winuxsh-runtime = { path = "crates/winuxsh-runtime" }
-rubash = { path = "../rubash" }
+rubash = "0.2.2"
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
