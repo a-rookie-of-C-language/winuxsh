@@ -392,7 +392,7 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
 }
 
 #[test]
-fn redirected_recursive_cp_uses_winuxsh_native_cp_not_rubash_shortcut() {
+fn redirected_recursive_cp_uses_path_command_not_winuxsh_native_builtin() {
     if !cfg!(windows) {
         return;
     }
@@ -415,13 +415,11 @@ fn redirected_recursive_cp_uses_winuxsh_native_cp_not_rubash_shortcut() {
     );
     let output = run_winuxsh(&script, &start, &home, &[]);
 
-    assert_success(&output, "redirected recursive cp native dispatch");
+    assert_success(&output, "redirected recursive cp path dispatch");
     let stdout = stdout_lines(&output);
     assert!(
-        stdout
-            .first()
-            .is_some_and(|line| line.starts_with("cp (winuxsh native) ")),
-        "cp --version should come from winuxsh native cp, got {stdout:?}"
+        stdout.first().is_some_and(|line| line.contains("WinuxCmd")),
+        "cp --version should come from WinuxCmd/PATH, got {stdout:?}"
     );
     assert_eq!(
         std::fs::read_to_string(dest.join("sub").join("file.txt")).unwrap(),

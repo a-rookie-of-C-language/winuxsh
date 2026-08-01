@@ -8,11 +8,25 @@ BASH_TEST_DIR="$BASH_UPSTREAM_DIR/tests"
 OUT_DIR="${WINUXSH_BASH_UPSTREAM_OUT_DIR:-$ROOT_DIR/target/bash-upstream-tests}"
 
 real_path() {
+  local resolved
   if command -v realpath >/dev/null 2>&1; then
-    realpath -m "$1"
+    resolved="$(realpath -m "$1")"
   else
-    (cd "$(dirname "$1")" && printf '%s/%s\n' "$PWD" "$(basename "$1")")
+    resolved="$(cd "$(dirname "$1")" && printf '%s/%s\n' "$PWD" "$(basename "$1")")"
   fi
+
+  normalize_real_path "$resolved"
+}
+
+normalize_real_path() {
+  local path="${1//\\//}"
+  if [[ "$path" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
+    local drive="${BASH_REMATCH[1]^^}"
+    local rest="${BASH_REMATCH[2]:-/}"
+    printf '%s:%s\n' "$drive" "$rest"
+    return
+  fi
+  printf '%s\n' "$path"
 }
 
 die() {
@@ -89,14 +103,33 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
-if ! cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --locked >/dev/null; then
-  echo "Failed to build winuxsh before running Bash upstream tests" >&2
-  exit 2
-fi
+if [[ -n "${WINUXSH_BASH_UPSTREAM_SHELL_BIN:-}" ]]; then
+  SHELL_BIN="$(real_path "$WINUXSH_BASH_UPSTREAM_SHELL_BIN")"
+else
+  BUILD_PROFILE="${WINUXSH_BASH_UPSTREAM_PROFILE:-debug}"
+  CARGO_BUILD_ARGS=(build --manifest-path "$ROOT_DIR/Cargo.toml" --locked)
+  PROFILE_DIR="$BUILD_PROFILE"
+  case "$BUILD_PROFILE" in
+    debug)
+      ;;
+    release)
+      CARGO_BUILD_ARGS+=(--release)
+      ;;
+    *)
+      CARGO_BUILD_ARGS+=(--profile "$BUILD_PROFILE")
+      ;;
+  esac
 
-SHELL_BIN="$ROOT_DIR/target/debug/winuxsh"
-if [[ -x "$SHELL_BIN.exe" ]]; then
-  SHELL_BIN="$SHELL_BIN.exe"
+  if ! cargo "${CARGO_BUILD_ARGS[@]}" >/dev/null; then
+    echo "Failed to build winuxsh before running Bash upstream tests" >&2
+    exit 2
+  fi
+
+  TARGET_ROOT="$(real_path "${CARGO_TARGET_DIR:-$ROOT_DIR/target}")"
+  SHELL_BIN="$TARGET_ROOT/$PROFILE_DIR/winuxsh"
+  if [[ -x "$SHELL_BIN.exe" ]]; then
+    SHELL_BIN="$SHELL_BIN.exe"
+  fi
 fi
 
 if [[ ! -x "$SHELL_BIN" ]]; then

@@ -29,6 +29,15 @@ If the Bash runner is not named `bash` on your machine, set `BASH_RUNNER` in
 your local environment or replace it in your local command. Keep that path out
 of committed files.
 
+To test a release build instead of the default debug build:
+
+```sh
+winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; WINUXSH_BASH_UPSTREAM_PROFILE=release "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'
+```
+
+To test an already-built binary, set `WINUXSH_BASH_UPSTREAM_SHELL_BIN` to that
+`winuxsh.exe`; the runner will skip its own `cargo build` step.
+
 The gate passes only when it reports:
 
 ```text

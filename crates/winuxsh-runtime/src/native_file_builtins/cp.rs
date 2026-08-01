@@ -62,15 +62,6 @@ struct CopySource {
     path: PathBuf,
 }
 
-pub(crate) fn execute_cp<F>(args: &[String], mut resolve_path: F) -> i32
-where
-    F: FnMut(&str) -> PathBuf,
-{
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    execute_cp_with_io(args, &mut resolve_path, &mut stdout, &mut stderr)
-}
-
 pub(crate) fn execute_cp_with_io<F, O, E>(
     args: &[String],
     mut resolve_path: F,

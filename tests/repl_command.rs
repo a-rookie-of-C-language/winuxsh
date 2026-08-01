@@ -104,8 +104,105 @@ preexec = ["export WINUXSH_REPL_PREEXEC_RAN=yes"]
     let _ = std::fs::remove_dir_all(temp);
 }
 
+#[test]
+fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
+    let temp = unique_temp_dir("winuxsh-repl-command-cat-tilde");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
+    std::fs::write(
+        home.join(".winshrc"),
+        "export WINUXSH_TILDE_CAT_RC=loaded\n",
+    )
+    .unwrap();
+
+    let output = run_winuxsh(&["-C", "cat ~/.winshrc"], &start, &home);
+
+    assert_success(&output, "repl command cat tilde expansion");
+    assert_eq!(
+        stdout_text(&output).trim(),
+        "export WINUXSH_TILDE_CAT_RC=loaded"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resolution() {
+    let temp = unique_temp_dir("winuxsh-repl-command-file-builtins-tilde");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
+    std::fs::write(home.join(".winshrc"), "").unwrap();
+
+    let output = run_winuxsh(
+        &[
+            "-C",
+            "mkdir -p ~/builtins/empty; touch ~/builtins/source.txt; cp ~/builtins/source.txt ~/builtins/copy.txt; rm ~/builtins/source.txt; rmdir ~/builtins/empty",
+        ],
+        &start,
+        &home,
+    );
+
+    assert_success(&output, "repl command file command tilde expansion");
+    assert!(home.join("builtins").join("copy.txt").is_file());
+    assert!(!home.join("builtins").join("source.txt").exists());
+    assert!(!home.join("builtins").join("empty").exists());
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn repl_command_file_command_prefers_path_over_winuxsh_native_helpers() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-repl-command-path-cat");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(home.join(".winshrc"), "").unwrap();
+    std::fs::write(bin.join("cat.cmd"), "@echo off\r\necho external-cat %*\r\n").unwrap();
+
+    let output =
+        run_winuxsh_with_extra_path(&["-C", "cat --definitely-external"], &start, &home, &bin);
+
+    assert_success(&output, "repl command path cat");
+    assert_eq!(
+        stdout_text(&output).trim(),
+        "external-cat --definitely-external"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
 fn run_winuxsh(args: &[&str], start: &Path, home: &Path) -> Output {
-    Command::new(winuxsh_binary())
+    run_winuxsh_command(args, start, home, None)
+}
+
+fn run_winuxsh_with_extra_path(
+    args: &[&str],
+    start: &Path,
+    home: &Path,
+    extra_path: &Path,
+) -> Output {
+    run_winuxsh_command(args, start, home, Some(extra_path))
+}
+
+fn run_winuxsh_command(
+    args: &[&str],
+    start: &Path,
+    home: &Path,
+    extra_path: Option<&Path>,
+) -> Output {
+    let mut command = Command::new(winuxsh_binary());
+    command
         .args(args)
         .current_dir(start)
         .env("HOME", home)
@@ -114,7 +211,18 @@ fn run_winuxsh(args: &[&str], start: &Path, home: &Path) -> Output {
         .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env_remove("WINUXSH_REPL_COMMAND_RC")
         .env_remove("WINUXSH_REPL_PRECMD_RAN")
-        .env_remove("WINUXSH_REPL_PREEXEC_RAN")
+        .env_remove("WINUXSH_REPL_PREEXEC_RAN");
+
+    if let Some(extra_path) = extra_path {
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![extra_path.to_path_buf()];
+        if let Some(old_path) = old_path {
+            paths.extend(std::env::split_paths(&old_path));
+        }
+        command.env("PATH", std::env::join_paths(paths).unwrap());
+    }
+
+    command
         .output()
         .unwrap_or_else(|err| panic!("failed to run winuxsh {args:?}: {err}"))
 }

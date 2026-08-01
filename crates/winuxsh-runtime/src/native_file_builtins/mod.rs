@@ -1,21 +1,29 @@
+#[cfg(test)]
+#[allow(dead_code)]
 mod cat;
+#[cfg(test)]
+#[allow(dead_code)]
 mod chmod;
 mod cp;
+#[cfg(test)]
+#[allow(dead_code)]
 mod kill;
+#[cfg(test)]
+#[allow(dead_code)]
 mod mkdir;
+#[cfg(test)]
+#[allow(dead_code)]
 mod mkfifo;
 mod pwd;
+#[cfg(test)]
+#[allow(dead_code)]
 mod rm;
+#[cfg(test)]
+#[allow(dead_code)]
 mod rmdir;
+#[cfg(test)]
+#[allow(dead_code)]
 mod touch;
 
-pub(crate) use cat::execute_cat;
-pub(crate) use chmod::execute_chmod;
-pub(crate) use cp::{execute_cp, execute_cp_with_io};
-pub(crate) use kill::execute_kill;
-pub(crate) use mkdir::execute_mkdir;
-pub(crate) use mkfifo::execute_mkfifo;
+pub(crate) use cp::execute_cp_with_io;
 pub(crate) use pwd::execute_pwd;
-pub(crate) use rm::execute_rm;
-pub(crate) use rmdir::execute_rmdir;
-pub(crate) use touch::execute_touch;

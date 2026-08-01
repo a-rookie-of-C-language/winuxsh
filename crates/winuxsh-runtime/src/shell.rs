@@ -1829,16 +1829,7 @@ impl Shell {
             "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
             "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
             "source" => Some(self.execute_source_builtin(args)),
-            "cat" => Some(self.execute_native_cat_builtin(args)),
-            "chmod" => Some(self.execute_native_chmod_builtin(args)),
-            "cp" => Some(self.execute_native_cp_builtin(args)),
-            "kill" => Some(self.execute_native_kill_builtin(args)),
-            "mkdir" => Some(self.execute_native_mkdir_builtin(args)),
-            "mkfifo" => Some(self.execute_native_mkfifo_builtin(args)),
             "pwd" => Some(self.execute_native_pwd_builtin(args)),
-            "rm" => Some(self.execute_native_rm_builtin(args)),
-            "rmdir" => Some(self.execute_native_rmdir_builtin(args)),
-            "touch" => Some(self.execute_native_touch_builtin(args)),
             _ => None,
         }
     }
@@ -1873,50 +1864,6 @@ impl Shell {
             std::process::exit(0);
         }
         code
-    }
-
-    fn execute_native_cat_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_cat(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_chmod_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_chmod(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_cp_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_cp(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_kill_builtin(&self, args: &[String]) -> i32 {
-        native_file_builtins::execute_kill(args)
-    }
-
-    fn execute_native_mkdir_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_mkdir(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_mkfifo_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_mkfifo(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_rm_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_rm(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_rmdir_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_rmdir(args, |arg| resolve_shell_path_argument(pwd, arg))
-    }
-
-    fn execute_native_touch_builtin(&self, args: &[String]) -> i32 {
-        let pwd = self.executor.get_env("PWD").unwrap_or(".");
-        native_file_builtins::execute_touch(args, |arg| resolve_shell_path_argument(pwd, arg))
     }
 
     fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
@@ -2343,28 +2290,41 @@ fn execute_winuxsh_host_external_command(
     let [command, args @ ..] = words else {
         return None;
     };
-    if command == "cp" {
-        let pwd = env.get("PWD").map(String::as_str).unwrap_or(".");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let status = native_file_builtins::execute_cp_with_io(
-            args,
-            |arg| resolve_shell_path_argument(pwd, arg),
-            &mut stdout,
-            &mut stderr,
-        );
-        return Some(HostExternalCommandOutput {
-            stdout,
-            stderr,
-            status,
-        });
-    }
 
     if resolve_native_command_path_with_env(command, env).is_some() {
         return None;
     }
 
+    if let Some(output) = execute_native_file_command_fallback(command, args, env) {
+        return Some(output);
+    }
+
     command_not_found_host_external_output(command, args, env, plugins)
+}
+
+fn execute_native_file_command_fallback(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> Option<HostExternalCommandOutput> {
+    let pwd = env.get("PWD").map(String::as_str).unwrap_or(".");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = match command {
+        "cp" => native_file_builtins::execute_cp_with_io(
+            args,
+            |arg| resolve_shell_path_argument(pwd, arg),
+            &mut stdout,
+            &mut stderr,
+        ),
+        _ => return None,
+    };
+
+    Some(HostExternalCommandOutput {
+        stdout,
+        stderr,
+        status,
+    })
 }
 
 fn command_not_found_host_external_output(
@@ -2513,18 +2473,9 @@ fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str,
 fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
     match name {
         "." | "source" => Some("source"),
-        "cat" => Some("cat"),
-        "chmod" => Some("chmod"),
-        "cp" => Some("cp"),
-        "kill" => Some("kill"),
-        "mkdir" => Some("mkdir"),
-        "mkfifo" => Some("mkfifo"),
         "pwd" => Some("pwd"),
-        "rm" => Some("rm"),
-        "rmdir" => Some("rmdir"),
         "self-update" | "update-winuxsh" => Some("self-update"),
         "setopt" => Some("setopt"),
-        "touch" => Some("touch"),
         "unsetopt" => Some("unsetopt"),
         _ => None,
     }
@@ -3498,6 +3449,10 @@ fn sanitize_cache_file_suffix(value: &str) -> String {
 }
 
 fn resolve_shell_path_argument(pwd: &str, arg: &str) -> PathBuf {
+    if let Some(path) = resolve_current_user_tilde_path(arg) {
+        return path;
+    }
+
     let normalized = shell_path_to_host_path(arg);
     let candidate = PathBuf::from(&normalized);
     if candidate.is_absolute() || is_windows_drive_path(&normalized) {
@@ -3505,6 +3460,21 @@ fn resolve_shell_path_argument(pwd: &str, arg: &str) -> PathBuf {
     }
 
     PathBuf::from(shell_path_to_host_path(pwd)).join(candidate)
+}
+
+fn resolve_current_user_tilde_path(arg: &str) -> Option<PathBuf> {
+    let rest = if arg == "~" {
+        ""
+    } else {
+        arg.strip_prefix("~/").or_else(|| arg.strip_prefix("~\\"))?
+    };
+    let home = shell_home_dir()?;
+    let home = PathBuf::from(shell_path_to_host_path(home.to_string_lossy().as_ref()));
+    if rest.is_empty() {
+        Some(home)
+    } else {
+        Some(home.join(shell_path_to_host_path(rest)))
+    }
 }
 
 fn directory_selector_candidates(host_base: &std::path::Path) -> Vec<String> {
@@ -4630,6 +4600,32 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
+    fn resolve_shell_path_argument_expands_current_user_tilde() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let temp = unique_temp_dir("winuxsh-tilde-path");
+        let home = temp.join("home");
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
+
+        assert_eq!(
+            host_display_path(&resolve_shell_path_argument("C:/work", "~")),
+            host_display_path(&home)
+        );
+        assert_eq!(
+            host_display_path(&resolve_shell_path_argument("C:/work", "~/dir/file.txt")),
+            host_display_path(&home.join("dir").join("file.txt"))
+        );
+        assert_eq!(
+            host_display_path(&resolve_shell_path_argument("C:/work", r"~\dir\file.txt")),
+            host_display_path(&home.join("dir").join("file.txt"))
+        );
+        assert_eq!(
+            host_display_path(&resolve_shell_path_argument("C:/work", "~other/file.txt")),
+            host_display_path(&PathBuf::from("C:/work").join("~other").join("file.txt"))
+        );
+    }
+
+    #[test]
     fn windows_drive_only_paths_normalize_to_drive_root() {
         if cfg!(windows) {
             assert_eq!(windows_drive_path_to_slash_drive("C:"), Some("/c/".into()));
@@ -4878,26 +4874,25 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn native_rm_is_not_rewritten_to_winuxcmd() {
+    fn file_commands_are_not_rewritten_or_claimed_as_winuxsh_builtins() {
         if !cfg!(windows) {
             return;
         }
 
-        let mut tokens = tokenize("rm -rf -- '-p'");
+        let mut tokens = tokenize("rm -rf -- '-p'; cat file; cp src dst");
         rewrite_winuxcmd_command_shims(&mut tokens, false);
         let ast = parse(&tokens);
 
         assert_eq!(ast.commands[0].words, vec!["rm", "-rf", "--", "-p"]);
-        assert_eq!(
-            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
-            Some("rm")
-        );
+        assert!(winuxsh_builtin_words(&ast.commands[0]).is_none());
+        assert!(winuxsh_builtin_words(&ast.commands[1]).is_none());
+        assert!(winuxsh_builtin_words(&ast.commands[2]).is_none());
     }
 
     #[test]
-    fn native_file_and_process_helpers_are_owned_by_winuxsh() {
+    fn only_shell_owned_helpers_are_winuxsh_builtins() {
         let mut tokens = tokenize(
-            "cat file; chmod +w file; cp src dst; kill -l; mkdir -p dir; mkfifo pipe; rm -rf dir; rmdir dir; touch file",
+            "cat file; chmod +w file; cp src dst; kill -l; mkdir -p dir; mkfifo pipe; pwd; rm -rf dir; rmdir dir; self-update --check; source file; touch file",
         );
         rewrite_winuxcmd_command_shims(&mut tokens, false);
         let ast = parse(&tokens);
@@ -4910,15 +4905,18 @@ export AFTER_SETOPT=ok
         assert_eq!(
             names,
             vec![
-                Some("cat"),
-                Some("chmod"),
-                Some("cp"),
-                Some("kill"),
-                Some("mkdir"),
-                Some("mkfifo"),
-                Some("rm"),
-                Some("rmdir"),
-                Some("touch"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("pwd"),
+                None,
+                None,
+                Some("self-update"),
+                Some("source"),
+                None,
             ]
         );
     }
@@ -4945,8 +4943,11 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn host_external_cp_is_owned_by_winuxsh_native_hook() {
-        let env = HashMap::from([("PWD".to_string(), ".".to_string())]);
+    fn host_external_cp_falls_back_to_native_only_when_path_has_no_cp() {
+        let env = HashMap::from([
+            ("PWD".to_string(), ".".to_string()),
+            ("PATH".to_string(), "".to_string()),
+        ]);
         let output = execute_winuxsh_host_external_command(
             &["cp".to_string(), "--version".to_string()],
             &env,
@@ -4958,7 +4959,34 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn internal_file_helpers_stay_internal() {
+    fn host_external_cp_defers_to_path_command_when_available() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let temp = unique_temp_dir("winuxsh-cp-path-wins");
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("cp.cmd"), "@echo off\r\necho external-cp\r\n").unwrap();
+        let env = HashMap::from([
+            ("PWD".to_string(), ".".to_string()),
+            ("PATH".to_string(), host_display_path(&temp)),
+        ]);
+
+        let output = execute_winuxsh_host_external_command(
+            &["cp".to_string(), "--version".to_string()],
+            &env,
+            &PluginRuntimeState::default(),
+        );
+
+        assert!(
+            output.is_none(),
+            "PATH cp should be allowed to execute normally"
+        );
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn file_helpers_stay_on_path_resolution_surface() {
         if !cfg!(windows) {
             return;
         }
@@ -4975,10 +5003,13 @@ export AFTER_SETOPT=ok
         assert_eq!(ast.commands[5].words[0], "rm");
         assert_eq!(ast.commands[6].words[0], "rmdir");
         assert_eq!(ast.commands[7].words[0], "touch");
+        for command in &ast.commands {
+            assert!(winuxsh_builtin_words(command).is_none());
+        }
     }
 
     #[test]
-    fn builtin_prefix_keeps_native_rm() {
+    fn builtin_prefix_does_not_fabricate_file_builtins() {
         if !cfg!(windows) {
             return;
         }
@@ -4988,43 +5019,7 @@ export AFTER_SETOPT=ok
         let ast = parse(&tokens);
 
         assert_eq!(ast.commands[0].words, vec!["builtin", "rm", "--", "-p"]);
-        assert_eq!(
-            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
-            Some("rm")
-        );
-    }
-
-    #[test]
-    fn native_rm_removes_dash_prefixed_file_after_separator() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-native-rm-dash-integration");
-        std::fs::create_dir_all(&temp).unwrap();
-        std::env::set_current_dir(&temp).unwrap();
-        std::fs::write(temp.join("-p"), "payload").unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-
-        assert_eq!(shell.execute_line("rm -rf -- '-p'").unwrap(), 0);
-        assert!(!temp.join("-p").exists());
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn native_rm_recursively_removes_directory() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-native-rm-recursive-integration");
-        let target = temp.join("target");
-        std::fs::create_dir_all(&target).unwrap();
-        std::env::set_current_dir(&temp).unwrap();
-        std::fs::write(target.join("payload.txt"), "payload").unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-
-        assert_eq!(shell.execute_line("rm -r target").unwrap(), 0);
-        assert!(!target.exists());
-        let _ = std::fs::remove_dir_all(temp);
+        assert!(winuxsh_builtin_words(&ast.commands[0]).is_none());
     }
 
     #[test]
