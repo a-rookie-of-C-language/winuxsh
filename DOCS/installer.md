@@ -40,6 +40,15 @@ architecture, and start it silently. It does not depend on the GitHub REST API.
 winuxsh --self-update
 ```
 
+Inside an interactive Winuxsh REPL, use:
+
+```sh
+self-update
+```
+
+The REPL command hands the update to a child process and exits the current
+shell so the installer can replace `winuxsh.exe`.
+
 Useful dry-run modes:
 
 ```sh
@@ -49,7 +58,8 @@ winuxsh --self-update --dry-run
 
 Interactive shells check for updates at most once per day. The check is
 best-effort and silent on network failures; when a newer release exists, Winuxsh
-prints a short hint to run `winuxsh --self-update`. Set
+prints a short hint to run `self-update` in the REPL or
+`winuxsh --self-update` outside it. Set
 `WINUXSH_UPDATE_CHECK=0` or `WINUXSH_NO_UPDATE_CHECK=1` to disable the reminder.
 
 The portable zip keeps the same first-start WinuxCmd activation flow: if command

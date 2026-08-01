@@ -283,7 +283,7 @@ Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.
 - Installer releases add Winuxsh to the user PATH and add/update a Windows Terminal profile.
 - Portable release zips remain available and include `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, icon assets, `winuxcmd/activate-winuxcmd.sh`, and the bundled `oh-my-winuxsh` baseline.
 - On first start, winuxsh runs the activation script once if command links are missing.
-- Self-update: run `winuxsh --self-update` to download and launch the latest installer via native WinHTTP.
+- Self-update: run `self-update` inside the REPL, or `winuxsh --self-update` outside it, to download and launch the latest installer via native WinHTTP.
 - Run the tests: `cargo test`.
 
 ## Documentation

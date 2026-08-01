@@ -1843,6 +1843,26 @@ impl Shell {
             }
         };
 
+        if self_update_should_handoff_repl(args) {
+            match Command::new(&current_exe)
+                .arg("--self-update")
+                .args(args)
+                .spawn()
+            {
+                Ok(_) => {
+                    println!("Starting Winuxsh self-update. Exiting this shell so the installer can replace it.");
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "self-update: failed to start {} --self-update: {err}",
+                        current_exe.display()
+                    );
+                    return 1;
+                }
+            }
+        }
+
         let status = match Command::new(&current_exe)
             .arg("--self-update")
             .args(args)
@@ -1858,12 +1878,7 @@ impl Shell {
             }
         };
 
-        let code = status.code().unwrap_or(1);
-        if code == 0 && self_update_should_exit_repl(args) {
-            println!("Exiting current Winuxsh so the installer can replace it.");
-            std::process::exit(0);
-        }
-        code
+        status.code().unwrap_or(1)
     }
 
     fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
@@ -2481,7 +2496,7 @@ fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
     }
 }
 
-fn self_update_should_exit_repl(args: &[String]) -> bool {
+fn self_update_should_handoff_repl(args: &[String]) -> bool {
     !args
         .iter()
         .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--check" | "--dry-run"))
@@ -4934,12 +4949,12 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
-    fn self_update_repl_command_exit_policy_keeps_check_modes_alive() {
-        assert!(!self_update_should_exit_repl(&["--check".to_string()]));
-        assert!(!self_update_should_exit_repl(&["--dry-run".to_string()]));
-        assert!(!self_update_should_exit_repl(&["--help".to_string()]));
-        assert!(self_update_should_exit_repl(&[]));
-        assert!(self_update_should_exit_repl(&["--force".to_string()]));
+    fn self_update_repl_command_handoff_policy_keeps_check_modes_alive() {
+        assert!(!self_update_should_handoff_repl(&["--check".to_string()]));
+        assert!(!self_update_should_handoff_repl(&["--dry-run".to_string()]));
+        assert!(!self_update_should_handoff_repl(&["--help".to_string()]));
+        assert!(self_update_should_handoff_repl(&[]));
+        assert!(self_update_should_handoff_repl(&["--force".to_string()]));
     }
 
     #[test]
