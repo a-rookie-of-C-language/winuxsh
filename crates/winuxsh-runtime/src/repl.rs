@@ -259,6 +259,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
         "redisplay" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
+        "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
         "up-line-or-history" => Some(ReedlineEvent::Up),
         "down-line-or-history" => Some(ReedlineEvent::Down),
@@ -278,6 +279,9 @@ fn completion_event() -> ReedlineEvent {
 }
 
 fn parse_zsh_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    if let Some(key) = parse_named_key_sequence(value) {
+        return Some(key);
+    }
     match value {
         "^[[A" | "\\e[A" | "\\eOA" => Some((KeyModifiers::NONE, KeyCode::Up)),
         "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
@@ -288,6 +292,47 @@ fn parse_zsh_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
     }
+}
+
+fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace("control+", "ctrl+")
+        .replace("option+", "alt+");
+    match normalized.as_str() {
+        "tab" => return Some((KeyModifiers::NONE, KeyCode::Tab)),
+        "shift+tab" | "backtab" => return Some((KeyModifiers::SHIFT, KeyCode::BackTab)),
+        "esc" | "escape" => return Some((KeyModifiers::NONE, KeyCode::Esc)),
+        "enter" | "return" => return Some((KeyModifiers::NONE, KeyCode::Enter)),
+        "space" => return Some((KeyModifiers::NONE, KeyCode::Char(' '))),
+        "backspace" => return Some((KeyModifiers::NONE, KeyCode::Backspace)),
+        "delete" | "del" => return Some((KeyModifiers::NONE, KeyCode::Delete)),
+        "up" => return Some((KeyModifiers::NONE, KeyCode::Up)),
+        "down" => return Some((KeyModifiers::NONE, KeyCode::Down)),
+        "left" => return Some((KeyModifiers::NONE, KeyCode::Left)),
+        "right" => return Some((KeyModifiers::NONE, KeyCode::Right)),
+        _ => {}
+    }
+    parse_modified_named_key(&normalized, "ctrl+", KeyModifiers::CONTROL)
+        .or_else(|| parse_modified_named_key(&normalized, "alt+", KeyModifiers::ALT))
+}
+
+fn parse_modified_named_key(
+    value: &str,
+    prefix: &str,
+    modifiers: KeyModifiers,
+) -> Option<(KeyModifiers, KeyCode)> {
+    let rest = value.strip_prefix(prefix)?;
+    if rest == "space" {
+        return Some((modifiers, KeyCode::Char(' ')));
+    }
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((modifiers, KeyCode::Char(ch)))
 }
 
 fn parse_alt_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -957,6 +1002,41 @@ mod tests {
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char(' ')),
             Some(ReedlineEvent::HistoryHintComplete)
+        );
+    }
+
+    #[test]
+    fn native_widget_imports_named_bundle_key_syntax() {
+        let mut keybindings = default_emacs_keybindings();
+        let config = NativeWidgetConfig {
+            enabled: true,
+            presets: Vec::new(),
+            import_bindkeys: true,
+        };
+        let bindings = vec![
+            native_widget_binding("Ctrl+A", Some("emacs"), "beginning-of-line"),
+            native_widget_binding("Alt+B", Some("emacs"), "backward-word"),
+            native_widget_binding("Shift+Tab", Some("emacs"), "menu-previous"),
+        ];
+
+        add_native_widget_keybindings(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &config,
+            &bindings,
+        );
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('a')),
+            Some(edit_event(EditCommand::MoveToLineStart { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('b')),
+            Some(edit_event(EditCommand::MoveWordLeft { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::SHIFT, KeyCode::BackTab),
+            Some(ReedlineEvent::MenuPrevious)
         );
     }
 
