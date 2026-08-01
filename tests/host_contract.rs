@@ -490,7 +490,7 @@ fn sourced_rc_keeps_winuxcmd_visible_to_windows_children() {
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     let output = run_winuxsh(
-        "source ~/.winshrc; where.exe ls; where.exe winuxcmd",
+        "source ~/.winshrc; cmd.exe /D /C set PATH",
         &start,
         &home,
         &[
@@ -501,10 +501,23 @@ fn sourced_rc_keeps_winuxcmd_visible_to_windows_children() {
     );
 
     assert_success(&output, "source rc keeps winuxcmd on child PATH");
-    let stdout = normalize_text(&output.stdout).replace('\\', "/");
-    assert!(stdout.contains("/winuxcmd/ls.exe"), "stdout was {stdout:?}");
+    let stdout = normalize_text(&output.stdout);
+    let normalized_stdout = stdout.replace('\\', "/").to_ascii_lowercase();
+    let expected_winuxcmd_dirs = [
+        native_path(&bin).replace('\\', "/").to_ascii_lowercase(),
+        slash_drive_path(&bin)
+            .unwrap_or_else(|| shell_path(&bin))
+            .to_ascii_lowercase(),
+    ];
     assert!(
-        stdout.contains("/winuxcmd/winuxcmd.exe"),
+        expected_winuxcmd_dirs
+            .iter()
+            .any(|path| normalized_stdout.contains(path)),
+        "child PATH did not contain winuxcmd dir {:?}: {stdout:?}",
+        expected_winuxcmd_dirs
+    );
+    assert!(
+        normalized_stdout.contains("c:/does-not-exist-winuxsh-test"),
         "stdout was {stdout:?}"
     );
 
