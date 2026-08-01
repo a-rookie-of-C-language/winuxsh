@@ -1825,6 +1825,7 @@ impl Shell {
     ) -> Option<i32> {
         let (name, args) = winuxsh_builtin_words(command)?;
         match name {
+            "self-update" => Some(self.execute_self_update_builtin(args)),
             "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
             "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
             "source" => Some(self.execute_source_builtin(args)),
@@ -1840,6 +1841,38 @@ impl Shell {
             "touch" => Some(self.execute_native_touch_builtin(args)),
             _ => None,
         }
+    }
+
+    fn execute_self_update_builtin(&self, args: &[String]) -> i32 {
+        let current_exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("self-update: could not resolve current winuxsh executable: {err}");
+                return 1;
+            }
+        };
+
+        let status = match Command::new(&current_exe)
+            .arg("--self-update")
+            .args(args)
+            .status()
+        {
+            Ok(status) => status,
+            Err(err) => {
+                eprintln!(
+                    "self-update: failed to start {} --self-update: {err}",
+                    current_exe.display()
+                );
+                return 1;
+            }
+        };
+
+        let code = status.code().unwrap_or(1);
+        if code == 0 && self_update_should_exit_repl(args) {
+            println!("Exiting current Winuxsh so the installer can replace it.");
+            std::process::exit(0);
+        }
+        code
     }
 
     fn execute_native_cat_builtin(&self, args: &[String]) -> i32 {
@@ -2489,11 +2522,18 @@ fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
         "pwd" => Some("pwd"),
         "rm" => Some("rm"),
         "rmdir" => Some("rmdir"),
+        "self-update" | "update-winuxsh" => Some("self-update"),
         "setopt" => Some("setopt"),
         "touch" => Some("touch"),
         "unsetopt" => Some("unsetopt"),
         _ => None,
     }
+}
+
+fn self_update_should_exit_repl(args: &[String]) -> bool {
+    !args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--check" | "--dry-run"))
 }
 
 fn resolve_zsh_option_arg(name: &str, enable: bool) -> Option<(&'static str, bool)> {
@@ -4881,6 +4921,27 @@ export AFTER_SETOPT=ok
                 Some("touch"),
             ]
         );
+    }
+
+    #[test]
+    fn self_update_repl_commands_are_owned_by_winuxsh() {
+        let ast = parse(&tokenize("self-update --check; update-winuxsh --dry-run"));
+
+        let names: Vec<_> = ast
+            .commands
+            .iter()
+            .map(|command| winuxsh_builtin_words(command).map(|(name, _)| name))
+            .collect();
+        assert_eq!(names, vec![Some("self-update"), Some("self-update")]);
+    }
+
+    #[test]
+    fn self_update_repl_command_exit_policy_keeps_check_modes_alive() {
+        assert!(!self_update_should_exit_repl(&["--check".to_string()]));
+        assert!(!self_update_should_exit_repl(&["--dry-run".to_string()]));
+        assert!(!self_update_should_exit_repl(&["--help".to_string()]));
+        assert!(self_update_should_exit_repl(&[]));
+        assert!(self_update_should_exit_repl(&["--force".to_string()]));
     }
 
     #[test]

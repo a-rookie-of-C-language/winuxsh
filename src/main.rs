@@ -34,6 +34,7 @@
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
 //!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
 //!   winuxsh --self-update → download and run the latest installer
+//!   self-update / update-winuxsh → REPL commands for Winuxsh self-update
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -306,6 +307,8 @@ fn print_usage() {
     println!("  --self-update             Download and run the latest release installer");
     println!("      --check               Only report the latest release");
     println!("      --dry-run             Download installer without running it");
+    println!("  self-update               REPL command: update Winuxsh and exit this shell");
+    println!("  update-winuxsh            Alias for self-update");
     println!();
     println!("  plugin list [--json]      List official Winuxsh plugins");
     println!("  plugin info <name> [--json]  Inspect one official Winuxsh plugin");

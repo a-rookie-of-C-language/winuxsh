@@ -39,6 +39,8 @@ impl CommandCompleter {
             "mv".to_string(),
             "rm".to_string(),
             "mkdir".to_string(),
+            "self-update".to_string(),
+            "update-winuxsh".to_string(),
             "set".to_string(),
             "setopt".to_string(),
             "unset".to_string(),
@@ -70,6 +72,8 @@ impl CommandCompleter {
             "mv".to_string(),
             "rm".to_string(),
             "mkdir".to_string(),
+            "self-update".to_string(),
+            "update-winuxsh".to_string(),
             "jobs".to_string(),
             "fg".to_string(),
             "bg".to_string(),
@@ -262,6 +266,8 @@ mod tests {
         let commands = CommandCompleter::get_builtin_commands();
         assert!(commands.contains(&"ls".to_string()));
         assert!(commands.contains(&"cd".to_string()));
+        assert!(commands.contains(&"self-update".to_string()));
+        assert!(commands.contains(&"update-winuxsh".to_string()));
     }
 
     #[test]

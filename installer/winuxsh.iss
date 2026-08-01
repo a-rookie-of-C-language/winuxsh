@@ -40,6 +40,9 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 ChangesEnvironment=yes
+CloseApplications=yes
+CloseApplicationsFilter=winuxsh.exe
+RestartApplications=no
 #if AppArch == "arm64"
 ArchitecturesAllowed=arm64
 ArchitecturesInstallIn64BitMode=arm64
@@ -134,6 +137,25 @@ begin
   BroadcastEnvironmentChange();
 end;
 
+procedure CloseRunningWinuxshForSilentUpdate();
+var
+  ResultCode: Longint;
+begin
+  if not WizardSilent then
+  begin
+    Exit;
+  end;
+
+  Exec(
+    ExpandConstant('{sys}\taskkill.exe'),
+    '/IM winuxsh.exe /F',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+end;
+
 procedure RemoveAppDirFromUserPath();
 var
   PathValue: string;
@@ -158,6 +180,11 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if CurStep = ssInstall then
+  begin
+    CloseRunningWinuxshForSilentUpdate();
+  end;
+
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('path') then
   begin
     AddAppDirToUserPath();

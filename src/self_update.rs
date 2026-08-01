@@ -59,6 +59,14 @@ struct GitHubAsset {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    {
+        print_self_update_usage();
+        return Ok(());
+    }
+
     let options = parse_options(args)?;
     let release = resolve_latest_release(&options.repo, HTTP_TIMEOUT_MS)?;
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -109,11 +117,12 @@ pub fn run(args: &[String]) -> Result<()> {
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
             "/CLOSEAPPLICATIONS",
+            "/FORCECLOSEAPPLICATIONS",
         ])
         .spawn()
         .with_context(|| format!("start installer {}", installer_path.display()))?;
 
-    println!("Started installer. Winuxsh will finish updating after this process exits.");
+    println!("Started installer. Winuxsh will finish updating after open Winuxsh sessions close.");
     Ok(())
 }
 
@@ -161,6 +170,13 @@ fn parse_options(args: &[String]) -> Result<SelfUpdateOptions> {
         i += 1;
     }
     Ok(options)
+}
+
+fn print_self_update_usage() {
+    println!("Usage: winuxsh --self-update [--check|--dry-run] [--force] [--repo owner/name]");
+    println!("       self-update [--check|--dry-run] [--force] [--repo owner/name]");
+    println!();
+    println!("When used inside the Winuxsh REPL, run `self-update` or `update-winuxsh`.");
 }
 
 fn resolve_latest_release(repo: &str, timeout_ms: i32) -> Result<GitHubRelease> {
