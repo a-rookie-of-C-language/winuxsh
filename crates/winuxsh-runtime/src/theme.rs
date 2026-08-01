@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use nu_ansi_term::{Color, Style};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A colour theme for the shell.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -21,6 +21,12 @@ pub struct Theme {
     pub git_clean: Style,
     pub git_dirty: Style,
     pub git_status_detail: Style,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub struct UserThemeEntry {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 impl Theme {
@@ -95,10 +101,16 @@ pub fn by_name(name: &str) -> Theme {
         return theme;
     }
 
-    load_user_theme(name).unwrap_or_else(|| {
-        log::warn!("Theme '{}' not found, falling back to default", name);
-        Theme::default_theme()
-    })
+    if let Some(theme) = load_user_theme(name) {
+        return theme;
+    }
+
+    if let Some(theme) = crate::plugins::plugin_theme(name) {
+        return theme;
+    }
+
+    log::warn!("Theme '{}' not found, falling back to default", name);
+    Theme::default_theme()
 }
 
 fn builtin_by_name(name: &str) -> Option<Theme> {
@@ -116,6 +128,28 @@ pub fn list_names() -> &'static [&'static str] {
     &["default", "dark", "light", "colorful"]
 }
 
+/// List built-in names plus user and active official bundle theme names.
+pub fn list_available_names() -> Vec<String> {
+    let mut names = list_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    for entry in user_theme_entries() {
+        if !names
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&entry.name))
+        {
+            names.push(entry.name);
+        }
+    }
+    for name in crate::plugins::plugin_theme_names() {
+        if !names.iter().any(|known| known.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn load_user_theme(name: &str) -> Option<Theme> {
     let theme_dir = user_theme_dir()?;
     load_user_theme_from_dir(name, &theme_dir)
@@ -123,6 +157,32 @@ fn load_user_theme(name: &str) -> Option<Theme> {
 
 fn user_theme_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".winuxsh").join("themes"))
+}
+
+pub fn user_theme_entries() -> Vec<UserThemeEntry> {
+    user_theme_dir()
+        .map(|theme_dir| user_theme_entries_from_dir(&theme_dir))
+        .unwrap_or_default()
+}
+
+fn user_theme_entries_from_dir(theme_dir: &Path) -> Vec<UserThemeEntry> {
+    let Ok(entries) = std::fs::read_dir(theme_dir) else {
+        return Vec::new();
+    };
+    let mut themes = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_str()?.to_string();
+            if !is_safe_theme_name(&name) || load_theme_from_file(&name, &path).is_none() {
+                return None;
+            }
+            Some(UserThemeEntry { name, path })
+        })
+        .collect::<Vec<_>>();
+    themes.sort_by(|a, b| a.name.cmp(&b.name));
+    themes
 }
 
 fn load_user_theme_from_dir(name: &str, theme_dir: &Path) -> Option<Theme> {
@@ -136,6 +196,10 @@ fn load_user_theme_from_dir(name: &str, theme_dir: &Path) -> Option<Theme> {
         return None;
     }
 
+    load_theme_from_file(name, &path)
+}
+
+pub(crate) fn load_theme_from_file(name: &str, path: &Path) -> Option<Theme> {
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) => {
@@ -353,6 +417,43 @@ fg = "not-a-color"
     }
 
     #[test]
+    fn user_theme_entries_from_dir_lists_valid_safe_themes() {
+        let dir = unique_temp_dir("winuxsh-theme-catalog");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("market.toml"),
+            r#"
+[prompt_user]
+fg = "green"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("bad.name.toml"),
+            r#"
+[prompt_user]
+fg = "green"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("broken.toml"),
+            r#"
+[prompt_user]
+fg = "not-a-color"
+"#,
+        )
+        .unwrap();
+
+        let entries = user_theme_entries_from_dir(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "market");
+        assert_eq!(entries[0].path, dir.join("market.toml"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn unsafe_theme_names_are_ignored() {
         let dir = unique_temp_dir("winuxsh-theme-unsafe");
         std::fs::create_dir_all(&dir).unwrap();
@@ -371,4 +472,3 @@ fg = "not-a-color"
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
     }
 }
-

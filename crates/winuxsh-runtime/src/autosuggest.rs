@@ -101,7 +101,11 @@ pub fn parse_zsh_style(value: &str, default_style: Style) -> Style {
 
     let mut style = default_style;
 
-    for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         if let Some(color) = part.strip_prefix("fg=").and_then(parse_color) {
             style = style.fg(color);
         } else if let Some(color) = part.strip_prefix("bg=").and_then(parse_color) {

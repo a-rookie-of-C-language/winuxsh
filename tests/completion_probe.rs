@@ -251,6 +251,53 @@ fn argument_position_does_not_suggest_commands() {
     assert_not_contains(&suggestions, "grep");
 }
 
+#[test]
+fn installed_bundle_completion_definitions_override_compiled_defaults() {
+    let env = ProbeEnv::new("winuxsh-completion-bundle-def");
+    let bundle = env.root.join("bundle");
+    write_minimal_completion_bundle(&bundle);
+
+    let suggestions = run_probe(
+        "git --",
+        &env,
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
+    );
+    assert_contains(&suggestions, "--bundle-only");
+    assert_not_contains(&suggestions, "--version");
+
+    let subcommand_suggestions = run_probe(
+        "git bundle-subcommand --",
+        &env,
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
+    );
+    assert_contains(&subcommand_suggestions, "--bundle-subcommand-flag");
+}
+
+#[test]
+fn git_completion_suggests_daily_subcommands_and_flags() {
+    let env = ProbeEnv::new("winuxsh-completion-git-daily");
+
+    let subcommands = run_probe("git ", &env, &[]);
+    assert_contains(&subcommands, "add");
+    assert_contains(&subcommands, "commit");
+    assert_contains(&subcommands, "push");
+    assert_contains(&subcommands, "pull");
+    assert_contains(&subcommands, "checkout");
+
+    let add = run_probe("git a", &env, &[]);
+    assert_contains(&add, "add");
+    assert_not_contains(&add, "commit");
+
+    let commit_flags = run_probe("git commit --", &env, &[]);
+    assert_contains(&commit_flags, "--message");
+    assert_contains(&commit_flags, "--amend");
+    assert_contains(&commit_flags, "--no-verify");
+
+    let push_flags = run_probe("git push --force", &env, &[]);
+    assert_contains(&push_flags, "--force");
+    assert_contains(&push_flags, "--force-with-lease");
+}
+
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
     let output = run_winuxsh_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);
@@ -333,6 +380,64 @@ fn assert_before(values: &[String], earlier: &str, later: &str) {
 
 fn native_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn write_minimal_completion_bundle(path: &Path) {
+    std::fs::create_dir_all(path.join("packs").join("git")).unwrap();
+    std::fs::create_dir_all(path.join("completions")).unwrap();
+    std::fs::write(
+        path.join("bundle.toml"),
+        r#"name = "oh-my-winuxsh"
+version = "9.9.9"
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = ["git"]
+available = ["git"]
+[layout]
+packs_dir = "packs"
+completions_dir = "completions"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        path.join("packs").join("git").join("plugin.toml"),
+        r#"name = "git"
+bundle = "oh-my-winuxsh"
+version = "9.9.9"
+kind = "builtin"
+api = "winuxsh:plugin@0.1.0"
+category = "devtools"
+summary = "Installed Git completions"
+default = true
+permissions = ["cwd:read", "process:run:git"]
+required_binaries = ["git"]
+[exports]
+aliases = false
+completions = ["git"]
+prompt_segments = []
+hooks = []
+commands = []
+keybindings = []
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        path.join("completions").join("git.toml"),
+        r#"command = "git"
+description = "test bundle git"
+[[flags]]
+long = "--bundle-only"
+description = "flag loaded from test bundle"
+[[subcommands]]
+name = "bundle-subcommand"
+description = "subcommand loaded from test bundle"
+[[subcommands.flags]]
+long = "--bundle-subcommand-flag"
+description = "subcommand flag loaded from test bundle"
+"#,
+    )
+    .unwrap();
 }
 
 struct ProbeEnv {

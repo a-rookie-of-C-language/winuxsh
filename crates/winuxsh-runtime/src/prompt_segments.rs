@@ -240,8 +240,7 @@ fn render_content(
         }
         SegmentId::CommandExecutionTime => {
             let ms = std::env::var("WINUXSH_CMD_EXEC_TIME_MS").ok();
-            ms.filter(|m| !m.is_empty())
-                .map(|m| format!("{}ms", m))
+            ms.filter(|m| !m.is_empty()).map(|m| format!("{}ms", m))
         }
         SegmentId::Newline => Some(String::new()),
         SegmentId::Custom(name) => {
@@ -463,16 +462,16 @@ impl SegmentPrompt {
 // ---- Line rendering helpers ----
 
 /// ANSI-style a single segment.
- fn style_segment(seg: &RenderedSegment) -> String {
-     let mut style = Style::new();
-     if let Some(fg) = seg.fg {
-         style = style.fg(fg);
-     }
-     if let Some(bg) = seg.bg {
+fn style_segment(seg: &RenderedSegment) -> String {
+    let mut style = Style::new();
+    if let Some(fg) = seg.fg {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = seg.bg {
         style = style.on(bg);
-     }
-     style.paint(&seg.content).to_string()
- }
+    }
+    style.paint(&seg.content).to_string()
+}
 
 /// Render a line of segments without any multiline prefix.
 fn render_line(line: &PromptLine, separator: &str) -> String {
@@ -531,15 +530,15 @@ fn render_multiline_last(line: &PromptLine, separator: &str) -> String {
 }
 
 /// Render a powerline (or plain) separator between two adjacent segments.
- fn render_separator(next: &RenderedSegment, prev_bg: Option<Color>, separator: &str) -> String {
-     let sep_fg = next.bg.or(next.fg);
-     if let (Some(pbg), Some(sfg)) = (prev_bg, sep_fg) {
+fn render_separator(next: &RenderedSegment, prev_bg: Option<Color>, separator: &str) -> String {
+    let sep_fg = next.bg.or(next.fg);
+    if let (Some(pbg), Some(sfg)) = (prev_bg, sep_fg) {
         let style = Style::new().on(pbg).fg(sfg);
-         style.paint(separator).to_string()
-     } else {
-         separator.to_string()
-     }
- }
+        style.paint(separator).to_string()
+    } else {
+        separator.to_string()
+    }
+}
 
 /// Read the current git status (non-blocking) for prompt rendering.
 fn current_git_status() -> Option<GitRepoStatus> {
@@ -581,10 +580,7 @@ impl Prompt for SegmentPromptAdapter {
         Cow::Borrowed("\u{2570}\u{2500} ")
     }
 
-    fn render_prompt_history_search_indicator(
-        &self,
-        search: PromptHistorySearch,
-    ) -> Cow<'_, str> {
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         let status = match search.status {
             PromptHistorySearchStatus::Passing => "passing",
             PromptHistorySearchStatus::Failing => "failing",
@@ -597,23 +593,38 @@ impl Prompt for SegmentPromptAdapter {
 mod tests {
     use super::*;
     use crate::git_status::GitPromptSymbols;
+    use std::sync::Mutex;
+
+    static STATUS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn segment_id_from_name_case_insensitive() {
         assert_eq!(SegmentId::from_name("dir"), Some(SegmentId::Dir));
         assert_eq!(SegmentId::from_name("DIR"), Some(SegmentId::Dir));
         assert_eq!(SegmentId::from_name("vcs"), Some(SegmentId::Vcs));
-        assert_eq!(SegmentId::from_name("prompt_char"), Some(SegmentId::PromptChar));
-        assert_eq!(SegmentId::from_name("prompt-char"), Some(SegmentId::PromptChar));
+        assert_eq!(
+            SegmentId::from_name("prompt_char"),
+            Some(SegmentId::PromptChar)
+        );
+        assert_eq!(
+            SegmentId::from_name("prompt-char"),
+            Some(SegmentId::PromptChar)
+        );
         assert_eq!(SegmentId::from_name("newline"), Some(SegmentId::Newline));
         assert_eq!(SegmentId::from_name(""), None);
     }
 
     #[test]
     fn preset_from_name_works() {
-        assert_eq!(SegmentPreset::from_name("classic"), Some(SegmentPreset::Classic));
+        assert_eq!(
+            SegmentPreset::from_name("classic"),
+            Some(SegmentPreset::Classic)
+        );
         assert_eq!(SegmentPreset::from_name("LEAN"), Some(SegmentPreset::Lean));
-        assert_eq!(SegmentPreset::from_name("robbyrussell"), Some(SegmentPreset::Robbyrussell));
+        assert_eq!(
+            SegmentPreset::from_name("robbyrussell"),
+            Some(SegmentPreset::Robbyrussell)
+        );
         assert_eq!(SegmentPreset::from_name("unknown"), None);
     }
 
@@ -682,6 +693,7 @@ mod tests {
 
     #[test]
     fn status_segment_shows_nothing_on_success() {
+        let _guard = STATUS_ENV_LOCK.lock().unwrap();
         let cfg = default_cfg();
         std::env::remove_var("WINUXSH_LAST_EXIT_CODE");
         let content = render_content(&SegmentId::Status, None, &cfg);
@@ -690,6 +702,7 @@ mod tests {
 
     #[test]
     fn status_segment_shows_non_zero_code() {
+        let _guard = STATUS_ENV_LOCK.lock().unwrap();
         let cfg = default_cfg();
         std::env::set_var("WINUXSH_LAST_EXIT_CODE", "1");
         let content = render_content(&SegmentId::Status, None, &cfg);
@@ -708,11 +721,7 @@ mod tests {
     #[test]
     fn group_by_newline_splits_elements() {
         let cfg = SegmentPromptConfig {
-            left_elements: vec![
-                SegmentId::Dir,
-                SegmentId::Newline,
-                SegmentId::PromptChar,
-            ],
+            left_elements: vec![SegmentId::Dir, SegmentId::Newline, SegmentId::PromptChar],
             ..default_cfg()
         };
         let prompt = SegmentPrompt::new(cfg);

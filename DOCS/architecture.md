@@ -18,6 +18,7 @@ winuxsh.exe
 │   ├── completion/              ← TOML + bash 自动导入 + 三级缓存
 │   ├── theme/                   ← 主题与 prompt 模板
 │   ├── config                   ← .winshrc.toml 解析
+│   ├── plugins                  ← Winuxsh 官方插件 registry / bundle 控制面
 │   └── ctrl_c                   ← Win32 Ctrl+C 处理
 ├── rubash lib (Rust)
 │   ├── lexer/parser/ast
@@ -58,6 +59,24 @@ rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 - 通过 `[completions.completion_dirs]` 配置补全定义目录
 - 通过 `[theme]` 配置主题
 - 通过 `[winuxcmd]` 配置 winuxcmd 路径
+- 通过 `[plugins]` 管理官方插件 bundle、权限、启用状态和版本锁
+
+`~/.winshrc.toml` 是结构化控制面；`~/.winshrc` 是用户 shell 脚本面。
+插件加载、权限和 bundle 更新不依赖执行 rc。rc 继续用于 `export`、`alias`、
+函数和其他交互式 shell 初始化逻辑。
+
+### 5. 内置插件系统
+
+v3 插件系统是 Winuxsh 自己的插件系统，不是 zsh 插件兼容层。
+
+- `oh-my-winuxsh` 作为官方 bundled plugin distribution 随 winuxsh 发行。
+- 现有 git/docker/kubectl/npm/zoxide/direnv/dotenv/fzf 等能力先作为
+  `kind = "builtin"` 的 first-party pack 注册。
+- WASM/WASI 是第三方插件的长期运行时。
+- process/IPC 插件是外部工具桥和调试后端。
+- 插件不能扩展 rubash parser/executor，也不能 source 任意 zsh 插件脚本。
+- Winuxsh 不支持 ZLE runtime；只允许把少量 zsh 风格键位名翻译到 reedline
+  原生编辑动作。
 
 ## 目录结构
 
@@ -130,10 +149,11 @@ winuxsh/
 - v2.2: rubash rewrite 稳定化、补全增强、Vi/Ctrl+R、配置一致性、用户主题
 - v2.3: Windows 原生 terminal contract、agent 友好的非交互式行为、history/prompt/completion UX
 - v2.4: zsh-like 交互体验 polish（右 prompt、提示、补全菜单、默认配置）
-- v3: Winuxsh-native WASM/WASI 插件系统；zsh/Oh My Zsh 兼容保持迁移层，
-  shell 语义与作业控制仍优先由 rubash 提供
+- v3: 内置 Winuxsh 插件系统；`oh-my-winuxsh` 作为官方 bundled plugin
+  distribution；先用 `builtin` registry 统一现有 first-party packs，再引入
+  WASM/WASI 作为第三方插件运行时。zsh 兼容保持一次性迁移/维护层。
 - 非目标: Linux/macOS 原生 shell 产品；rubash 可跨平台复用，但 winuxsh 产品目标是 Windows
 
 ---
 
-*Last updated: 2026-07-17*
+*Last updated: 2026-07-30*

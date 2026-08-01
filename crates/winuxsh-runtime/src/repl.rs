@@ -43,14 +43,12 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
         )),
         completer: Box::new(completer),
     };
-    let history_menu = ReedlineMenu::HistoryMenu(Box::new(
-        configured_list_menu(
-            HISTORY_MENU,
-            menu_config.history_page_size,
-            menu_config,
-            MenuInputMode::IncrementalSearch,
-        ),
-    ));
+    let history_menu = ReedlineMenu::HistoryMenu(Box::new(configured_list_menu(
+        HISTORY_MENU,
+        menu_config.history_page_size,
+        menu_config,
+        MenuInputMode::IncrementalSearch,
+    )));
 
     let mut editor = Reedline::create()
         .with_history(Box::new(history))
@@ -66,9 +64,7 @@ pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
         ));
 
     if shell.autosuggest.history_strategy_enabled() {
-        editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(
-            &shell.autosuggest,
-        )));
+        editor = editor.with_hinter(Box::new(HistoryAutosuggestHinter::new(&shell.autosuggest)));
     }
     if shell.syntax_highlighting.main_highlighter_enabled() {
         editor = editor.with_highlighter(Box::new(WinuxshSyntaxHighlighter::new_with_commands(
@@ -253,7 +249,9 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "backward-kill-word" => Some(edit_event(EditCommand::CutWordLeft)),
         "kill-word" => Some(edit_event(EditCommand::CutWordRight)),
         "kill-line" => Some(edit_event(EditCommand::CutToLineEnd)),
-        "backward-kill-line" | "unix-line-discard" => Some(edit_event(EditCommand::CutFromLineStart)),
+        "backward-kill-line" | "unix-line-discard" => {
+            Some(edit_event(EditCommand::CutFromLineStart))
+        }
         "kill-whole-line" => Some(edit_event(EditCommand::CutCurrentLine)),
         "yank" => Some(edit_event(EditCommand::PasteCutBufferBefore)),
         "undo" => Some(edit_event(EditCommand::Undo)),
@@ -317,9 +315,10 @@ fn parse_control_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
         'H' | 'h' => Some((KeyModifiers::NONE, KeyCode::Backspace)),
         ' ' => Some((KeyModifiers::CONTROL, KeyCode::Char(' '))),
         '[' => Some((KeyModifiers::NONE, KeyCode::Esc)),
-        ch if ch.is_ascii_alphabetic() => {
-            Some((KeyModifiers::CONTROL, KeyCode::Char(ch.to_ascii_lowercase())))
-        }
+        ch if ch.is_ascii_alphabetic() => Some((
+            KeyModifiers::CONTROL,
+            KeyCode::Char(ch.to_ascii_lowercase()),
+        )),
         ch => Some((KeyModifiers::CONTROL, KeyCode::Char(ch))),
     }
 }
@@ -542,9 +541,9 @@ fn heredoc_input_complete(input: &str) -> bool {
     if !input.contains("<<") {
         return true;
     }
-    rubash::lexer::tokenize(input).into_iter().all(|token| {
-        token.kind != TokenKind::HereDocBody || !token.value.starts_with('\x1f')
-    })
+    rubash::lexer::tokenize(input)
+        .into_iter()
+        .all(|token| token.kind != TokenKind::HereDocBody || !token.value.starts_with('\x1f'))
 }
 
 fn scan_repl_input(input: &str) -> ReplInputScan {
@@ -888,7 +887,9 @@ mod tests {
     #[test]
     fn repl_input_complete_ignores_shell_comments() {
         assert!(is_repl_input_complete("# 11. 条件判断 (if)"));
-        assert!(is_repl_input_complete("# case/esac/function() are comments"));
+        assert!(is_repl_input_complete(
+            "# case/esac/function() are comments"
+        ));
         assert!(is_repl_input_complete(
             "# 11. 条件判断 (if)\nprintf \"ok\\n\""
         ));
@@ -928,12 +929,7 @@ mod tests {
             import_bindkeys: false,
         };
 
-        add_native_widget_keybindings(
-            &mut keybindings,
-            NativeKeymapTarget::Emacs,
-            &config,
-            &[],
-        );
+        add_native_widget_keybindings(&mut keybindings, NativeKeymapTarget::Emacs, &config, &[]);
 
         assert_eq!(
             keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char(' ')),
@@ -973,7 +969,11 @@ mod tests {
             presets: Vec::new(),
             import_bindkeys: true,
         };
-        let bindings = vec![native_widget_binding("^F", Some("viins"), "autosuggest-accept")];
+        let bindings = vec![native_widget_binding(
+            "^F",
+            Some("viins"),
+            "autosuggest-accept",
+        )];
 
         add_native_widget_keybindings(
             &mut insert,

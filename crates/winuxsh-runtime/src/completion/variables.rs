@@ -2,8 +2,8 @@
 // Provides Tab completion for environment variables
 
 use crate::completion::{CompletionContext, CompletionResult};
-use std::collections::HashMap;
 use anyhow::Result;
+use std::collections::HashMap;
 
 /// Variable completer
 pub struct VariableCompleter;
@@ -178,4 +178,3 @@ mod tests {
         assert!(result.contains("echo"));
     }
 }
-

@@ -90,6 +90,51 @@ fn slash_drive_paths_are_compat_input_not_default_output() {
 }
 
 #[test]
+fn slash_drive_mktemp_template_creates_file() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-slash-drive-mktemp");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let output_dir = temp.join("backups").join("winuxsh-phase12");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let Some(output_dir_slash_drive) = slash_drive_path(&output_dir) else {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    };
+
+    let output = run_winuxsh(
+        &format!(
+            "mkdir -p {dir} && mktemp {dir}/test.XXXXXX.tmp",
+            dir = shell_quote(&output_dir_slash_drive)
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "slash-drive mktemp template");
+
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 1, "stdout was {stdout:?}");
+    assert!(
+        !stdout[0].starts_with("/c/"),
+        "mktemp should print Windows-native output, got {:?}",
+        stdout[0]
+    );
+    assert!(
+        PathBuf::from(stdout[0].replace('/', "\\")).is_file(),
+        "mktemp output should name an existing file: {:?}",
+        stdout[0]
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn winshrc_does_not_run_for_non_interactive_modes() {
     let temp = unique_temp_dir("winuxsh-host-winshrc");
     let home = temp.join("home");
@@ -141,6 +186,29 @@ echo SHOULD_NOT_PRINT
     let output = child.wait_with_output().unwrap();
     assert_success(&output, "stdin-script .winshrc isolation");
     assert_eq!(normalize_text(&output.stdout), "stdin-ok");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn temporary_assignment_reaches_nested_winuxsh_child() {
+    let temp = unique_temp_dir("winuxsh-host-nested-env");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let output = run_winuxsh(
+        &format!(
+            "FOO_WINUXSH_PROBE=bar {} -c 'printf FOO=$FOO_WINUXSH_PROBE'",
+            shell_quote(&shell_path(&winuxsh_binary()))
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "temporary assignment reaches nested winuxsh");
+    assert_eq!(normalize_text(&output.stdout), "FOO=bar");
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -229,6 +297,67 @@ fn native_backslash_drive_paths_work_for_cd() {
 }
 
 #[test]
+fn drive_only_cd_and_bare_drive_commands_switch_to_drive_root() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-drive-switch");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let start_native_path = native_path(&start);
+    let bytes = start_native_path.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    }
+
+    let drive = (bytes[0] as char).to_ascii_uppercase();
+    let drive_root = format!("{drive}:/");
+    let start_shell_path = shell_path(&start);
+
+    let output = run_winuxsh(
+        &format!("cd {drive}:; pwd; cmd.exe /C cd"),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "drive-only cd");
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
+    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[1], &drive_root);
+
+    let output = run_winuxsh(&format!("{drive}:; pwd; cmd.exe /C cd"), &start, &home, &[]);
+    assert_success(&output, "bare drive command");
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
+    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[1], &drive_root);
+
+    let output = run_winuxsh(
+        &format!(
+            "cd {drive}: && cmd.exe /C cd; cd {start}; {drive}: && cmd.exe /C cd",
+            drive = drive,
+            start = shell_quote(&start_shell_path)
+        ),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "drive commands in and-or lists");
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
+    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[1], &drive_root);
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 #[ignore = "requires real winuxcmd.exe command links; run with --ignored"]
 fn native_backslash_drive_paths_work_for_winuxcmd() {
     if !cfg!(windows) {
@@ -245,7 +374,6 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
     std::fs::write(target.join("marker.txt"), "ok").unwrap();
     let winuxcmd = real_winuxcmd_for_test()
         .unwrap_or_else(|| panic!("real winuxcmd.exe with command links is required"));
-
     let target_native_path = native_path(&target);
     let output = run_winuxsh(
         &format!("ls {}", target_native_path),
@@ -260,6 +388,45 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
         "ls output did not include marker.txt: {stdout:?}"
     );
 
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn redirected_recursive_cp_uses_winuxsh_native_cp_not_rubash_shortcut() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-cp-native");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let source = start.join("source");
+    let dest = start.join("dest");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(source.join("sub")).unwrap();
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(source.join("sub").join("file.txt"), "ok").unwrap();
+
+    let script = format!(
+        "cp --version 2>&1; cp -R {}/. {}/ 2>&1; test -f {}/sub/file.txt",
+        shell_quote(&shell_path(&source)),
+        shell_quote(&shell_path(&dest)),
+        shell_quote(&shell_path(&dest))
+    );
+    let output = run_winuxsh(&script, &start, &home, &[]);
+
+    assert_success(&output, "redirected recursive cp native dispatch");
+    let stdout = stdout_lines(&output);
+    assert!(
+        stdout
+            .first()
+            .is_some_and(|line| line.starts_with("cp (winuxsh native) ")),
+        "cp --version should come from winuxsh native cp, got {stdout:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dest.join("sub").join("file.txt")).unwrap(),
+        "ok"
+    );
     let _ = std::fs::remove_dir_all(temp);
 }
 
@@ -671,6 +838,40 @@ fn script_file_args_populate_positional_parameters() {
 }
 
 #[test]
+fn slash_drive_script_file_argument_executes_script() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-host-slash-drive-script");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let script = start.join("script.sh");
+    std::fs::write(&script, "echo slash-drive-script-ok\n").unwrap();
+    let Some(script_slash_drive) = slash_drive_path(&script) else {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    };
+
+    let output = Command::new(winuxsh_binary())
+        .arg(script_slash_drive)
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .output()
+        .unwrap_or_else(|err| panic!("spawn winuxsh slash-drive script: {err}"));
+
+    assert_success(&output, "slash-drive script file");
+    assert_eq!(normalize_text(&output.stdout), "slash-drive-script-ok");
+    assert_eq!(normalize_text(&output.stderr), "");
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn command_mode_accepts_base_prefixed_arithmetic_in_function_body() {
     if !cfg!(windows) {
         return;
@@ -860,6 +1061,25 @@ fn comparable_path(value: &str) -> String {
 
 fn shell_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn slash_drive_path(path: &Path) -> Option<String> {
+    let value = shell_path(path);
+    let bytes = value.as_bytes();
+    if cfg!(windows)
+        && bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'/'
+    {
+        Some(format!(
+            "/{}{}",
+            (bytes[0] as char).to_ascii_lowercase(),
+            &value[2..]
+        ))
+    } else {
+        None
+    }
 }
 
 fn real_winuxcmd_for_test() -> Option<PathBuf> {

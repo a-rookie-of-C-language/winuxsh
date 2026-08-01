@@ -1,4 +1,4 @@
-//! Binary-level tests for native zsh pack inventory commands.
+//! Binary-level tests for legacy zsh migration inventory commands.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -23,10 +23,13 @@ fn winuxsh_binary() -> PathBuf {
 #[test]
 fn zsh_native_packs_text_lists_preinstalled_pack_contract() {
     let output = run_winuxsh("--zsh-native-packs");
-    assert_success(&output, "zsh native packs text");
+    assert_success(&output, "legacy zsh migration packs text");
     let stdout = stdout_text(&output);
 
-    assert!(stdout.contains("Native zsh plugin packs"), "{stdout}");
+    assert!(
+        stdout.contains("Legacy zsh migration pack mappings"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("no Oh My Zsh or zsh plugin source is vendored or sourced"),
         "{stdout}"
@@ -48,7 +51,7 @@ fn zsh_native_packs_text_lists_preinstalled_pack_contract() {
 #[test]
 fn zsh_native_packs_json_lists_machine_readable_packs() {
     let output = run_winuxsh("--zsh-native-packs-json");
-    assert_success(&output, "zsh native packs json");
+    assert_success(&output, "legacy zsh migration packs json");
     let stdout = stdout_text(&output);
 
     assert!(stdout.contains(r#""name": "git""#), "{stdout}");

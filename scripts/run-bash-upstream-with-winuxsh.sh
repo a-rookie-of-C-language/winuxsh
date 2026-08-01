@@ -143,6 +143,10 @@ for runner in "${RUNNERS[@]}"; do
   refuse_unsafe_dir "$workdir"
   safe_rm_rf "$workdir"
   mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
+  cat >"$test_home/.winshrc.toml" <<'EOF'
+[winuxcmd]
+enabled = false
+EOF
   cp -R "$BASH_TEST_DIR" "$test_workdir"
   cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
   find "$test_workdir" "$expected_dir" -maxdepth 1 -type f -name '*.right' -exec sed -i 's/\r$//' {} +
@@ -227,11 +231,13 @@ EOF
     refuse_unsafe_dir "$PWD"
     env \
       HOME="$test_home" \
-      THIS_SH="$shell_wrapper" \
+      USERPROFILE="$test_home" \
+      WINUXSH_CONFIG="$test_home/.winshrc.toml" \
+      THIS_SH="$SHELL_BIN" \
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
-      PATH="$guard_bin:$BASH_TEST_DIR:$PATH" \
+      PATH="$guard_bin:$BASH_TEST_DIR:/usr/bin:/bin" \
       sh "./$runner"
   ) >"$log" 2>&1
   status=$?

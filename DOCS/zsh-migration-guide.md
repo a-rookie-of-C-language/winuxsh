@@ -140,24 +140,32 @@ If you need to inspect rollback instructions:
 winuxsh --zsh-compat-import-rollback-plan
 ```
 
-## Step 4: Inspect Native Zsh Packs
+## Step 4: Inspect Plugin Mappings
 
-Winuxsh preinstalls native equivalents for common zsh plugin behavior. List the
-current inventory:
+Winuxsh maps common zsh plugin intent to Winuxsh-native features. Prefer the
+current plugin inventory for new work:
 
-```pwsh
+```sh
+winuxsh plugin list
+winuxsh plugin search git
+winuxsh plugin review git
+```
+
+Legacy migration inventory is still available:
+
+```sh
 winuxsh --zsh-native-packs
 ```
 
 Machine-readable version:
 
-```pwsh
+```sh
 winuxsh --zsh-native-packs-json
 ```
 
 Important distinction:
 
-- **preinstalled** means winuxsh knows how to provide a native implementation.
+- **listed** means winuxsh knows how to map that migration intent.
 - **enabled by default** is intentionally much smaller.
 
 Default-on safe UI packs:
@@ -306,7 +314,7 @@ Guidelines:
 
 - Do not rely on interactive plugin prompts in `-c` or script mode.
 - Keep lifecycle plugins opt-in and project-aware.
-- Use `--zsh-compat-report-json` and `--zsh-native-packs-json` for diagnostics.
+- Use `--zsh-compat-report-json` and `--zsh-native-packs-json` for migration diagnostics.
 - Prefer `C:/...` paths in generated commands.
 
 ## Troubleshooting
@@ -330,10 +338,11 @@ winuxsh --zsh-compat-doctor
 
 ### A plugin is reported unsupported
 
-That usually means it needs zsh internals. Look for a native pack first:
+That usually means it needs zsh internals. Look for an official Winuxsh plugin
+first:
 
-```pwsh
-winuxsh --zsh-native-packs
+```sh
+winuxsh plugin search <name>
 ```
 
 If no pack exists, the plugin may need a future native implementation rather

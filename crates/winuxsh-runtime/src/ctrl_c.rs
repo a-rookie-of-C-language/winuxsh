@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_C_EVENT,
-};
+use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
 
 #[cfg(windows)]
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
@@ -43,4 +41,3 @@ pub fn consume_ctrl_c() -> bool {
 
 #[cfg(not(windows))]
 pub fn install() {}
-

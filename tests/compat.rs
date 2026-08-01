@@ -8,7 +8,7 @@
 //! `winuxcmd.exe` is not enough because rubash resolves external pipeline
 //! stages by command name. Run with:
 //!
-//!   cargo test --test compat -- --ignored
+//!   PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" cargo test --test compat -- --ignored
 
 use std::fs;
 use std::path::PathBuf;
@@ -120,7 +120,7 @@ fn ensure_winuxcmd_command_links() {
 
     assert!(
         missing.is_empty(),
-        "compat tests require winuxcmd command links in PATH, not just winuxcmd.exe; missing: {:?}. Run the bundled activation script or `winuxcmd.exe wpm links rebuild --root <winuxcmd-dir>` before `cargo test --test compat -- --ignored`.",
+        "compat tests require winuxcmd command links in the Windows process PATH, not just winuxcmd.exe; missing: {:?}. Run the bundled activation script, prepend the command-link directory with the Windows separator (`PATH=\"C:/path/to/WinuxCmd/build-vs-release;$PATH\"`), or run `winuxcmd.exe wpm links rebuild --root <winuxcmd-dir>` before `cargo test --test compat -- --ignored`.",
         missing
     );
 }

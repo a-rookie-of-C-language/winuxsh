@@ -9,11 +9,13 @@ pub mod completion;
 pub mod config;
 pub mod ctrl_c;
 pub mod git_status;
+pub(crate) mod native_file_builtins;
+pub mod plugins;
 pub mod prompt;
 pub mod prompt_segments;
 pub mod repl;
-pub mod shell;
 pub mod setup_wizard;
+pub mod shell;
 pub mod syntax_highlighting;
 pub mod terminal;
 pub mod theme;
@@ -28,15 +30,15 @@ pub(crate) mod test_support {
     pub(crate) static PROCESS_STATE_LOCK: Mutex<()> = Mutex::new(());
 }
 
-pub use shell::Shell;
+pub use completion::{CompletionBehavior, CompletionMatchMode, CompletionState, WinuxshCompleter};
 pub use config::{
-    AutosuggestConfig, EditorConfig, EditorMode, HistoryConfig, MenuConfig, ShellConfig,
-    SyntaxHighlightConfig, ZshCompatLevel, ZshConfig,
+    AutosuggestConfig, EditorConfig, EditorMode, HistoryConfig, MenuConfig, PluginConfig,
+    PluginPackConfig, ShellConfig, SyntaxHighlightConfig, ZshCompatLevel, ZshConfig,
 };
-pub use theme::Theme;
-pub use completion::{
-    CompletionBehavior, CompletionMatchMode, CompletionState, WinuxshCompleter,
-};
-pub use prompt::PromptIndicators;
 pub use prompt::PromptBackend;
-pub use prompt_segments::{SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig};
+pub use prompt::PromptIndicators;
+pub use prompt_segments::{
+    SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
+};
+pub use shell::Shell;
+pub use theme::Theme;

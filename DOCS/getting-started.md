@@ -119,6 +119,13 @@ edit_mode = "vi"
 [completions]
 matching = "prefix"
 
+[plugins]
+# Future plugin control plane. Plugin state, permissions, bundle versions, and
+# managed updates belong here; shell code belongs in ~/.winshrc.
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["git", "prompts", "keybindings"]
+
 [winuxcmd]
 # auto-detected from PATH; override only if needed
 # enabled = true
@@ -145,6 +152,10 @@ hello() {
 `~/.winshrc` is sourced only for the interactive REPL. It does not run for
 `winuxsh -c ...`, script files, or stdin script execution, so agent and CI
 surfaces stay deterministic.
+
+Use TOML for structured control-plane state such as plugins, permissions,
+prompt settings, history, menus, and bundle updates. Use rc for free-form
+rubash/bash-like shell code.
 
 ## 6b. Segment-based prompt (experimental)
 
@@ -188,21 +199,42 @@ winuxsh --zsh-compat-import-apply
 winuxsh --zsh-compat-doctor
 ```
 
-## 8. Enable native zsh-style packs
+## 8. Official plugin bundle
 
-Turn on the git alias pack by adding to `~/.winshrc.toml`:
+Winuxsh has a built-in plugin system. `oh-my-winuxsh` is the
+official bundled plugin distribution, not an Oh My Zsh fork and not zsh plugin
+support. It ships first-party packs such as `git`, `docker`, `kubectl`,
+`npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
+presets.
+
+The canonical TOML shape is:
 
 ```toml
-[zsh]
-native_plugins = true
-# native_plugins = ["git", "direnv", "zoxide", "thefuck"]
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["git", "prompts", "keybindings"]
+
+[plugins.git]
+enabled = true
+permissions = ["cwd:read", "process:run:git"]
+
+[plugins.zoxide]
+enabled = false
+permissions = ["cwd:read", "process:run:zoxide"]
 ```
 
-The UX packs (autosuggestions, syntax highlighting) are on by default and
-need no config.
+Existing `[zsh.native_plugins]` and `[zsh.native_widgets]` config remains a
+legacy migration compatibility surface, but new config should use `[plugins]`.
+Use `winuxsh plugin list`, `winuxsh plugin search`, `winuxsh plugin themes`,
+and `winuxsh plugin review` for current inventory, theme sources, and
+permission checks; legacy `--zsh-native-packs` remains migration-only.
 
 ## What next
 
 - [Zsh Migration Guide](zsh-migration-guide.md) for detailed `.zshrc` import
+- [Plugin System Direction](plugin-system-direction.md) for the v3 plugin model
+- [Plugin System Roadmap](plugin-system-roadmap.md) for the execution sequence
+- [Oh My Winuxsh Bundle Plan](oh-my-winuxsh-bundle-plan.md) for the official bundle
 - [Roadmap](winuxsh-roadmap.md) to see what is planned
 - Source at [github.com/unixwin/winuxsh](https://github.com/unixwin/winuxsh)

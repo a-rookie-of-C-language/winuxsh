@@ -3,8 +3,8 @@
 //! Guides the user through initial configuration when `~/.winshrc.toml`
 //! does not exist, then writes the generated file.
 
-use std::path::PathBuf;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use crate::theme;
 
@@ -54,8 +54,9 @@ pub fn run_wizard() -> anyhow::Result<()> {
     );
 
     // --- Theme ---
-    let theme_list: Vec<&str> = theme::list_names().to_vec();
-    let theme = prompt_choice("  \u{1f3a8}  Colour theme", "default", &theme_list, "  \u{2502}  Choose the prompt colour scheme.  Try \u{2018}colorful\u{2019} for a vibrant prompt.");
+    let theme_list = theme::list_available_names();
+    let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
+    let theme = prompt_choice("  \u{1f3a8}  Colour theme", "default", &theme_refs, "  \u{2502}  Choose the prompt colour scheme.  Try \u{2018}colorful\u{2019} for a vibrant prompt.");
 
     // --- Prompt symbol ---
     let symbol = prompt_choice(
@@ -65,14 +66,14 @@ pub fn run_wizard() -> anyhow::Result<()> {
         "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
     );
 
-     // --- Prompt style ---
-     let prompt_style = prompt_choice(
+    // --- Prompt style ---
+    let prompt_style = prompt_choice(
          "  \u{1f3b5}  Prompt style",
          "minimal",
         &["minimal", "classic", "powerline", "multiline", "segments"],
         "  \u{2502}  minimal   = user@host cwd $\n  \u{2502}  classic   = user@host cwd git_branch git_status $\n  \u{2502}  powerline = unicode arrows with git status on the right\n  \u{2502}  multiline = first line: user@host, second line: cwd git_branch $\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt (experimental)",
      );
- 
+
     // --- Segment preset (only if prompt_style = "segments") ---
     let segment_preset = if prompt_style == "segments" {
         Some(prompt_choice(
@@ -85,8 +86,8 @@ pub fn run_wizard() -> anyhow::Result<()> {
         None
     };
 
-     // --- Right prompt ---
-     let right_prompt = prompt_choice(
+    // --- Right prompt ---
+    let right_prompt = prompt_choice(
          "  \u{23f1}\u{fe0f}  Right-side info",
         "time",
         &["off", "time", "full"],
@@ -94,21 +95,18 @@ pub fn run_wizard() -> anyhow::Result<()> {
     );
 
     // --- Git prompt ---
-    let git_enabled = prompt_yn(
-        "  \u{1f500}  Show git branch/status in the prompt",
-        true,
-    );
+    let git_enabled = prompt_yn("  \u{1f500}  Show git branch/status in the prompt", true);
 
- // --- Generate config ---
- let config_content = generate_config(
-     &edit_mode,
-     &theme,
-     &prompt_style,
-     &right_prompt,
-     &symbol,
-     git_enabled,
-    segment_preset.as_deref(),
- );
+    // --- Generate config ---
+    let config_content = generate_config(
+        &edit_mode,
+        &theme,
+        &prompt_style,
+        &right_prompt,
+        &symbol,
+        git_enabled,
+        segment_preset.as_deref(),
+    );
 
     // Write ~/.winshrc.toml
     let config_path = home.join(".winshrc.toml");
@@ -123,7 +121,10 @@ pub fn run_wizard() -> anyhow::Result<()> {
     let _ = std::fs::write(winuxsh_dir.join(".setup-done"), b"");
 
     println!();
-    println!("  \u{2705}  Configuration written to {}", config_path.display());
+    println!(
+        "  \u{2705}  Configuration written to {}",
+        config_path.display()
+    );
     println!();
     println!("  \u{1f680}  You can tweak these settings any time by editing that file.");
     println!("  \u{1f4a1}  See DOCS/getting-started.md for the full configuration reference.");
@@ -134,15 +135,15 @@ pub fn run_wizard() -> anyhow::Result<()> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
- fn generate_config(
-     edit_mode: &str,
-     theme: &str,
-     prompt_style: &str,
-     right_prompt: &str,
-     symbol: &str,
-     git_enabled: bool,
+fn generate_config(
+    edit_mode: &str,
+    theme: &str,
+    prompt_style: &str,
+    right_prompt: &str,
+    symbol: &str,
+    git_enabled: bool,
     segment_preset: Option<&str>,
- ) -> String {
+) -> String {
     // Segment-based prompt: emit minimal config + the new segment fields.
     if prompt_style == "segments" {
         let preset_line = segment_preset
@@ -183,31 +184,17 @@ max_entry_lines = 5
  # unstaged = "\u271a{{n}}"
 separator = " "
 "#,
-            preset_line,
-            symbol,
-            indicator,
-            indicator,
-            indicator,
-            indicator,
-            edit_mode,
-            theme,
+            preset_line, symbol, indicator, indicator, indicator, indicator, edit_mode, theme,
         );
     }
 
-
     let (prompt_template, right_template) = match (prompt_style, right_prompt) {
-        ("powerline", "time") => (
-            "{cwd} {git_prompt} ".to_string(),
-            "{time} ".to_string(),
-        ),
+        ("powerline", "time") => ("{cwd} {git_prompt} ".to_string(), "{time} ".to_string()),
         ("powerline", "full") => (
             "{cwd} {git_prompt} ".to_string(),
             "{time} {git_branch} ".to_string(),
         ),
-        ("powerline", _) => (
-            "{cwd} {git_prompt} ".to_string(),
-            String::new(),
-        ),
+        ("powerline", _) => ("{cwd} {git_prompt} ".to_string(), String::new()),
         ("multiline", "time") => (
             "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
             String::new(),
@@ -233,18 +220,9 @@ separator = " "
             String::new(),
         ),
         // minimal
-        ("minimal", "time") => (
-            "{cwd} ".to_string(),
-            "{time} ".to_string(),
-        ),
-        ("minimal", "full") => (
-            "{cwd} ".to_string(),
-            "{time} {git_branch} ".to_string(),
-        ),
-        _ => (
-            "{cwd} ".to_string(),
-            String::new(),
-        ),
+        ("minimal", "time") => ("{cwd} ".to_string(), "{time} ".to_string()),
+        ("minimal", "full") => ("{cwd} ".to_string(), "{time} {git_branch} ".to_string()),
+        _ => ("{cwd} ".to_string(), String::new()),
     };
 
     let git_section = if git_enabled {
@@ -279,7 +257,8 @@ behind = ""
 stashes = ""
 conflicts = ""
 separator = " "
-"#.to_string()
+"#
+        .to_string()
     };
 
     let indicator = format!("{} ", symbol);
@@ -312,17 +291,18 @@ history_page_size = 10
 max_entry_lines = 5
 {}
 "#,
-            prompt_template,
-            right_template,
-            symbol,
-            indicator,
-            indicator,
-            indicator,
-            indicator,
-            edit_mode,
-            theme,
-            git_section,
-        ).replace("{sym}", symbol)
+        prompt_template,
+        right_template,
+        symbol,
+        indicator,
+        indicator,
+        indicator,
+        indicator,
+        edit_mode,
+        theme,
+        git_section,
+    )
+    .replace("{sym}", symbol)
 }
 
 fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> String {
@@ -335,7 +315,11 @@ fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> St
     let default_display = default_idx + 1;
 
     loop {
-        print!("  |  Enter choice [1-{} / Enter for {}]: ", options.len(), default_display);
+        print!(
+            "  |  Enter choice [1-{} / Enter for {}]: ",
+            options.len(),
+            default_display
+        );
         io::stdout().flush().ok();
         let mut input = String::new();
         io::stdin().read_line(&mut input).ok();
@@ -355,7 +339,11 @@ fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> St
             return input;
         }
 
-        println!("  |  Enter a number 1-{} (or Enter for {}).", options.len(), default_display);
+        println!(
+            "  |  Enter a number 1-{} (or Enter for {}).",
+            options.len(),
+            default_display
+        );
     }
 }
 

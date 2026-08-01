@@ -1,18 +1,16 @@
 // Custom completer for WinSH
 // Integrates command, path, and variable completion
 
-use std::path::PathBuf;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use reedline::{Completer, Span, Suggestion};
+use crate::completion::external::{CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin};
+use crate::completion::path::PathCompleter;
+use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
 };
-use crate::completion::path::PathCompleter;
-use crate::completion::variables::VariableCompleter;
-use crate::completion::external::{
-    CommandCompletionPlugin, CommandDef, ExternalCompletionPlugin,
-};
+use reedline::{Completer, Span, Suggestion};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// State shared with completer
 pub struct CompletionState {
@@ -55,6 +53,17 @@ impl CompletionState {
         dirs: &[PathBuf],
         definitions: Vec<CommandDef>,
     ) {
+        self.load_completion_dirs_with_bundle_and_definitions(dirs, Vec::new(), definitions);
+    }
+
+    /// Load official bundle definitions over compiled fallback, then translated
+    /// compatibility definitions, then user directories as the final override.
+    pub fn load_completion_dirs_with_bundle_and_definitions(
+        &mut self,
+        dirs: &[PathBuf],
+        bundle_definitions: Vec<CommandDef>,
+        definitions: Vec<CommandDef>,
+    ) {
         let has_command_plugin = self
             .plugins
             .iter()
@@ -63,6 +72,7 @@ impl CompletionState {
             self.add_plugin(Arc::new(CommandCompletionPlugin));
         }
         let mut external = ExternalCompletionPlugin::new();
+        external.replace_definitions(bundle_definitions);
         external.load_definitions(definitions);
         for dir in dirs {
             external.load_dir(dir);
@@ -79,9 +89,7 @@ pub struct WinuxshCompleter {
 impl WinuxshCompleter {
     /// Create a new completer with shared state
     pub fn new(state: Arc<Mutex<CompletionState>>) -> Self {
-        Self {
-            state,
-        }
+        Self { state }
     }
 
     /// Update state
@@ -94,24 +102,21 @@ impl WinuxshCompleter {
 
     /// Complete input
     fn complete_input(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
-        let (current_dir, env_vars, aliases, behavior, plugins) = if let Ok(state) = self.state.lock() {
-            (
-                state.current_dir.clone(),
-                state.env_vars.clone(),
-                state.aliases.clone(),
-                state.behavior,
-                state.plugins.clone(),
-            )
-        } else {
-            return Vec::new();
-        };
+        let (current_dir, env_vars, aliases, behavior, plugins) =
+            if let Ok(state) = self.state.lock() {
+                (
+                    state.current_dir.clone(),
+                    state.env_vars.clone(),
+                    state.aliases.clone(),
+                    state.behavior,
+                    state.plugins.clone(),
+                )
+            } else {
+                return Vec::new();
+            };
 
-        let context = CompletionContext::with_behavior(
-            current_dir,
-            input.to_string(),
-            cursor_pos,
-            behavior,
-        );
+        let context =
+            CompletionContext::with_behavior(current_dir, input.to_string(), cursor_pos, behavior);
         let mut all_suggestions = Vec::new();
 
         // At command position, also surface matching directories from the
@@ -176,7 +181,10 @@ impl WinuxshCompleter {
         };
         // Skip flag-like input and explicit path indicators; those are handled
         // by the path completer with its own prefix preservation rules.
-        if word.starts_with('-') || word.contains('/') || word.contains('\\') || word.starts_with('.')
+        if word.starts_with('-')
+            || word.contains('/')
+            || word.contains('\\')
+            || word.starts_with('.')
         {
             return Vec::new();
         }
@@ -195,10 +203,7 @@ impl WinuxshCompleter {
             if !context.behavior.matches(&file_name, &word) {
                 continue;
             }
-            let is_dir = entry
-                .file_type()
-                .map(|ft| ft.is_dir())
-                .unwrap_or(false);
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
             if !is_dir {
                 continue;
             }
@@ -283,8 +288,7 @@ impl WinuxshCompleter {
         cursor_pos: usize,
     ) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
-        let span_context =
-            CompletionContext::new(PathBuf::new(), input.to_string(), cursor_pos);
+        let span_context = CompletionContext::new(PathBuf::new(), input.to_string(), cursor_pos);
         let (span_start, span_end) = span_context
             .current_word_span()
             .unwrap_or((cursor_pos, cursor_pos));
@@ -329,7 +333,9 @@ mod tests {
 
     #[test]
     fn test_completer_creation() {
-        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from("/home/user"))));
+        let state = Arc::new(Mutex::new(CompletionState::new(PathBuf::from(
+            "/home/user",
+        ))));
         let completer = WinuxshCompleter::new(state);
         assert!(completer.state.lock().is_ok());
     }
@@ -339,7 +345,10 @@ mod tests {
         let mut state = CompletionState::new(PathBuf::from("."));
         state.load_completion_dirs(&[]);
         // Should have registered at least the command plugin
-        assert!(state.plugins.iter().any(|p| p.name() == "command-completion"));
+        assert!(state
+            .plugins
+            .iter()
+            .any(|p| p.name() == "command-completion"));
     }
 
     #[test]
@@ -535,4 +544,3 @@ fn shell_escape_path_segment(value: &str) -> String {
     }
     escaped
 }
-

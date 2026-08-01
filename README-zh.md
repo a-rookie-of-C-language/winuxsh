@@ -141,32 +141,45 @@ winuxsh --zsh-profile-plan agent
 
 详细教程：[Zsh 迁移教程](DOCS/zsh-migration-guide.md)。
 
-## 内置的 Zsh 风格 Pack
+## 官方 Winuxsh 插件
 
-Winuxsh 内置了常见 zsh / Oh My Zsh 插件行为的原生支持。这些 pack 是用 Rust
-在 rubash、reedline、winuxcmd 之上实现的。没有 vendor zsh 插件源码，
-也没有在启动时 source zsh 脚本。
+Winuxsh 会内置自己的插件系统。`oh-my-winuxsh` 是官方 bundled plugin
+distribution，定位类似 winuxcmd 对 coreutils 的关系：随 winuxsh 发行，
+也支持之后独立更新和回滚。
 
-查看当前 inventory：
+release 包会在 `winuxsh.exe` 旁边带一份 `bundles/oh-my-winuxsh` 离线基线；
+之后通过 `%LOCALAPPDATA%` 或 plugin lock 安装的 bundle 会优先覆盖这份基线。
 
-```pwsh
-winuxsh --zsh-native-packs
-winuxsh --zsh-native-packs-json
+这些不是 zsh 插件，也不是 Oh My Zsh fork。它们是 Winuxsh 自己实现和维护的
+first-party packs。`.zshrc` 最多作为一次性迁移来源，不能定义插件系统身份。
+
+当前插件 inventory、搜索、权限 review 和安装会通过统一 CLI 查看：
+
+```sh
+winuxsh plugin list
+winuxsh plugin search git
+winuxsh plugin review git
+winuxsh plugin install git
+winuxsh plugin uninstall git
 ```
 
-默认启用（安全 UI 能力）：
+现有 `--zsh-native-packs` / `--zsh-native-packs-json` 会保留为兼容入口，
+但新文档和新实现应迁移到 `winuxsh plugin ...`。
 
-- `zsh-autosuggestions` —— 基于历史的 inline 建议
-- `zsh-syntax-highlighting` —— 主要高亮子集
+核心交互能力：
 
-需要 opt-in 的 pack：
+- autosuggestions —— 基于历史的 inline 建议
+- syntax highlighting —— Winuxsh 原生高亮
+- prompt engine —— 内置 prompt 和 segment 渲染
+- keybinding presets —— 常见键位映射，不是 ZLE runtime
 
-- `git` —— Oh My Zsh 风格别名（`g`、`gst`、`gco`、`gl`、`gp`、`glog`）
-  加上读者在本页顶部看到的彩色 prompt 状态
-- `zsh-history-substring-search`、标准 ZLE widget 映射
+官方 bundle 中的 first-party packs：
+
+- `git` —— Git 别名、补全、prompt segment
 - `docker`、`kubectl`、`npm`
 - `command-not-found`、`direnv`、`dotenv`、`zoxide`、`thefuck`、`fzf`、
-  `zsh-interactive-cd`、`last-working-dir`
+  `last-working-dir`
+- `prompts`、`keybindings`
 
 会读取项目文件、执行外部命令或改变 shell 状态的 pack 默认关闭，
 必须在 `~/.winshrc.toml` 中显式启用。
@@ -174,7 +187,7 @@ winuxsh --zsh-native-packs-json
 ## 配置
 
 `~/.winshrc.toml` 是结构化设置文件，负责 prompt、editor、history、
-completion、native packs 这类可声明配置。
+completion、plugins、permissions、bundle version 这类可声明配置。
 `~/.winshrc` 是唯一的 REPL 启动脚本文件，负责 `export`、`alias`、函数、
 以及用户想写的 shell 逻辑。
 `.zshrc` 仅作为导入源读取，不作为运行时启动文件。
@@ -196,7 +209,7 @@ max_size = 10000
 ignore_space_prefixed = true
 
 [theme]
-current_theme = "default" # default | dark | light | colorful | ~/.winuxsh/themes/<name>.toml
+current_theme = "default" # default | dark | light | colorful | ocean | forest | cyberpunk | minimal | ~/.winuxsh/themes/<name>.toml
 
 [completions]
 matching = "prefix" # prefix | substring
@@ -208,6 +221,19 @@ completion_dirs = []
 completion_page_size = 10
 history_page_size = 10
 max_entry_lines = 5
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["git", "prompts", "keybindings"]
+
+[plugins.git]
+enabled = true
+permissions = ["cwd:read", "process:run:git"]
+
+[plugins.zoxide]
+enabled = false
+permissions = ["cwd:read", "process:run:zoxide"]
 
 [winuxcmd]
 # 可选覆盖；省略时从 PATH 自动发现。
@@ -244,7 +270,7 @@ Shell 语言层面的东西全部走 rubash，包括：
 - 多行复合命令收集为一次执行
 
 作业控制和可执行语法也归 rubash 管；winuxsh 不重复实现。这让 winuxsh 保持精炼，
-shell 层面能直接受益于 rubash 通过的 bash 上游测试。
+shell 层面能直接受益于 rubash 通过的 bash 上游测试；当前验证分层见 [Rubash Bash 能力矩阵](DOCS/rubash-bash-compat-matrix.md)。
 
 ## 补全系统
 
@@ -273,7 +299,7 @@ winuxsh.exe
 │   ├── reedline REPL           编辑、历史、菜单、提示
 │   ├── completion system       TOML、zsh 导入、缓存、PATH 命令
 │   ├── zsh compatibility       扫描器、导入计划、原生 pack
-│   ├── theme/prompt            模板、内置和用户主题
+│   ├── theme/prompt            模板、内置主题、官方 bundle 主题和用户主题
 │   ├── git status              通过 `git status --porcelain` 获取分支和计数
 │   ├── config                  ~/.winshrc.toml
 │   └── ctrl_c                  Win32 Ctrl+C 处理
@@ -288,12 +314,16 @@ winuxsh.exe
 - 不采用 Nushell 语法或结构化管道模型
 - 不在 winuxsh 内实现 zsh 解析器或 ZLE 运行时
 - 不在启动时盲目 source `.zshrc` 或 zsh 插件脚本
+- 不把 zsh 插件兼容作为 Winuxsh 插件系统身份
 - 不引入 winuxcmd FFI/DLL
 - 不重复实现 rubash 的解析器/执行器或核心 shell 语义
 
 ## 文档
 
 - [快速开始](DOCS/getting-started.md)
+- [插件系统方向](DOCS/plugin-system-direction.md)
+- [插件系统路线](DOCS/plugin-system-roadmap.md)
+- [Oh My Winuxsh Bundle Plan](DOCS/oh-my-winuxsh-bundle-plan.md)
 - [Zsh 迁移教程](DOCS/zsh-migration-guide.md)
 - [Roadmap](DOCS/winuxsh-roadmap.md)
 - [架构](DOCS/architecture.md)

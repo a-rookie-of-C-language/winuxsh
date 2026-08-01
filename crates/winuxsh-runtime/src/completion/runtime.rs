@@ -95,7 +95,10 @@ fn run_runtime_completion(
     timeout: Duration,
 ) -> Result<String, String> {
     if !is_safe_name(&source.command) {
-        return Err(format!("unsafe runtime completion command: {}", source.command));
+        return Err(format!(
+            "unsafe runtime completion command: {}",
+            source.command
+        ));
     }
     if args.iter().any(|arg| !is_safe_completion_arg(arg)) {
         return Err(format!(
@@ -112,9 +115,8 @@ fn run_runtime_completion(
     let stderr = std::fs::File::create(&stderr_path)
         .map_err(|err| format!("failed to create stderr capture: {}", err))?;
 
-    let command_path = resolve_command_path(&source.command).unwrap_or_else(|| {
-        PathBuf::from(&source.command)
-    });
+    let command_path =
+        resolve_command_path(&source.command).unwrap_or_else(|| PathBuf::from(&source.command));
 
     let mut child = Command::new(command_path)
         .args(args)

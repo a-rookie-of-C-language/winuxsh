@@ -55,3 +55,23 @@ prints a short hint to run `winuxsh --self-update`. Set
 The portable zip keeps the same first-start WinuxCmd activation flow: if command
 links are missing, Winuxsh runs `winuxcmd/activate-winuxcmd.sh` once from the
 bundle so `ls`, `cat`, `grep`, and friends resolve normally.
+
+## Bundled Plugin Baseline
+
+Release packages also stage the official `oh-my-winuxsh` bundle under:
+
+```text
+bundles\oh-my-winuxsh
+```
+
+The runtime checks that app-bundled path after user-managed bundle locations:
+
+```text
+%LOCALAPPDATA%\Winuxsh\bundles\oh-my-winuxsh\current
+%LOCALAPPDATA%\Winuxsh\bundles\oh-my-winuxsh\<version>
+bundles\oh-my-winuxsh
+```
+
+Fresh offline installs can still list and use official plugins, while
+`winuxsh plugin update oh-my-winuxsh ...` can replace the baseline without
+rewriting the application install directory.

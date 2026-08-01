@@ -6,18 +6,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use winuxsh_runtime::config::ZshCompatLevel;
 use winuxsh_runtime::zsh_compat::{
     apply_import_plan_to_config_with_backup_suffix, apply_safe_aliases, apply_safe_env,
-    completion_defs_from_report, dynamic_completion_defs_from_report_with_runner,
-    dynamic_completion_defs_from_report_with_options, git_prompt_format_from_report,
-    import_plan_toml, inspect_import_config_status, inspect_import_rollback_plan,
-    native_zsh_packs, native_zsh_packs_json, native_zsh_packs_text, safe_path_value,
-    runtime_completion_commands_from_report, scan, translate_zsh_prompt, zsh_profile_plan_toml,
+    completion_defs_from_report, dynamic_completion_defs_from_report_with_options,
+    dynamic_completion_defs_from_report_with_runner, git_prompt_format_from_report,
+    import_plan_toml, inspect_import_config_status, inspect_import_rollback_plan, native_zsh_packs,
+    native_zsh_packs_json, native_zsh_packs_text, runtime_completion_commands_from_report,
+    safe_path_value, scan, translate_zsh_prompt, zsh_compat_doctor_text, zsh_profile_plan_toml,
     zsh_profile_plan_toml_for_name, CompletionAsset, DiagnosticSeverity, DynamicCompletionKind,
     DynamicCompletionRunOptions, DynamicCompletionSource, ImportedAlias, ImportedEnv,
     ImportedPlugin, NativeZshPackRiskTier, NativeZshPackSupportStatus, PluginImportKind,
-    PluginImportTier, ZshCompatDiagnostic, ZshNativeProfile,
-    ZshImportApplyReadiness, ZshImportBlockState, ZshImportConfigStatus, ZshImportOptions,
-    ZshImportReport, ZshImportRollbackPlan, ZSH_IMPORT_BLOCK_END, ZSH_IMPORT_BLOCK_START,
-    ZshFunctionKind, zsh_compat_doctor_text,
+    PluginImportTier, ZshCompatDiagnostic, ZshFunctionKind, ZshImportApplyReadiness,
+    ZshImportBlockState, ZshImportConfigStatus, ZshImportOptions, ZshImportReport,
+    ZshImportRollbackPlan, ZshNativeProfile, ZSH_IMPORT_BLOCK_END, ZSH_IMPORT_BLOCK_START,
 };
 
 #[test]
@@ -45,14 +44,17 @@ fn native_zsh_pack_registry_lists_preinstalled_packs() {
     let direnv = native_pack(packs, "direnv");
     assert_eq!(direnv.risk_tier, NativeZshPackRiskTier::ExplicitTrust);
     assert!(!direnv.startup_default);
-    assert!(direnv.required_binaries.iter().any(|binary| *binary == "direnv"));
+    assert!(direnv
+        .required_binaries
+        .iter()
+        .any(|binary| *binary == "direnv"));
 }
 
 #[test]
 fn native_zsh_pack_text_output_is_operator_readable() {
     let text = native_zsh_packs_text();
 
-    assert!(text.contains("Native zsh plugin packs"));
+    assert!(text.contains("Legacy zsh migration pack mappings"));
     assert!(text.contains("no Oh My Zsh or zsh plugin source is vendored or sourced"));
     assert!(text.contains("- git kind=alias tier=profile default=off"));
     assert!(text.contains("- zsh-autosuggestions kind=widget tier=always_on default=on"));
@@ -216,8 +218,14 @@ source $ZSH/oh-my-zsh.sh
     assert_eq!(report.theme.as_deref(), Some("robbyrussell"));
     assert_eq!(report.edit_mode.as_deref(), Some("vi"));
     assert!(report.oh_my_zsh_detected);
-    assert!(report.aliases.iter().any(|alias| alias.name == "ll" && alias.value == "ls -l"));
-    assert!(report.aliases.iter().any(|alias| alias.name == "gst" && alias.value == "git status"));
+    assert!(report
+        .aliases
+        .iter()
+        .any(|alias| alias.name == "ll" && alias.value == "ls -l"));
+    assert!(report
+        .aliases
+        .iter()
+        .any(|alias| alias.name == "gst" && alias.value == "git status"));
     assert!(report.aliases.iter().any(|alias| {
         alias.name == "gco" && alias.value == "git checkout" && alias.origin == "plugin"
     }));
@@ -227,7 +235,10 @@ source $ZSH/oh-my-zsh.sh
     assert_eq!(git.import_kind, PluginImportKind::NativeUx);
     assert_eq!(git.tier, PluginImportTier::Tier3Native);
     assert!(git.capabilities.iter().any(|cap| cap == "aliases"));
-    assert!(git.capabilities.iter().any(|cap| cap == "static_completions"));
+    assert!(git
+        .capabilities
+        .iter()
+        .any(|cap| cap == "static_completions"));
     assert!(git
         .capabilities
         .iter()
@@ -315,14 +326,10 @@ plugins=(git)
     assert!(git.alias_count >= 20);
     assert!(git.capabilities.iter().any(|cap| cap == "native_aliases"));
     assert!(report.aliases.iter().any(|alias| {
-        alias.name == "gst"
-            && alias.value == "git status"
-            && alias.origin == "native-plugin:git"
+        alias.name == "gst" && alias.value == "git status" && alias.origin == "native-plugin:git"
     }));
     assert!(report.aliases.iter().any(|alias| {
-        alias.name == "gco"
-            && alias.value == "git checkout"
-            && alias.origin == "native-plugin:git"
+        alias.name == "gco" && alias.value == "git checkout" && alias.origin == "native-plugin:git"
     }));
 
     let plan = import_plan_toml(
@@ -372,9 +379,7 @@ alias gst='git status --short'
     assert_eq!(gst_aliases[0].value, "git status --short");
     assert_eq!(gst_aliases[0].origin, "profile");
     assert!(report.aliases.iter().any(|alias| {
-        alias.name == "gco"
-            && alias.value == "git checkout"
-            && alias.origin == "native-plugin:git"
+        alias.name == "gco" && alias.value == "git checkout" && alias.origin == "native-plugin:git"
     }));
 
     let _ = std::fs::remove_dir_all(temp);
@@ -620,10 +625,7 @@ plugins=(npm)
     assert_eq!(npm.import_kind, PluginImportKind::NativeUx);
     assert_eq!(npm.tier, PluginImportTier::Tier3Native);
     assert!(npm.alias_count >= 15);
-    assert!(npm
-        .capabilities
-        .iter()
-        .any(|cap| cap == "native_aliases"));
+    assert!(npm.capabilities.iter().any(|cap| cap == "native_aliases"));
     assert!(npm
         .capabilities
         .iter()
@@ -633,14 +635,10 @@ plugins=(npm)
         .iter()
         .any(|feature| feature == "native-ux-shim"));
     assert!(report.aliases.iter().any(|alias| {
-        alias.name == "npmg"
-            && alias.value == "npm i -g"
-            && alias.origin == "native-plugin:npm"
+        alias.name == "npmg" && alias.value == "npm i -g" && alias.origin == "native-plugin:npm"
     }));
     assert!(report.aliases.iter().any(|alias| {
-        alias.name == "npmR"
-            && alias.value == "npm run"
-            && alias.origin == "native-plugin:npm"
+        alias.name == "npmR" && alias.value == "npm run" && alias.origin == "native-plugin:npm"
     }));
     assert!(report.aliases.iter().any(|alias| {
         alias.name == "npmrb"
@@ -1505,9 +1503,9 @@ _foo() { compadd one two; }
         &report,
     );
     assert!(plan.contains("zsh autoload/function helpers detected"));
-    assert!(plan.contains(
-        "# TODO native function/helper: _foo kind=completion_helper autoloaded=true"
-    ));
+    assert!(
+        plan.contains("# TODO native function/helper: _foo kind=completion_helper autoloaded=true")
+    );
     assert!(plan.contains(
         "# TODO native function/helper: prompt_foo_info kind=prompt_helper autoloaded=false"
     ));
@@ -1555,8 +1553,7 @@ bindkey '^G' widgety-cancel
         .any(|cap| cap == "native_widgets_required"));
 
     assert!(report.native_widgets.iter().any(|widget| {
-        widget.widget == "widgety-accept"
-            && widget.function.as_deref() == Some("widgety_accept")
+        widget.widget == "widgety-accept" && widget.function.as_deref() == Some("widgety_accept")
     }));
     assert!(report.native_widgets.iter().any(|widget| {
         widget.widget == "widgety-accept"
@@ -1568,9 +1565,10 @@ bindkey '^G' widgety-cancel
             && widget.key.as_deref() == Some("^G")
             && widget.keymap.is_none()
     }));
-    assert!(report.diagnostics.iter().any(|diag| {
-        diag.severity == DiagnosticSeverity::Unsupported && diag.feature == "zle"
-    }));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diag| { diag.severity == DiagnosticSeverity::Unsupported && diag.feature == "zle" }));
     assert!(report.diagnostics.iter().any(|diag| {
         diag.severity == DiagnosticSeverity::Unsupported && diag.feature == "bindkey"
     }));
@@ -1766,10 +1764,13 @@ zmodload zsh/zpty
         .diagnostics
         .iter()
         .any(|diag| diag.feature == "alias" && diag.severity == DiagnosticSeverity::Unsupported));
-    assert!(report
-        .diagnostics
-        .iter()
-        .any(|diag| diag.feature == "zmodload" && diag.severity == DiagnosticSeverity::Unsupported));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diag| diag.feature == "zmodload"
+                && diag.severity == DiagnosticSeverity::Unsupported)
+    );
 
     let _ = std::fs::remove_dir_all(temp);
 }
@@ -1883,8 +1884,7 @@ source $ZSH/oh-my-zsh.sh
 
 #[test]
 fn translates_zsh_prompt_common_subset_and_reports_dynamic_segments() {
-    let translation =
-        translate_zsh_prompt("%B%F{blue}%n@%m:%3~ $(git_prompt_info)%f%b %# ");
+    let translation = translate_zsh_prompt("%B%F{blue}%n@%m:%3~ $(git_prompt_info)%f%b %# ");
 
     assert_eq!(
         translation.format.as_deref(),
@@ -1984,8 +1984,7 @@ enabled = true
 auto_apply = true
 "#;
     let summary =
-        apply_import_plan_to_config_with_backup_suffix(&config_path, plan, "test-replace")
-            .unwrap();
+        apply_import_plan_to_config_with_backup_suffix(&config_path, plan, "test-replace").unwrap();
     let written = std::fs::read_to_string(&config_path).unwrap();
     let backup_path = summary.backup_path.unwrap();
 
@@ -2029,8 +2028,7 @@ fn reports_import_status_for_missing_config() {
     std::fs::create_dir_all(&temp).unwrap();
     let config_path = temp.join(".winshrc.toml");
 
-    let status =
-        inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
+    let status = inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
 
     assert!(!status.config_exists);
     assert_eq!(status.block_state, ZshImportBlockState::Missing);
@@ -2057,8 +2055,7 @@ fn reports_import_status_for_existing_block_and_backups() {
     .unwrap();
     std::fs::write(temp.join(".winshrc.toml.100.bak"), "old").unwrap();
 
-    let status =
-        inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
+    let status = inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
 
     assert!(status.config_exists);
     assert_eq!(status.block_state, ZshImportBlockState::Present);
@@ -2085,8 +2082,7 @@ fn reports_import_status_for_malformed_block() {
     )
     .unwrap();
 
-    let status =
-        inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
+    let status = inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
 
     assert_eq!(status.block_state, ZshImportBlockState::Malformed);
     assert!(status.toml_valid);
@@ -2107,8 +2103,7 @@ fn reports_import_status_when_apply_would_duplicate_tables() {
     let config_path = temp.join(".winshrc.toml");
     std::fs::write(&config_path, "[zsh]\nenabled = false\n").unwrap();
 
-    let status =
-        inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
+    let status = inspect_import_config_status(&config_path, "[zsh]\nenabled = true\n").unwrap();
 
     assert_eq!(status.block_state, ZshImportBlockState::Missing);
     assert!(status.toml_valid);
@@ -2215,7 +2210,9 @@ fn formats_doctor_summary_for_ready_import() {
         config_path,
         backup_paths: vec![backup_path.clone()],
         latest_backup_path: Some(backup_path),
-        restore_command: Some("Copy-Item -LiteralPath 'backup' -Destination 'config' -Force".to_string()),
+        restore_command: Some(
+            "Copy-Item -LiteralPath 'backup' -Destination 'config' -Force".to_string(),
+        ),
     };
 
     let doctor = zsh_compat_doctor_text(&report, &status, &rollback);
@@ -2346,7 +2343,10 @@ fn apply_safe_aliases_installs_rubash_aliases() {
 
     run_rubash_script(
         &mut executor,
-        &format!("shopt -s expand_aliases\nzll > {}", shell_quote(&output_shell_path)),
+        &format!(
+            "shopt -s expand_aliases\nzll > {}",
+            shell_quote(&output_shell_path)
+        ),
     );
 
     assert_eq!(
@@ -2389,15 +2389,25 @@ _arguments -s -S \
     assert_eq!(defs.len(), 2);
 
     let autopep8 = defs.iter().find(|def| def.command == "autopep8").unwrap();
-    assert!(autopep8.flags.iter().any(|flag| flag.long.as_deref() == Some("--help")));
-    assert!(autopep8.flags.iter().any(|flag| flag.short.as_deref() == Some("-h")));
+    assert!(autopep8
+        .flags
+        .iter()
+        .any(|flag| flag.long.as_deref() == Some("--help")));
+    assert!(autopep8
+        .flags
+        .iter()
+        .any(|flag| flag.short.as_deref() == Some("-h")));
     assert!(autopep8.flags.iter().any(|flag| {
         flag.long.as_deref() == Some("--diff") && flag.short.as_deref() == Some("-d")
     }));
-    assert!(autopep8.flags.iter().any(|flag| {
-        flag.long.as_deref() == Some("--jobs") && flag.takes_value
-    }));
-    assert!(!autopep8.flags.iter().any(|flag| flag.short.as_deref() == Some("-s")));
+    assert!(autopep8
+        .flags
+        .iter()
+        .any(|flag| { flag.long.as_deref() == Some("--jobs") && flag.takes_value }));
+    assert!(!autopep8
+        .flags
+        .iter()
+        .any(|flag| flag.short.as_deref() == Some("-s")));
     assert!(defs.iter().any(|def| def.command == "ap8"));
 
     let _ = std::fs::remove_dir_all(temp);
@@ -2421,27 +2431,27 @@ fn translates_dynamic_zsh_completion_generator_output_with_runner() {
     let defs = dynamic_completion_defs_from_report_with_runner(&report, |source| {
         assert_eq!(source.command, "kubectl");
         assert_eq!(source.args, vec!["completion", "zsh"]);
-        Ok(
-            r#"
+        Ok(r#"
 #compdef kubectl
 _arguments \
   "--namespace=[namespace scope]::namespace:_files" \
   "--all-namespaces[all namespaces]" \
   "-o[output format]:format:(json yaml wide)"
 "#
-            .to_string(),
-        )
+        .to_string())
     });
 
     assert_eq!(defs.len(), 1);
     let kubectl = &defs[0];
     assert_eq!(kubectl.command, "kubectl");
-    assert!(kubectl.flags.iter().any(|flag| {
-        flag.long.as_deref() == Some("--namespace") && flag.takes_value
-    }));
-    assert!(kubectl.flags.iter().any(|flag| {
-        flag.long.as_deref() == Some("--all-namespaces") && !flag.takes_value
-    }));
+    assert!(kubectl
+        .flags
+        .iter()
+        .any(|flag| { flag.long.as_deref() == Some("--namespace") && flag.takes_value }));
+    assert!(kubectl
+        .flags
+        .iter()
+        .any(|flag| { flag.long.as_deref() == Some("--all-namespaces") && !flag.takes_value }));
     assert!(kubectl
         .flags
         .iter()
@@ -2450,8 +2460,6 @@ _arguments \
 
 #[test]
 fn runs_allowed_dynamic_completion_generator_with_timeout() {
-    let _lock = env_lock().lock().unwrap();
-    let _env = EnvGuard::capture(&["PATH"]);
     let temp = unique_temp_dir("winuxsh-zsh-dynamic-completion-runner");
     std::fs::create_dir_all(&temp).unwrap();
     let command_path = temp.join("dyncli.cmd");
@@ -2469,16 +2477,16 @@ echo   "--verbose[verbose output]"
     )
     .unwrap();
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut path_entries = vec![temp.clone()];
-    path_entries.extend(std::env::split_paths(&old_path));
-    std::env::set_var("PATH", std::env::join_paths(path_entries).unwrap());
-
     let report = ZshImportReport {
         dynamic_completion_sources: vec![DynamicCompletionSource {
             kind: DynamicCompletionKind::ScriptGenerator,
-            command: "dyncli.cmd".to_string(),
-            args: vec!["completion".to_string(), "zsh".to_string()],
+            command: "cmd.exe".to_string(),
+            args: vec![
+                "/C".to_string(),
+                command_path.to_string_lossy().to_string(),
+                "completion".to_string(),
+                "zsh".to_string(),
+            ],
             target_shell: "zsh".to_string(),
             source_file: None,
             line: None,
@@ -2494,7 +2502,7 @@ echo   "--verbose[verbose output]"
     .is_empty());
 
     let options = DynamicCompletionRunOptions {
-        allowed_commands: vec!["dyncli.cmd".to_string()],
+        allowed_commands: vec!["cmd.exe".to_string()],
         timeout: Duration::from_secs(2),
         ..Default::default()
     };
@@ -2502,21 +2510,21 @@ echo   "--verbose[verbose output]"
 
     assert_eq!(defs.len(), 1);
     let dyncli = &defs[0];
-    assert_eq!(dyncli.command, "dyncli.cmd");
-    assert!(dyncli.flags.iter().any(|flag| {
-        flag.long.as_deref() == Some("--config") && flag.takes_value
-    }));
-    assert!(dyncli.flags.iter().any(|flag| {
-        flag.long.as_deref() == Some("--verbose") && !flag.takes_value
-    }));
+    assert_eq!(dyncli.command, "cmd.exe");
+    assert!(dyncli
+        .flags
+        .iter()
+        .any(|flag| { flag.long.as_deref() == Some("--config") && flag.takes_value }));
+    assert!(dyncli
+        .flags
+        .iter()
+        .any(|flag| { flag.long.as_deref() == Some("--verbose") && !flag.takes_value }));
 
     let _ = std::fs::remove_dir_all(temp);
 }
 
 #[test]
 fn reuses_cached_dynamic_completion_output_when_generator_fails() {
-    let _lock = env_lock().lock().unwrap();
-    let _env = EnvGuard::capture(&["PATH"]);
     let temp = unique_temp_dir("winuxsh-zsh-dynamic-completion-cache");
     let cache_dir = temp.join("cache");
     std::fs::create_dir_all(&temp).unwrap();
@@ -2531,16 +2539,16 @@ echo   "--cached[generated before failure]"
     )
     .unwrap();
 
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut path_entries = vec![temp.clone()];
-    path_entries.extend(std::env::split_paths(&old_path));
-    std::env::set_var("PATH", std::env::join_paths(path_entries).unwrap());
-
     let report = ZshImportReport {
         dynamic_completion_sources: vec![DynamicCompletionSource {
             kind: DynamicCompletionKind::ScriptGenerator,
-            command: "cachedcli.cmd".to_string(),
-            args: vec!["completion".to_string(), "zsh".to_string()],
+            command: "cmd.exe".to_string(),
+            args: vec![
+                "/C".to_string(),
+                command_path.to_string_lossy().to_string(),
+                "completion".to_string(),
+                "zsh".to_string(),
+            ],
             target_shell: "zsh".to_string(),
             source_file: None,
             line: None,
@@ -2549,7 +2557,7 @@ echo   "--cached[generated before failure]"
         ..Default::default()
     };
     let options = DynamicCompletionRunOptions {
-        allowed_commands: vec!["cachedcli.cmd".to_string()],
+        allowed_commands: vec!["cmd.exe".to_string()],
         timeout: Duration::from_secs(2),
         cache_dir: Some(cache_dir),
         cache_ttl: Some(Duration::from_secs(86400)),

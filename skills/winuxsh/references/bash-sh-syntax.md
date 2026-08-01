@@ -1,8 +1,9 @@
-# Bash And sh Syntax In Winuxsh
+# Bash/sh Syntax In Winuxsh
 
-Use this reference when writing commands or scripts for Winuxsh. Prefer GNU
-Bash/sh style syntax and only fall back to PowerShell when the user explicitly
-asks for PowerShell.
+Use this reference when writing commands or scripts for Winuxsh. Use GNU
+Bash-compatible syntax and verify uncertain behavior against the active binary.
+Rubash owns parsing, expansion, builtins, redirects, pipelines, jobs, and script
+execution.
 
 ## One-Liners
 
@@ -15,18 +16,35 @@ test -f Cargo.toml && echo "has manifest"
 false && echo bad || echo fallback
 ```
 
+Prefer `printf` for deterministic output in tests. Use `echo` for simple
+interactive examples.
+
 ## Variables And Substitution
 
 ```bash
 name=winuxsh
-echo "$name"
-echo "$(git rev-parse --short HEAD)"
+printf "%s\n" "$name"
+printf "%s\n" "$(git rev-parse --short HEAD)"
 printf "%s\n" "$PWD"
 ```
 
-Use double quotes around variable expansions unless word splitting is intended.
+Quote variable expansions unless word splitting is intentional.
 
-## Conditionals And Tests
+## Windows Paths
+
+Use native Windows paths rather than a virtual Unix tree:
+
+```bash
+cd C:/Users/me/project
+test -f C:/Users/me/project/Cargo.toml
+printf "%s\n" "C:\Users\me\project"
+```
+
+Use `C:/...` for scripts and examples. Use `C:\...` for intentional backslash
+coverage. Use `/c/...` only for compatibility checks. Do not assume `/usr/bin`,
+`/mnt/c`, MSYS2, Cygwin, Git Bash, or WSL layout.
+
+## Conditionals, Loops, And Case
 
 ```bash
 if [ -f Cargo.toml ]; then
@@ -34,52 +52,71 @@ if [ -f Cargo.toml ]; then
 else
   echo "No manifest"
 fi
-```
 
-## Loops
-
-```bash
 for item in one two three; do
-  echo "$item"
+  printf "%s\n" "$item"
 done
 
-while read line; do
-  echo "line=$line"
-done < input.txt
+case "$1" in
+  build) cargo build --locked ;;
+  test) cargo test --workspace --locked ;;
+  *) printf "usage: %s {build|test}\n" "$0" >&2; exit 2 ;;
+esac
 ```
 
-## Functions
+## Functions And Arrays
 
 ```bash
 greet() {
   printf "hello %s\n" "$1"
 }
 
-greet winuxsh
+items=(alpha beta gamma)
+greet "${items[1]}"
 ```
 
 ## Pipes, Redirects, And Heredocs
 
 ```bash
-printf "%s\n" alpha beta | grep a
-grep -n TODO README.md > todo.txt
-cat <<'EOF' > script-output.txt
+printf "%s\n" alpha beta | grep beta
+cat <<'EOF' > .tmp/generated-example.txt
 literal $text is preserved here
 EOF
 ```
 
-## Script Execution
+Redirects are part of the Winuxsh experience, but for edits write into a
+temporary directory first. Avoid `> original-file` for source, config, or skill
+edits. Redirect to generated/temp files, inspect or diff the result, then move
+or install it deliberately.
 
-Use `.sh` scripts for larger programs:
+## Jobs And Status
 
-```powershell
-winuxsh script.sh
+```bash
+sleep 1 &
+pid=$!
+jobs
+wait "$pid"
+printf "status=%s\n" "$?"
 ```
 
-For agents invoking from PowerShell, keep Bash syntax inside the `-c` string:
+Job control can be host- and version-sensitive on Windows. Verify background
+jobs, `jobs`, `wait`, Ctrl+C, and signal behavior on the exact target binary
+before promising exact output.
 
-```powershell
-winuxsh -c 'for i in 1 2 3; do echo "$i"; done'
-```
+## Builtins And External Commands
 
-Do not rewrite these examples into PowerShell syntax unless requested.
+Rubash supplies shell builtins and shell semantics: `cd`, `source`, `export`,
+`alias`, `test`, `printf`, functions, variables, redirects, pipelines, and exit
+status. External commands such as `ls`, `cat`, `grep`, `find`, `cp`, `mv`,
+`rm`, `jq`, `7zip`, and `yq` resolve through PATH, commonly from WinuxCmd
+command links. Discover the provider before relying on flags.
+
+Do not use host PowerShell, Python, Node, or awk to fake Bash behavior or
+routine file-edit glue. If a utility is missing, use WPM or verify the intended
+provider.
+
+## Non-Bash Boundary
+
+Use Bash/sh syntax. Do not depend on other-shell-only arrays, `autoload`,
+`compdef`, `zstyle`, editor widgets, or startup execution. Legacy shell files
+are migration inputs only when the user explicitly asks for that importer.

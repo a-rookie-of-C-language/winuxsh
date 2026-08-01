@@ -17,12 +17,7 @@ pub fn install_winuxsh_profile(
     icon: Option<&Path>,
     set_default: bool,
 ) -> Result<ProfileInstallSummary> {
-    install_winuxsh_profile_in_settings(
-        commandline,
-        icon,
-        set_default,
-        candidate_settings_paths(),
-    )
+    install_winuxsh_profile_in_settings(commandline, icon, set_default, candidate_settings_paths())
 }
 
 pub fn install_winuxsh_profile_in_settings<I>(
@@ -37,8 +32,8 @@ where
     let mut summary = ProfileInstallSummary::default();
 
     for settings_path in settings_paths {
-        let should_write = settings_path.is_file()
-            || settings_path.parent().is_some_and(|parent| parent.is_dir());
+        let should_write =
+            settings_path.is_file() || settings_path.parent().is_some_and(|parent| parent.is_dir());
         if !should_write {
             summary.skipped.push(settings_path);
             continue;
@@ -48,8 +43,7 @@ where
         upsert_profile(&mut root, commandline, icon, set_default);
         let formatted = serde_json::to_string_pretty(&root)?;
         if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         fs::write(&settings_path, format!("{formatted}\n"))
             .with_context(|| format!("write {}", settings_path.display()))?;
@@ -93,8 +87,8 @@ fn read_settings_or_default(settings_path: &Path) -> Result<Value> {
         return Ok(default_settings());
     }
 
-    let parsed: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", settings_path.display()))?;
+    let parsed: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", settings_path.display()))?;
     if parsed.is_object() {
         Ok(parsed)
     } else {
@@ -198,15 +192,12 @@ fn has_invalid_default_profile(root: &Value) -> bool {
 }
 
 fn profile_guid_exists(root: &Value, guid: &str) -> bool {
-    profiles_list(root)
-        .into_iter()
-        .flatten()
-        .any(|profile| {
-            profile
-                .get("guid")
-                .and_then(Value::as_str)
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(guid))
-        })
+    profiles_list(root).into_iter().flatten().any(|profile| {
+        profile
+            .get("guid")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(guid))
+    })
 }
 
 fn profiles_list(root: &Value) -> Option<&Vec<Value>> {

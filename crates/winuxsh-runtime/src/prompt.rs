@@ -6,12 +6,12 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use crate::theme::{by_name, Theme};
 use crate::git_status::GitPromptSymbols;
+use crate::prompt_segments::SegmentPromptAdapter;
+use crate::theme::{by_name, Theme};
 use reedline::{
     Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus, PromptViMode,
 };
-use crate::prompt_segments::SegmentPromptAdapter;
 
 /// Prompt indicators rendered by reedline after the left prompt.
 ///
@@ -130,7 +130,11 @@ impl WinuxshPrompt {
         let user_s = self.theme.prompt_user.paint(&user).to_string();
         let host_s = self.theme.prompt_host.paint(&host).to_string();
         let dir_s = self.theme.prompt_dir.paint(&cwd).to_string();
-        let sym_s = self.theme.prompt_symbol.paint(&self.prompt_symbol).to_string();
+        let sym_s = self
+            .theme
+            .prompt_symbol
+            .paint(&self.prompt_symbol)
+            .to_string();
         let git_status: Option<crate::git_status::GitRepoStatus> = std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::git_status::collect_for_prompt(&cwd));
@@ -194,37 +198,68 @@ impl WinuxshPrompt {
             .replace("{git_dirty}", if git_dirty { "✚" } else { "" })
             .replace(
                 "{git_staged}",
-                &git_status.as_ref().map(|s| s.staged.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.staged.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_unstaged}",
-                &git_status.as_ref().map(|s| s.unstaged.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.unstaged.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_untracked}",
-                &git_status.as_ref().map(|s| s.untracked.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.untracked.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_deleted}",
-                &git_status.as_ref().map(|s| s.deleted.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.deleted.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_ahead}",
-                &git_status.as_ref().map(|s| s.ahead.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.ahead.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_behind}",
-                &git_status.as_ref().map(|s| s.behind.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.behind.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_stashes}",
-                &git_status.as_ref().map(|s| s.stashes.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.stashes.to_string())
+                    .unwrap_or_default(),
             )
             .replace(
                 "{git_conflicts}",
-                &git_status.as_ref().map(|s| s.conflicts.to_string()).unwrap_or_default(),
+                &git_status
+                    .as_ref()
+                    .map(|s| s.conflicts.to_string())
+                    .unwrap_or_default(),
             )
-            .replace("%#", &self.theme.prompt_symbol.paint(&self.prompt_symbol).to_string())
+            .replace(
+                "%#",
+                &self
+                    .theme
+                    .prompt_symbol
+                    .paint(&self.prompt_symbol)
+                    .to_string(),
+            )
             .replace("%n", &user)
             .replace("%m", &host)
             .replace("%~", &cwd)
@@ -234,12 +269,7 @@ impl WinuxshPrompt {
         self.render_template(template).replace("{mode}", mode)
     }
 
-    fn render_history_search_template(
-        &self,
-        template: &str,
-        status: &str,
-        term: &str,
-    ) -> String {
+    fn render_history_search_template(&self, template: &str, status: &str, term: &str) -> String {
         self.render_template(template)
             .replace("{status}", status)
             .replace("{term}", term)
@@ -333,10 +363,7 @@ impl Prompt for WinuxshPrompt {
         Cow::Owned(self.render_template(&self.indicators.multiline))
     }
 
-    fn render_prompt_history_search_indicator(
-        &self,
-        search: PromptHistorySearch,
-    ) -> Cow<'_, str> {
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         let (template, status) = match search.status {
             PromptHistorySearchStatus::Passing => (&self.indicators.history_search, "passing"),
             PromptHistorySearchStatus::Failing => (&self.indicators.history_search_fail, "failing"),
@@ -380,10 +407,7 @@ impl Prompt for PromptBackend {
         }
     }
 
-    fn render_prompt_history_search_indicator(
-        &self,
-        search: PromptHistorySearch,
-    ) -> Cow<'_, str> {
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
         match self {
             PromptBackend::Template(p) => p.render_prompt_history_search_indicator(search),
             PromptBackend::Segments(p) => p.render_prompt_history_search_indicator(search),
@@ -499,7 +523,10 @@ mod tests {
             GitPromptSymbols::default(),
         );
 
-        assert_eq!(prompt.render_prompt_indicator(PromptEditMode::Default), "[default] ");
+        assert_eq!(
+            prompt.render_prompt_indicator(PromptEditMode::Default),
+            "[default] "
+        );
         assert_eq!(prompt.render_prompt_indicator(PromptEditMode::Emacs), "E ");
         assert_eq!(
             prompt.render_prompt_indicator(PromptEditMode::Vi(PromptViMode::Insert)),
@@ -546,7 +573,6 @@ mod tests {
             .expect("git init should succeed");
         assert!(o.status.success(), "git init failed");
     }
-
 
     impl CwdGuard {
         fn enter(path: &Path) -> Self {

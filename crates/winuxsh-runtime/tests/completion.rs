@@ -291,8 +291,12 @@ fn suggestions_for_behavior(
     input: &str,
     behavior: CompletionBehavior,
 ) -> Vec<String> {
-    let ctx =
-        CompletionContext::with_behavior(PathBuf::from("."), input.to_string(), input.len(), behavior);
+    let ctx = CompletionContext::with_behavior(
+        PathBuf::from("."),
+        input.to_string(),
+        input.len(),
+        behavior,
+    );
     let s = state.lock().unwrap();
     s.plugins
         .iter()

@@ -4,12 +4,14 @@ param(
     [string]$Configuration = "release",
     [string]$Target,
     [string]$Arch,
+    [string]$OhMyWinuxshBundlePath,
+    [switch]$SkipOhMyWinuxshBundle,
     [switch]$AllowPathWinuxCmd
 )
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $RepoRoot
 try {
     if (-not $Version) {
@@ -67,6 +69,31 @@ try {
         }
     }
 
+    $resolvedOhMyWinuxshBundlePath = $null
+    if (-not $SkipOhMyWinuxshBundle) {
+        if ($OhMyWinuxshBundlePath) {
+            $bundleCandidates = @($OhMyWinuxshBundlePath)
+        }
+        else {
+            $bundleCandidates = @(
+                (Join-Path $RepoRoot "..\oh-my-winuxsh")
+                (Join-Path $RepoRoot "bundles\oh-my-winuxsh")
+                (Join-Path $RepoRoot "vendor\oh-my-winuxsh")
+            )
+        }
+
+        foreach ($candidate in $bundleCandidates) {
+            if ((Test-Path -LiteralPath $candidate) -and (Test-Path -LiteralPath (Join-Path $candidate "bundle.toml"))) {
+                $resolvedOhMyWinuxshBundlePath = (Resolve-Path -LiteralPath $candidate).Path
+                break
+            }
+        }
+
+        if (-not $resolvedOhMyWinuxshBundlePath) {
+            throw "oh-my-winuxsh bundle not found. Pass -OhMyWinuxshBundlePath C:\path\to\oh-my-winuxsh or -SkipOhMyWinuxshBundle."
+        }
+    }
+
     $distDir = Join-Path $RepoRoot "dist"
     if ($Arch) {
         $packageName = "winuxsh-v$Version-win-$Arch"
@@ -87,6 +114,34 @@ try {
     Copy-Item -LiteralPath $activationScript -Destination (Join-Path $stageDir "winuxcmd\activate-winuxcmd.sh") -Force
     foreach ($iconFile in $iconFiles) {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
+    }
+    if ($resolvedOhMyWinuxshBundlePath) {
+        $bundleStageDir = Join-Path $stageDir "bundles\oh-my-winuxsh"
+        New-Item -ItemType Directory -Force -Path $bundleStageDir | Out-Null
+        $requiredBundleEntries = @("bundle.toml", "index.toml", "packs")
+        $bundleEntries = @(
+            "bundle.toml"
+            "index.toml"
+            "README.md"
+            "CHANGELOG.md"
+            "packs"
+            "aliases"
+            "completions"
+            "prompts"
+            "keybindings"
+            "wasm"
+            "docs"
+            "templates"
+        )
+        foreach ($entry in $bundleEntries) {
+            $source = Join-Path $resolvedOhMyWinuxshBundlePath $entry
+            if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination $bundleStageDir -Recurse -Force
+            }
+            elseif ($requiredBundleEntries -contains $entry) {
+                throw "Required oh-my-winuxsh bundle entry missing: $source"
+            }
+        }
     }
 
     Compress-Archive -LiteralPath $stageDir -DestinationPath $zipPath -Force

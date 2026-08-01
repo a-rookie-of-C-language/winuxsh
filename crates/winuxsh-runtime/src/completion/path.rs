@@ -306,4 +306,3 @@ fn is_windows_drive_only(value: &str) -> bool {
 fn is_directory_only_command(command: &str) -> bool {
     matches!(command, "cd" | "pushd")
 }
-

@@ -3,6 +3,7 @@
 //! Usage:
 //!   winuxsh                  → interactive REPL
 //!   winuxsh -c "command"     → execute one command, print exit code, exit
+//!   winuxsh -C "command"     → execute one REPL-style command, then exit
 //!   winuxsh script.sh        → execute a script file
 //!   winuxsh --help | -h      → usage
 //!   winuxsh --version        → version (winuxsh / rubash / winuxcmd)
@@ -13,8 +14,22 @@
 //!   winuxsh --zsh-compat-import-status → inspect import block and backups
 //!   winuxsh --zsh-compat-import-rollback-plan → print restore command
 //!   winuxsh --zsh-compat-doctor → summarize zsh compatibility health
-//!   winuxsh --zsh-native-packs → list built-in native zsh plugin packs
-//!   winuxsh --zsh-native-packs-json → list built-in native zsh plugin packs as JSON
+//!   winuxsh plugin list [--json] → list official Winuxsh plugins
+//!   winuxsh plugin info <name> [--json] → inspect one official plugin
+//!   winuxsh plugin search [query] [--json] → discover official plugins
+//!   winuxsh plugin themes [--json] → list built-in, user, and bundle themes
+//!   winuxsh plugin bundle status [--json] → inspect official bundle install state
+//!   winuxsh plugin doctor [--json] → diagnose plugin configuration health
+//!   winuxsh plugin review <name> [--json] → review plugin permissions
+//!   winuxsh plugin update oh-my-winuxsh --from <path> → install a bundle release
+//!   winuxsh plugin update oh-my-winuxsh --github-release latest → download/install bundle
+//!   winuxsh plugin rollback oh-my-winuxsh → roll back to the previous bundle
+//!   winuxsh plugin plan enable <name> [--json] → preview plugin TOML
+//!   winuxsh plugin install <name> → install an official plugin
+//!   winuxsh plugin uninstall <name> → uninstall an official plugin
+//!   winuxsh plugin enable <name> → write managed plugin TOML
+//!   winuxsh --zsh-native-packs → list legacy zsh migration pack mappings
+//!   winuxsh --zsh-native-packs-json → list legacy zsh migration mappings as JSON
 //!   winuxsh --zsh-profile-plan <profile> → print a native zsh profile TOML plan
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
 //!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
@@ -25,6 +40,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod self_update;
+const OFFICIAL_PLUGIN_BUNDLE_REPO: &str = "unixwin/oh-my-winuxsh";
+const PLUGIN_BUNDLE_DOWNLOAD_CACHE: &str = "winuxsh-plugin-bundles";
 
 fn main() -> ExitCode {
     // Initialize logging (only error level by default)
@@ -116,6 +133,8 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(&args[2..]),
+        "plugin" => run_plugin_command(args),
+        "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
             if args.len() < 3 {
                 anyhow::bail!("-c requires an argument");
@@ -135,7 +154,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
         _ => {
             // Treat as a script file to execute
-            let script = PathBuf::from(first);
+            let script = script_arg_to_host_path(first);
             if !script.exists() {
                 anyhow::bail!("unknown argument '{}' (not a script file)", first);
             }
@@ -154,10 +173,52 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+fn script_arg_to_host_path(value: &str) -> PathBuf {
+    if cfg!(windows) {
+        let normalized = value.replace('\\', "/");
+        let bytes = normalized.as_bytes();
+        if bytes.len() >= 2
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && (bytes.len() == 2 || bytes.get(2) == Some(&b'/'))
+        {
+            let drive = (bytes[1] as char).to_ascii_uppercase();
+            let rest = if normalized.len() == 2 {
+                "/"
+            } else {
+                &normalized[2..]
+            };
+            return PathBuf::from(format!("{drive}:{rest}"));
+        }
+    }
+
+    PathBuf::from(value)
+}
+
 fn run_repl() -> anyhow::Result<()> {
     self_update::maybe_print_update_hint();
     let mut shell = winuxsh_runtime::Shell::new()?;
     winuxsh_runtime::repl::run_repl(&mut shell)
+}
+
+fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
+    if args.len() < 3 {
+        anyhow::bail!("{} requires an argument", args[1]);
+    }
+    let mut shell = winuxsh_runtime::Shell::new()?;
+    shell.executor.inherit_process_stdin();
+    shell.enable_process_stdin_pipeline_bridge();
+    if let Some(command_name) = args.get(3) {
+        shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+        shell.executor.set_positional_params(args[4..].to_vec());
+    }
+    shell.run_startup_rc();
+    shell.run_precmd_hooks();
+    let code = shell.execute_interactive_line(&args[2])?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 fn run_stdin_script() -> anyhow::Result<()> {
@@ -230,12 +291,14 @@ fn print_usage() {
     println!();
     println!("Usage:  winuxsh [option]");
     println!("        winuxsh -c <cmd>         Run a command then exit");
+    println!("        winuxsh -C <cmd>         Run one REPL-style command then exit");
     println!("        winuxsh <script> [args]   Run a script file");
     println!();
     println!("Options:");
     println!("  -h, --help                Show this help");
     println!("  -V, --version             Version and component info");
     println!("  -c <command>              Execute a command ad-hoc");
+    println!("  -C, --repl-command <cmd>  Execute one non-interactive REPL command");
     println!();
     println!("  --install-wt-profile      Add/update the Windows Terminal profile");
     println!("      --set-default         Also set Winuxsh as the WT default profile");
@@ -244,21 +307,575 @@ fn print_usage() {
     println!("      --check               Only report the latest release");
     println!("      --dry-run             Download installer without running it");
     println!();
+    println!("  plugin list [--json]      List official Winuxsh plugins");
+    println!("  plugin info <name> [--json]  Inspect one official Winuxsh plugin");
+    println!("  plugin search [query] [--json]  Discover official plugins");
+    println!("  plugin themes [--json]    List built-in, user, and bundle themes");
+    println!("  plugin bundle status [--json]  Inspect official bundle install state");
+    println!("  plugin update oh-my-winuxsh --from <path>");
+    println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
+    println!("  plugin update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
+    println!("                            Install bundle release");
+    println!("  plugin rollback oh-my-winuxsh [--json]  Roll back bundle release");
+    println!("  plugin plan enable <name> [--json]  Preview managed plugin TOML");
+    println!("  plugin plan disable <name> [--json] Preview managed plugin TOML");
+    println!("  plugin install <name>     Install official plugin from active bundle");
+    println!("  plugin uninstall <name>   Uninstall official plugin from active bundle");
+    println!("  plugin enable <name>      Write managed plugin TOML");
+    println!("  plugin disable <name>     Write managed plugin TOML");
+    println!();
     println!("  --zsh-compat-report       Scan ~/.zshrc, show safe-import report");
     println!("  --zsh-compat-report-json  Same, as JSON");
     println!("  --zsh-compat-import-plan  Generate a .winshrc.toml import patch");
     println!("  --zsh-compat-import-apply Apply the patch (with backup)");
     println!("  --zsh-compat-import-status Inspect import block and backup");
     println!("  --zsh-compat-import-rollback-plan  Show restore command");
-    println!("  --zsh-compat-doctor       Overall zsh health summary");
+    println!("  --zsh-compat-doctor       Legacy zsh migration health summary");
     println!();
-    println!("  --zsh-native-packs        List built-in zsh plugin replacements");
-    println!("  --zsh-native-packs-json   Same, as JSON");
+    println!("  --zsh-native-packs        Legacy: list zsh migration pack mappings");
+    println!("  --zsh-native-packs-json   Legacy: same, as JSON");
     println!("  --zsh-profile-plan <profile>  Print TOML for a profile");
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
     println!("Configuration: ~/.winshrc.toml for settings, ~/.winshrc for REPL shell code");
+}
+
+fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(subcommand) = args.get(2) else {
+        print_plugin_usage();
+        return Ok(());
+    };
+
+    match subcommand.as_str() {
+        "-h" | "--help" => {
+            print_plugin_usage();
+            Ok(())
+        }
+        "list" => {
+            let json = parse_plugin_json_flag(&args[3..])?;
+            if json {
+                println!("{}", winuxsh_runtime::plugins::plugin_packs_json()?);
+            } else {
+                println!("{}", winuxsh_runtime::plugins::plugin_packs_text());
+            }
+            Ok(())
+        }
+        "search" => run_plugin_search_command(&args[3..]),
+        "themes" => run_plugin_themes_command(&args[3..]),
+        "info" => {
+            let Some(name) = args.get(3) else {
+                anyhow::bail!("plugin info requires a plugin name");
+            };
+            let json = parse_plugin_json_flag(&args[4..])?;
+            if json {
+                match winuxsh_runtime::plugins::plugin_pack_json(name)? {
+                    Some(output) => println!("{}", output),
+                    None => anyhow::bail!("unknown plugin '{}'", name),
+                }
+            } else {
+                match winuxsh_runtime::plugins::plugin_pack_text(name) {
+                    Some(output) => println!("{}", output),
+                    None => anyhow::bail!("unknown plugin '{}'", name),
+                }
+            }
+            Ok(())
+        }
+        "bundle" => run_plugin_bundle_command(&args[3..]),
+        "doctor" => run_plugin_doctor_command(&args[3..]),
+        "review" => run_plugin_review_command(&args[3..]),
+        "update" => run_plugin_update_command(&args[3..]),
+        "rollback" => run_plugin_rollback_command(&args[3..]),
+        "plan" => run_plugin_plan_command(&args[3..]),
+        "install" => run_plugin_install_command(args),
+        "uninstall" => run_plugin_uninstall_command(args),
+        "enable" => {
+            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Enable)
+        }
+        "disable" => {
+            run_plugin_apply_command(args, winuxsh_runtime::plugins::PluginConfigAction::Disable)
+        }
+        unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
+    }
+}
+
+fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
+    let json = parse_plugin_json_flag(args)?;
+    let config = winuxsh_runtime::config::load();
+    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins, &config.zsh);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", winuxsh_runtime::plugins::plugin_doctor_text(&report));
+    }
+    Ok(())
+}
+
+fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.get(0) else {
+        anyhow::bail!("plugin review requires a plugin name");
+    };
+    let json = parse_plugin_json_flag(&args[1..])?;
+    let config = winuxsh_runtime::config::load();
+    let review =
+        winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins, &config.zsh)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&review)?);
+    } else {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_permission_review_text(&review)
+        );
+    }
+    Ok(())
+}
+
+fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
+    let (query, json) = parse_plugin_search_args(args)?;
+    if json {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_search_json(query.as_deref())?
+        );
+    } else {
+        println!(
+            "{}",
+            winuxsh_runtime::plugins::plugin_search_text(query.as_deref())
+        );
+    }
+    Ok(())
+}
+
+fn run_plugin_themes_command(args: &[String]) -> anyhow::Result<()> {
+    let json = parse_plugin_json_flag(args)?;
+    if json {
+        println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_json()?);
+    } else {
+        println!("{}", winuxsh_runtime::plugins::plugin_theme_catalog_text());
+    }
+    Ok(())
+}
+
+fn run_plugin_bundle_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(subcommand) = args.get(0) else {
+        anyhow::bail!("plugin bundle requires a subcommand: status");
+    };
+
+    match subcommand.as_str() {
+        "status" => {
+            let json = parse_plugin_json_flag(&args[1..])?;
+            if json {
+                println!("{}", winuxsh_runtime::plugins::plugin_bundle_status_json()?);
+            } else {
+                println!("{}", winuxsh_runtime::plugins::plugin_bundle_status_text());
+            }
+            Ok(())
+        }
+        unknown => anyhow::bail!("unknown plugin bundle subcommand '{}'", unknown),
+    }
+}
+
+fn run_plugin_update_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(bundle) = args.get(0) else {
+        anyhow::bail!("plugin update requires a bundle name");
+    };
+    let options = parse_plugin_update_options(&args[1..])?;
+    let checksum = match (options.checksum, options.checksum_file) {
+        (Some(_), Some(_)) => anyhow::bail!("use only one of --checksum or --checksum-file"),
+        (Some(checksum), None) => Some(checksum),
+        (None, Some(path)) => Some(read_checksum_file(&path)?),
+        (None, None) => None,
+    };
+    let github_release = options.github_release;
+    let source_path = options.source_path;
+    let (source_path, checksum, downloaded) = match (source_path, github_release) {
+        (Some(_), Some(_)) => anyhow::bail!("use only one of --from or --github-release"),
+        (Some(path), None) => (path, checksum, None),
+        (None, Some(release)) => {
+            if checksum.is_some() {
+                anyhow::bail!(
+                    "--github-release downloads and verifies the release .sha256; do not pass --checksum or --checksum-file"
+                );
+            }
+            let downloaded = download_plugin_bundle_github_release(bundle, &release)?;
+            let checksum = Some(downloaded.checksum.clone());
+            (downloaded.archive_path.clone(), checksum, Some(downloaded))
+        }
+        (None, None) => anyhow::bail!(
+            "plugin update requires --from <bundle-dir-or-zip> or --github-release latest|vX.Y.Z"
+        ),
+    };
+    let summary = winuxsh_runtime::plugins::apply_plugin_bundle_update_from_path(
+        bundle,
+        &source_path,
+        checksum.as_deref(),
+    )?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        if let Some(downloaded) = downloaded {
+            println!(
+                "Downloaded GitHub release {} from {}",
+                downloaded.tag, OFFICIAL_PLUGIN_BUNDLE_REPO
+            );
+            println!("Downloaded archive: {}", downloaded.archive_path.display());
+            println!(
+                "Downloaded checksum: {}",
+                downloaded.checksum_path.display()
+            );
+        }
+        println!("Updated bundle '{}' to {}", summary.bundle, summary.version);
+        println!("Installed path: {}", summary.installed_path.display());
+        if let Some(previous_path) = summary.previous_path {
+            println!("Previous path: {}", previous_path.display());
+        }
+        if let Some(checksum) = summary.checksum_sha256 {
+            println!("SHA-256: {}", checksum);
+        }
+        println!("Lock file: {}", summary.lock_path.display());
+    }
+    Ok(())
+}
+fn run_plugin_rollback_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(bundle) = args.get(0) else {
+        anyhow::bail!("plugin rollback requires a bundle name");
+    };
+    let json = parse_plugin_json_flag(&args[1..])?;
+    let summary = winuxsh_runtime::plugins::apply_plugin_bundle_rollback(bundle)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!(
+            "Rolled back bundle '{}' to {}",
+            summary.bundle, summary.version
+        );
+        println!("Active path: {}", summary.active_path.display());
+        if let Some(previous_path) = summary.previous_path {
+            println!("Previous path: {}", previous_path.display());
+        }
+        println!("Lock file: {}", summary.lock_path.display());
+    }
+    Ok(())
+}
+#[derive(Default)]
+struct PluginUpdateOptions {
+    source_path: Option<PathBuf>,
+    github_release: Option<String>,
+    checksum: Option<String>,
+    checksum_file: Option<PathBuf>,
+    json: bool,
+}
+fn parse_plugin_update_options(args: &[String]) -> anyhow::Result<PluginUpdateOptions> {
+    let mut options = PluginUpdateOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--from" => {
+                i += 1;
+                let Some(path) = args.get(i) else {
+                    anyhow::bail!("--from requires a bundle directory or zip path");
+                };
+                options.source_path = Some(PathBuf::from(path));
+            }
+            "--checksum" => {
+                i += 1;
+                let Some(checksum) = args.get(i) else {
+                    anyhow::bail!("--checksum requires a SHA-256 value");
+                };
+                options.checksum = Some(checksum.clone());
+            }
+            "--checksum-file" => {
+                i += 1;
+                let Some(path) = args.get(i) else {
+                    anyhow::bail!("--checksum-file requires a path");
+                };
+                options.checksum_file = Some(PathBuf::from(path));
+            }
+            "--github-release" => {
+                i += 1;
+                let Some(release) = args.get(i) else {
+                    anyhow::bail!("--github-release requires latest or a vX.Y.Z tag");
+                };
+                options.github_release = Some(release.clone());
+            }
+            "--json" => options.json = true,
+            unknown => anyhow::bail!("unknown plugin update option '{}'", unknown),
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+struct DownloadedPluginBundle {
+    archive_path: PathBuf,
+    checksum_path: PathBuf,
+    checksum: String,
+    tag: String,
+}
+
+fn download_plugin_bundle_github_release(
+    bundle: &str,
+    release: &str,
+) -> anyhow::Result<DownloadedPluginBundle> {
+    if bundle != winuxsh_runtime::plugins::OFFICIAL_BUNDLE_NAME {
+        anyhow::bail!(
+            "GitHub bundle updates are only supported for {}",
+            winuxsh_runtime::plugins::OFFICIAL_BUNDLE_NAME
+        );
+    }
+    let tag = resolve_plugin_bundle_release_tag(release)?;
+    let version = tag.trim_start_matches('v');
+    let asset_name = format!("{bundle}-{version}.zip");
+    let checksum_name = format!("{asset_name}.sha256");
+    let archive_path = self_update::download_github_release_asset(
+        OFFICIAL_PLUGIN_BUNDLE_REPO,
+        &tag,
+        &asset_name,
+        PLUGIN_BUNDLE_DOWNLOAD_CACHE,
+    )?;
+    let checksum_path = self_update::download_github_release_asset(
+        OFFICIAL_PLUGIN_BUNDLE_REPO,
+        &tag,
+        &checksum_name,
+        PLUGIN_BUNDLE_DOWNLOAD_CACHE,
+    )?;
+    let checksum = read_checksum_file(&checksum_path)?;
+    Ok(DownloadedPluginBundle {
+        archive_path,
+        checksum_path,
+        checksum,
+        tag,
+    })
+}
+
+fn resolve_plugin_bundle_release_tag(release: &str) -> anyhow::Result<String> {
+    let release = release.trim();
+    if release.eq_ignore_ascii_case("latest") {
+        return self_update::resolve_latest_github_release_tag(OFFICIAL_PLUGIN_BUNDLE_REPO);
+    }
+    normalize_plugin_bundle_release_tag(release)
+}
+
+fn normalize_plugin_bundle_release_tag(release: &str) -> anyhow::Result<String> {
+    let version = release.strip_prefix('v').unwrap_or(release);
+    let parts: Vec<&str> = version.split('.').collect();
+    let valid = parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
+    if !valid {
+        anyhow::bail!("--github-release must be latest or a semver tag like v1.0.0");
+    }
+    Ok(format!("v{version}"))
+}
+
+fn read_checksum_file(path: &PathBuf) -> anyhow::Result<String> {
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!("failed to read checksum file {}: {}", path.display(), err)
+    })?;
+    let checksum = text
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("checksum file {} is empty", path.display()))?;
+    Ok(checksum.to_string())
+}
+fn run_plugin_plan_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(action_raw) = args.get(0) else {
+        anyhow::bail!("plugin plan requires an action: enable or disable");
+    };
+    let Some(name) = args.get(1) else {
+        anyhow::bail!("plugin plan {} requires a plugin name", action_raw);
+    };
+    let json = parse_plugin_json_flag(&args[2..])?;
+    let action = plugin_config_action_from_str(action_raw)?;
+    let config_path = winuxsh_runtime::config::default_config_path();
+    let plan = winuxsh_runtime::plugins::plugin_config_plan_for_path(&config_path, name, action)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("{}", plan.toml);
+    }
+    Ok(())
+}
+
+fn run_plugin_apply_command(
+    args: &[String],
+    action: winuxsh_runtime::plugins::PluginConfigAction,
+) -> anyhow::Result<()> {
+    let Some(name) = args.get(3) else {
+        anyhow::bail!(
+            "plugin {} requires a plugin name",
+            plugin_config_action_name(action)
+        );
+    };
+    reject_plugin_options(&args[4..])?;
+
+    let config_path = winuxsh_runtime::config::default_config_path();
+    let summary =
+        winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(&config_path, name, action)?;
+
+    println!(
+        "{} plugin '{}' in {}",
+        plugin_config_action_past_tense(summary.action),
+        summary.plugin,
+        summary.config_path.display()
+    );
+    if summary.replaced_existing_block {
+        println!("Replaced the previous winuxsh-managed plugin block");
+    } else {
+        println!("Added a new winuxsh-managed plugin block");
+    }
+    if let Some(backup_path) = summary.backup_path {
+        println!("Backup: {}", backup_path.display());
+    }
+    Ok(())
+}
+
+fn run_plugin_install_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.get(3) else {
+        anyhow::bail!("plugin install requires a plugin name");
+    };
+    reject_plugin_options(&args[4..])?;
+
+    let config_path = winuxsh_runtime::config::default_config_path();
+    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
+        &config_path,
+        name,
+        winuxsh_runtime::plugins::PluginConfigAction::Enable,
+    )?;
+
+    println!(
+        "Installed plugin '{}' in {}",
+        summary.plugin,
+        summary.config_path.display()
+    );
+    if summary.replaced_existing_block {
+        println!("Replaced the previous winuxsh-managed plugin block");
+    } else {
+        println!("Added a new winuxsh-managed plugin block");
+    }
+    if let Some(backup_path) = summary.backup_path {
+        println!("Backup: {}", backup_path.display());
+    }
+    println!("Review: winuxsh plugin review {}", summary.plugin);
+    Ok(())
+}
+
+fn run_plugin_uninstall_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.get(3) else {
+        anyhow::bail!("plugin uninstall requires a plugin name");
+    };
+    reject_plugin_options(&args[4..])?;
+    let config_path = winuxsh_runtime::config::default_config_path();
+    let summary = winuxsh_runtime::plugins::apply_plugin_config_plan_to_path(
+        &config_path,
+        name,
+        winuxsh_runtime::plugins::PluginConfigAction::Disable,
+    )?;
+    println!(
+        "Uninstalled plugin '{}' in {}",
+        summary.plugin,
+        summary.config_path.display()
+    );
+    if summary.replaced_existing_block {
+        println!("Replaced the previous winuxsh-managed plugin block");
+    } else {
+        println!("Added a new winuxsh-managed plugin block");
+    }
+    if let Some(backup_path) = summary.backup_path {
+        println!("Backup: {}", backup_path.display());
+    }
+    println!("Install: winuxsh plugin install {}", summary.plugin);
+    Ok(())
+}
+fn plugin_config_action_from_str(
+    value: &str,
+) -> anyhow::Result<winuxsh_runtime::plugins::PluginConfigAction> {
+    match value {
+        "enable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Enable),
+        "disable" => Ok(winuxsh_runtime::plugins::PluginConfigAction::Disable),
+        unknown => anyhow::bail!("unknown plugin plan action '{}'", unknown),
+    }
+}
+
+fn plugin_config_action_name(action: winuxsh_runtime::plugins::PluginConfigAction) -> &'static str {
+    match action {
+        winuxsh_runtime::plugins::PluginConfigAction::Enable => "enable",
+        winuxsh_runtime::plugins::PluginConfigAction::Disable => "disable",
+    }
+}
+
+fn plugin_config_action_past_tense(
+    action: winuxsh_runtime::plugins::PluginConfigAction,
+) -> &'static str {
+    match action {
+        winuxsh_runtime::plugins::PluginConfigAction::Enable => "Enabled",
+        winuxsh_runtime::plugins::PluginConfigAction::Disable => "Disabled",
+    }
+}
+
+fn reject_plugin_options(args: &[String]) -> anyhow::Result<()> {
+    for arg in args {
+        anyhow::bail!("unknown plugin option '{}'", arg);
+    }
+    Ok(())
+}
+
+fn parse_plugin_json_flag(args: &[String]) -> anyhow::Result<bool> {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            unknown => anyhow::bail!("unknown plugin option '{}'", unknown),
+        }
+    }
+    Ok(json)
+}
+
+fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, bool)> {
+    let mut query = None;
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            value if value.starts_with("-") => {
+                anyhow::bail!("unknown plugin search option {}", value)
+            }
+            value => {
+                if query.is_some() {
+                    anyhow::bail!("plugin search accepts at most one query");
+                }
+                query = Some(value.to_string());
+            }
+        }
+    }
+    Ok((query, json))
+}
+
+fn print_plugin_usage() {
+    println!("Usage:  winuxsh plugin <command>");
+    println!();
+    println!("Commands:");
+    println!("  list [--json]             List official Winuxsh plugins");
+    println!("  info <name> [--json]      Inspect one official Winuxsh plugin");
+    println!("  search [query] [--json]   Discover official plugins");
+    println!("  themes [--json]           List built-in, user, and bundle themes");
+    println!("  bundle status [--json]    Inspect official bundle install state");
+    println!("  doctor [--json]           Diagnose plugin configuration health");
+    println!("  review <name> [--json]    Review plugin permissions before enabling");
+    println!("  update oh-my-winuxsh --from <path>");
+    println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
+    println!("                            Install a local bundle directory or zip");
+    println!("  update oh-my-winuxsh --github-release latest|vX.Y.Z [--json]");
+    println!("                            Download, verify, and install GitHub release");
+    println!("  rollback oh-my-winuxsh [--json]");
+    println!("                            Roll back to the previous bundle");
+    println!("  plan enable <name> [--json]   Preview managed plugin TOML");
+    println!("  plan disable <name> [--json]  Preview managed plugin TOML");
+    println!("  install <name>           Install official plugin from active bundle");
+    println!("  uninstall <name>         Uninstall official plugin from active bundle");
+    println!("  enable <name>             Write managed plugin TOML");
+    println!("  disable <name>            Write managed plugin TOML");
 }
 
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
@@ -520,4 +1137,38 @@ fn is_broken_pipe_error(error: &anyhow::Error) -> bool {
 
 fn is_broken_pipe_io_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_update_parses_github_release() {
+        let args = vec![
+            "--github-release".to_string(),
+            "latest".to_string(),
+            "--json".to_string(),
+        ];
+        let options = parse_plugin_update_options(&args).unwrap();
+
+        assert_eq!(options.github_release.as_deref(), Some("latest"));
+        assert!(options.json);
+        assert!(options.source_path.is_none());
+    }
+
+    #[test]
+    fn plugin_release_tag_normalizes_semver() {
+        assert_eq!(
+            normalize_plugin_bundle_release_tag("1.2.3").unwrap(),
+            "v1.2.3"
+        );
+        assert_eq!(
+            normalize_plugin_bundle_release_tag("v1.2.3").unwrap(),
+            "v1.2.3"
+        );
+        assert!(normalize_plugin_bundle_release_tag("stable").is_err());
+        assert!(normalize_plugin_bundle_release_tag("v1.2").is_err());
+        assert!(normalize_plugin_bundle_release_tag("v1.2.3.4").is_err());
+    }
 }

@@ -5,7 +5,9 @@
 /// If any stream is redirected or piped, callers should avoid full-screen/line-editor UI and
 /// execute deterministic script-style surfaces instead.
 pub fn stdio_is_interactive() -> bool {
-    platform::stdin_is_terminal() && platform::stdout_is_terminal() && platform::stderr_is_terminal()
+    platform::stdin_is_terminal()
+        && platform::stdout_is_terminal()
+        && platform::stderr_is_terminal()
 }
 
 #[cfg(windows)]

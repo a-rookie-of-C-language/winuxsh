@@ -130,7 +130,10 @@ impl Highlighter for WinuxshSyntaxHighlighter {
 
         for token in tokens {
             if pos < token.start {
-                styled.push((self.style(SyntaxKind::Default), line[pos..token.start].to_string()));
+                styled.push((
+                    self.style(SyntaxKind::Default),
+                    line[pos..token.start].to_string(),
+                ));
             }
 
             let kind = match token.kind {
@@ -302,7 +305,11 @@ fn next_char(line: &str, index: usize) -> char {
 }
 
 fn comment_can_start(line: &str, index: usize) -> bool {
-    index == 0 || line[..index].chars().last().is_some_and(char::is_whitespace)
+    index == 0
+        || line[..index]
+            .chars()
+            .last()
+            .is_some_and(char::is_whitespace)
 }
 
 fn command_separator_end(line: &str, index: usize) -> Option<usize> {
@@ -596,8 +603,25 @@ fn is_shell_escape_target(ch: char) -> bool {
     ch.is_whitespace()
         || matches!(
             ch,
-            '\\' | '\'' | '"' | '$' | '`' | '!' | '&' | '|' | ';' | '<' | '>' | '(' | ')' | '['
-                | ']' | '{' | '}' | '*' | '?' | '#'
+            '\\' | '\''
+                | '"'
+                | '$'
+                | '`'
+                | '!'
+                | '&'
+                | '|'
+                | ';'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '*'
+                | '?'
+                | '#'
         )
 }
 
@@ -639,8 +663,14 @@ fn default_styles() -> HashMap<SyntaxKind, Style> {
         (SyntaxKind::CommandSeparator, Style::new().bold()),
         (SyntaxKind::Path, Style::new().underline().fg(Color::Cyan)),
         (SyntaxKind::PathPrefix, Style::new().fg(Color::Cyan)),
-        (SyntaxKind::SingleQuotedArgument, Style::new().fg(Color::Yellow)),
-        (SyntaxKind::DoubleQuotedArgument, Style::new().fg(Color::Yellow)),
+        (
+            SyntaxKind::SingleQuotedArgument,
+            Style::new().fg(Color::Yellow),
+        ),
+        (
+            SyntaxKind::DoubleQuotedArgument,
+            Style::new().fg(Color::Yellow),
+        ),
         (SyntaxKind::Variable, Style::new().fg(Color::LightPurple)),
         (
             SyntaxKind::CommandSubstitution,
@@ -664,7 +694,10 @@ mod tests {
         let highlighter = WinuxshSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
         let styled = highlighter.highlight("ls; definitely-not-a-winuxsh-command", 0);
 
-        assert_eq!(style_for(&styled, "ls"), highlighter.style(SyntaxKind::Command));
+        assert_eq!(
+            style_for(&styled, "ls"),
+            highlighter.style(SyntaxKind::Command)
+        );
         assert_eq!(
             style_for(&styled, "definitely-not-a-winuxsh-command"),
             highlighter.style(SyntaxKind::UnknownToken)
@@ -676,7 +709,10 @@ mod tests {
         let highlighter = WinuxshSyntaxHighlighter::new(&SyntaxHighlightConfig::default());
         let styled = highlighter.highlight("echo \"$HOME\" | grep --ignore-case foo # note", 0);
 
-        assert_eq!(style_for(&styled, "echo"), highlighter.style(SyntaxKind::Builtin));
+        assert_eq!(
+            style_for(&styled, "echo"),
+            highlighter.style(SyntaxKind::Builtin)
+        );
         assert_eq!(
             style_for(&styled, "\"$HOME\""),
             highlighter.style(SyntaxKind::DoubleQuotedArgument)
@@ -689,7 +725,10 @@ mod tests {
             style_for(&styled, "--ignore-case"),
             highlighter.style(SyntaxKind::DoubleHyphenOption)
         );
-        assert_eq!(style_for(&styled, "# note"), highlighter.style(SyntaxKind::Comment));
+        assert_eq!(
+            style_for(&styled, "# note"),
+            highlighter.style(SyntaxKind::Comment)
+        );
     }
 
     #[test]
@@ -724,7 +763,10 @@ mod tests {
         );
         let styled = highlighter.highlight("fetch; which.exe winuxcmd", 0);
 
-        assert_eq!(style_for(&styled, "fetch"), highlighter.style(SyntaxKind::Command));
+        assert_eq!(
+            style_for(&styled, "fetch"),
+            highlighter.style(SyntaxKind::Command)
+        );
         assert_eq!(
             style_for(&styled, "which.exe"),
             highlighter.style(SyntaxKind::Command)
@@ -774,7 +816,12 @@ mod tests {
             .buffer
             .iter()
             .find(|(_, text)| text == fragment)
-            .or_else(|| styled.buffer.iter().find(|(_, text)| text.contains(fragment)))
+            .or_else(|| {
+                styled
+                    .buffer
+                    .iter()
+                    .find(|(_, text)| text.contains(fragment))
+            })
             .map(|(style, _)| *style)
             .unwrap_or_else(|| panic!("missing fragment {fragment:?} in {:?}", raw_parts(styled)))
     }

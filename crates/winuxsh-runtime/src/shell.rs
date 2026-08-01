@@ -9,10 +9,15 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reedline::{Completer, Reedline};
-use rubash::{executor::Executor, lexer::tokenize, parser::parse, Ast, Token, TokenKind};
+use rubash::{
+    executor::{Executor, HostExternalCommandOutput},
+    lexer::tokenize,
+    parser::parse,
+    Ast, Token, TokenKind,
+};
 
 use crate::completion::runtime::RuntimeCompletionPlugin;
 use crate::completion::{CompletionState, WinuxshCompleter};
@@ -20,6 +25,8 @@ use crate::config::{
     load as load_config, AutosuggestConfig, EditorMode, HookConfig, MenuConfig, NativePluginConfig,
     NativeWidgetConfig, SyntaxHighlightConfig,
 };
+use crate::native_file_builtins;
+use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec};
 use crate::prompt::{PromptBackend, WinuxshPrompt};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
@@ -34,6 +41,13 @@ use crate::zsh_compat::{
 use crate::winuxcmd;
 
 const DOTENV_MAX_SIZE: u64 = 10 * 1024 * 1024;
+const COMMAND_NOT_FOUND_PROVIDER_NAME: &str = "command-not-found";
+#[allow(dead_code)]
+const COMMAND_NOT_FOUND_PROVIDER_MAX_OUTPUT_BYTES: usize = 16 * 1024;
+#[allow(dead_code)]
+const COMMAND_NOT_FOUND_PROVIDER_MAX_LINES: usize = 32;
+#[allow(dead_code)]
+const COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES: usize = 512;
 const WINUXSH_RC_FILE: &str = ".winshrc";
 
 /// Top-level shell state.
@@ -51,6 +65,7 @@ pub struct Shell {
     pub syntax_highlighting: SyntaxHighlightConfig,
     pub native_widgets: NativeWidgetConfig,
     pub native_widget_bindings: Vec<NativeWidgetSuggestion>,
+    pub plugins: PluginRuntimeState,
     pub native_plugins: NativePluginConfig,
     pub hooks: HookConfig,
     pub aliases: HashMap<String, String>,
@@ -107,10 +122,16 @@ impl Shell {
 
         // 4. Build rubash Executor after PATH injection.
         let mut executor = Executor::new();
+        executor.set_external_file_builtins_enabled(false);
         if let Some(script_name) = script_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
         }
         sync_executor_path_from_process_path(&mut executor);
+        let plugin_state = crate::plugins::effective_plugin_state(&config.plugins, &config.zsh);
+        let host_plugin_state = plugin_state.clone();
+        executor.set_host_external_command_handler(move |words, env| {
+            execute_winuxsh_host_external_command(words, env, &host_plugin_state)
+        });
 
         // 5. Apply imported aliases first, then native config aliases so
         // ~/.winshrc.toml remains authoritative when names collide.
@@ -133,12 +154,21 @@ impl Shell {
             }
         }
 
-        // Built-in git aliases (oh-my-zsh style). Always available but
-        // user ~/.winshrc.toml aliases take precedence.
-        for (name, value) in Self::default_git_aliases() {
-            if !aliases.contains_key(name) {
-                if apply_alias(&mut executor, name, value) {
-                    aliases.insert(name.to_string(), value.to_string());
+        // Official Winuxsh builtin alias packs. User ~/.winshrc.toml aliases
+        // take precedence, and canonical [plugins] state gates each pack.
+        for pack_name in ["git", "docker", "kubectl", "npm"] {
+            if !plugin_state.is_enabled(pack_name) {
+                continue;
+            }
+            let Some(pack_aliases) = crate::plugins::plugin_aliases(pack_name) else {
+                continue;
+            };
+            for (name, value) in pack_aliases {
+                if aliases.contains_key(&name) {
+                    continue;
+                }
+                if apply_alias(&mut executor, &name, &value) {
+                    aliases.insert(name, value);
                 }
             }
         }
@@ -146,20 +176,39 @@ impl Shell {
         // 6. Prompt + theme. Choose backend based on `prompt_style`:
         //    "segments"  -> new p10k-style segment engine
         //    "template"  -> legacy template engine (default, backward-compatible)
-        let prompt_style = config.shell.prompt_style.as_deref().unwrap_or("template");
+        let prompts_plugin_disabled =
+            plugin_state.has_decision("prompts") && !plugin_state.is_enabled("prompts");
+        let prompt_style = if prompts_plugin_disabled {
+            "template"
+        } else {
+            config.shell.prompt_style.as_deref().unwrap_or("template")
+        };
         let git_prompt_symbols = crate::git_status::GitPromptSymbols::from(&config.git_prompt);
         let prompt: PromptBackend = if prompt_style == "segments" {
-            let preset = config
-                .shell
-                .segment_preset
-                .as_deref()
-                .and_then(SegmentPreset::from_name)
-                .unwrap_or(SegmentPreset::Classic);
+            let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
+            let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
             let mut seg_config = SegmentPromptConfig::from_preset(
                 preset,
                 &config.shell.prompt_symbol,
                 git_prompt_symbols,
             );
+            if let Some(bundle_preset) = crate::plugins::plugin_prompt_preset(preset_name) {
+                let left_elements: Vec<SegmentId> = bundle_preset
+                    .left_elements
+                    .iter()
+                    .filter_map(|segment| SegmentId::from_name(segment))
+                    .collect();
+                if !left_elements.is_empty() {
+                    seg_config.left_elements = left_elements;
+                }
+                seg_config.right_elements = bundle_preset
+                    .right_elements
+                    .iter()
+                    .filter_map(|segment| SegmentId::from_name(segment))
+                    .collect();
+                seg_config.separator = bundle_preset.separator;
+                seg_config.git_prompt_format = bundle_preset.git_prompt_format;
+            }
             seg_config.theme_name = config.theme_name.clone();
             if let Some(ref left) = config.shell.left_prompt_elements {
                 seg_config.left_elements = left
@@ -237,11 +286,16 @@ impl Shell {
                 report, &options,
             ));
         }
+        let bundle_completion_defs = crate::plugins::plugin_completion_defs();
 
         // 9. Load completion dirs from config (inline, not in thread).
         {
             let mut s = completion_state.lock().unwrap();
-            s.load_completion_dirs_with_definitions(&config.completion_dirs, zsh_completion_defs);
+            s.load_completion_dirs_with_bundle_and_definitions(
+                &config.completion_dirs,
+                bundle_completion_defs,
+                zsh_completion_defs,
+            );
             if config.zsh.runtime_completions.enabled {
                 if let Some(report) = zsh_report.as_ref() {
                     let runtime_commands = runtime_completion_commands_from_report(
@@ -269,15 +323,19 @@ impl Shell {
                     .or_insert_with(|| style.value.clone());
             }
         }
-        let native_widget_bindings =
-            if config.zsh.native_widgets.enabled && config.zsh.native_widgets.import_bindkeys {
-                zsh_report
-                    .as_ref()
-                    .map(|report| report.native_widgets.clone())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+        let mut native_widgets = config.zsh.native_widgets.clone();
+        if plugin_state.has_decision("keybindings") && !plugin_state.is_enabled("keybindings") {
+            native_widgets.enabled = false;
+            native_widgets.presets.clear();
+        }
+        let native_widget_bindings = if native_widgets.enabled && native_widgets.import_bindkeys {
+            zsh_report
+                .as_ref()
+                .map(|report| report.native_widgets.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut shell = Self {
             executor,
@@ -291,8 +349,9 @@ impl Shell {
             editor_mode: config.editor.edit_mode,
             autosuggest: config.zsh.autosuggestions.with_env_overrides(),
             syntax_highlighting: syntax_highlighting.with_env_overrides(),
-            native_widgets: config.zsh.native_widgets,
+            native_widgets,
             native_widget_bindings,
+            plugins: plugin_state,
             native_plugins: config.zsh.native_plugins,
             hooks: config.hooks,
             aliases,
@@ -346,6 +405,7 @@ impl Shell {
 
         // parse() returns Ast directly (not Result) in rubash.
         let mut ast = parse(&tokens);
+        normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
 
@@ -382,6 +442,10 @@ impl Shell {
                 .is_some_and(|command| command == "lwd")
         {
             self.execute_native_last_working_dir()?
+        } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
+            code
+        } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
+            code
         } else if let Some(execution) = self
             .execute_winuxsh_simple_ast(&ast)
             .or_else(|| self.execute_host_synced_simple_ast(&ast))
@@ -391,8 +455,9 @@ impl Shell {
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
-                    if self.native_plugin_enabled("command-not-found") {
-                        self.print_native_command_not_found(&cmd);
+                    if self.command_not_found_plugin_enabled() {
+                        let args = command_not_found_args(&ast, &cmd);
+                        self.print_native_command_not_found(&cmd, &args);
                     } else {
                         eprintln!("winuxsh: {}: command not found", cmd);
                         self.print_command_not_found_hints(&cmd);
@@ -413,8 +478,9 @@ impl Shell {
                 Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
                 Err(rubash::executor::ExecuteError::Return(code)) => code,
                 Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
-                    if self.native_plugin_enabled("command-not-found") {
-                        self.print_native_command_not_found(&cmd);
+                    if self.command_not_found_plugin_enabled() {
+                        let args = command_not_found_args(&ast, &cmd);
+                        self.print_native_command_not_found(&cmd, &args);
                     } else {
                         eprintln!("winuxsh: {}: command not found", cmd);
                         self.print_command_not_found_hints(&cmd);
@@ -504,6 +570,7 @@ impl Shell {
 
     /// Source the user's REPL startup file once before the first prompt.
     pub fn run_startup_rc(&mut self) {
+        self.run_process_plugin_hooks("startup", &[]);
         let path = self.home_dir.join(WINUXSH_RC_FILE);
         let Ok(script) = std::fs::read_to_string(&path) else {
             return;
@@ -530,7 +597,9 @@ impl Shell {
         let last_exit_code = self.executor.last_exit_code().to_string();
         // Set in process env so segment prompt can read it via std::env::var.
         std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
-        self.run_hook_scripts(&hooks, &[("WINUXSH_LAST_EXIT_CODE", last_exit_code)]);
+        let context = [("WINUXSH_LAST_EXIT_CODE", last_exit_code)];
+        self.run_process_plugin_hooks("precmd", &context);
+        self.run_hook_scripts(&hooks, &context);
     }
 
     /// Run native hooks immediately before the user's interactive command.
@@ -541,7 +610,9 @@ impl Shell {
         }
         self.run_native_preexec_plugins(command);
         let hooks = self.hooks.preexec.clone();
-        self.run_hook_scripts(&hooks, &[("WINUXSH_PREEXEC_COMMAND", command.to_string())]);
+        let context = [("WINUXSH_PREEXEC_COMMAND", command.to_string())];
+        self.run_process_plugin_hooks("preexec", &context);
+        self.run_hook_scripts(&hooks, &context);
     }
 
     /// Run native hooks when the interactive command changed directories.
@@ -551,13 +622,12 @@ impl Shell {
         }
         self.run_native_chpwd_plugins();
         let hooks = self.hooks.chpwd.clone();
-        self.run_hook_scripts(
-            &hooks,
-            &[
-                ("WINUXSH_OLDPWD", old_pwd.to_string()),
-                ("WINUXSH_PWD", new_pwd.to_string()),
-            ],
-        );
+        let context = [
+            ("WINUXSH_OLDPWD", old_pwd.to_string()),
+            ("WINUXSH_PWD", new_pwd.to_string()),
+        ];
+        self.run_process_plugin_hooks("chpwd", &context);
+        self.run_hook_scripts(&hooks, &context);
     }
 
     fn run_native_precmd_plugins(&mut self) {
@@ -596,12 +666,412 @@ impl Shell {
     }
 
     fn native_plugin_enabled(&self, preset: &str) -> bool {
+        if self.plugins.has_decision(preset) {
+            return self.plugins.is_enabled(preset);
+        }
+
         self.native_plugins.enabled
             && self
                 .native_plugins
                 .presets
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(preset))
+    }
+
+    fn execute_process_plugin_simple_ast(&mut self, ast: &Ast) -> anyhow::Result<Option<i32>> {
+        if ast.commands.len() != 1 {
+            return Ok(None);
+        }
+        let command = &ast.commands[0];
+        if command.words.is_empty()
+            || !command.assignments.is_empty()
+            || !command.compound_assignments.is_empty()
+            || !command.array_element_assignments.is_empty()
+            || !command.process_substitutions.is_empty()
+            || !command.command_substitutions.is_empty()
+            || !command.arithmetic_expansions.is_empty()
+            || !command.parameter_expansions.is_empty()
+            || !command.brace_expansions.is_empty()
+            || !command.extglob_patterns.is_empty()
+            || !command.pathname_patterns.is_empty()
+            || !command.redirects.is_empty()
+            || command.redirect_in.is_some()
+            || command.redirect_out.is_some()
+            || command.append.is_some()
+            || command.redirect_err.is_some()
+            || command.redirect_err_append.is_some()
+            || command.heredoc.is_some()
+            || command.here_string.is_some()
+            || command.pipe.is_some()
+            || command.background
+            || command.and_or.is_some()
+            || command.inverted
+            || command.pipeline_command.is_some()
+            || command.and_or_list.is_some()
+            || command.time_command.is_some()
+            || command.background_command.is_some()
+            || command.inverted_command.is_some()
+            || command.subshell
+            || command.subshell_end
+            || command.for_command.is_some()
+            || command.arithmetic_command.is_some()
+            || command.if_command.is_some()
+            || command.loop_command.is_some()
+            || command.conditional_command.is_some()
+            || command.subshell_command.is_some()
+            || command.case_command.is_some()
+            || command.select_command.is_some()
+            || command.function_command.is_some()
+            || command.brace_group.is_some()
+            || command.coproc_command.is_some()
+        {
+            return Ok(None);
+        }
+
+        let command_name = &command.words[0];
+        let Some((pack_name, process)) = self.process_plugin_for_command(command_name) else {
+            return Ok(None);
+        };
+        let code = self.run_process_plugin_command(&pack_name, &process, &command.words[1..])?;
+        Ok(Some(code))
+    }
+
+    fn execute_wasm_plugin_simple_ast(&mut self, ast: &Ast) -> anyhow::Result<Option<i32>> {
+        if ast.commands.len() != 1 {
+            return Ok(None);
+        }
+        let command = &ast.commands[0];
+        if command.words.is_empty()
+            || !command.assignments.is_empty()
+            || !command.compound_assignments.is_empty()
+            || !command.array_element_assignments.is_empty()
+            || !command.process_substitutions.is_empty()
+            || !command.command_substitutions.is_empty()
+            || !command.arithmetic_expansions.is_empty()
+            || !command.parameter_expansions.is_empty()
+            || !command.brace_expansions.is_empty()
+            || !command.extglob_patterns.is_empty()
+            || !command.pathname_patterns.is_empty()
+            || !command.redirects.is_empty()
+            || command.redirect_in.is_some()
+            || command.redirect_out.is_some()
+            || command.append.is_some()
+            || command.redirect_err.is_some()
+            || command.redirect_err_append.is_some()
+            || command.heredoc.is_some()
+            || command.here_string.is_some()
+            || command.pipe.is_some()
+            || command.background
+            || command.and_or.is_some()
+            || command.inverted
+            || command.pipeline_command.is_some()
+            || command.and_or_list.is_some()
+            || command.time_command.is_some()
+            || command.background_command.is_some()
+            || command.inverted_command.is_some()
+            || command.subshell
+            || command.subshell_end
+            || command.for_command.is_some()
+            || command.arithmetic_command.is_some()
+            || command.if_command.is_some()
+            || command.loop_command.is_some()
+            || command.conditional_command.is_some()
+            || command.subshell_command.is_some()
+            || command.case_command.is_some()
+            || command.select_command.is_some()
+            || command.function_command.is_some()
+            || command.brace_group.is_some()
+            || command.coproc_command.is_some()
+        {
+            return Ok(None);
+        }
+
+        let command_name = &command.words[0];
+        let Some((pack_name, wasm, module_path, permissions)) =
+            self.wasm_plugin_for_command(command_name)
+        else {
+            return Ok(None);
+        };
+        let code = self.run_wasm_plugin_command(
+            &pack_name,
+            &wasm,
+            &module_path,
+            &permissions,
+            &command.words[1..],
+        )?;
+        Ok(Some(code))
+    }
+
+    fn process_plugin_for_command(
+        &self,
+        command_name: &str,
+    ) -> Option<(String, PluginProcessSpec)> {
+        crate::plugins::active_plugin_inventory()
+            .packs
+            .into_iter()
+            .find_map(|pack| {
+                if pack.kind != PluginKind::Process || !self.plugins.is_enabled(&pack.name) {
+                    return None;
+                }
+                if !pack
+                    .exports
+                    .commands
+                    .iter()
+                    .any(|exported| exported == command_name)
+                {
+                    return None;
+                }
+                pack.process.map(|process| (pack.name, process))
+            })
+    }
+
+    fn process_plugin_for_provider(
+        &self,
+        provider_name: &str,
+    ) -> Option<(String, PluginProcessSpec, Vec<String>)> {
+        process_plugin_for_provider_from_state(provider_name, &self.plugins)
+    }
+
+    fn wasm_plugin_for_command(
+        &self,
+        command_name: &str,
+    ) -> Option<(String, PluginWasmSpec, PathBuf, Vec<String>)> {
+        let inventory = crate::plugins::active_plugin_inventory();
+        let bundle_path = inventory.path?;
+        inventory.packs.into_iter().find_map(|pack| {
+            if pack.kind != PluginKind::Wasm || !self.plugins.is_enabled(&pack.name) {
+                return None;
+            }
+            if !pack
+                .exports
+                .commands
+                .iter()
+                .any(|exported| exported == command_name)
+            {
+                return None;
+            }
+            let wasm = pack.wasm?;
+            let module_path = bundle_path.join(&wasm.module);
+            Some((pack.name, wasm, module_path, pack.permissions))
+        })
+    }
+
+    fn process_plugins_for_hook(&self, hook_name: &str) -> Vec<(String, PluginProcessSpec)> {
+        crate::plugins::active_plugin_inventory()
+            .packs
+            .into_iter()
+            .filter_map(|pack| {
+                if pack.kind != PluginKind::Process || !self.plugins.is_enabled(&pack.name) {
+                    return None;
+                }
+                if !pack
+                    .exports
+                    .hooks
+                    .iter()
+                    .any(|exported| exported == hook_name)
+                {
+                    return None;
+                }
+                pack.process.map(|process| (pack.name, process))
+            })
+            .collect()
+    }
+
+    fn run_process_plugin_hooks(&mut self, hook_name: &str, context: &[(&str, String)]) {
+        let hook_args = vec!["--hook".to_string(), hook_name.to_string()];
+        for (pack_name, process) in self.process_plugins_for_hook(hook_name) {
+            match self.run_process_plugin_invocation(
+                &pack_name,
+                &process,
+                &hook_args,
+                Some(hook_name),
+                context,
+            ) {
+                Ok(0) => {}
+                Ok(code) => log::warn!(
+                    "process hook '{}' from plugin '{}' exited with status {}",
+                    hook_name,
+                    pack_name,
+                    code
+                ),
+                Err(err) => log::warn!(
+                    "process hook '{}' from plugin '{}' failed: {}",
+                    hook_name,
+                    pack_name,
+                    err
+                ),
+            }
+        }
+    }
+
+    fn run_process_plugin_command(
+        &mut self,
+        pack_name: &str,
+        process: &PluginProcessSpec,
+        user_args: &[String],
+    ) -> anyhow::Result<i32> {
+        self.run_process_plugin_invocation(pack_name, process, user_args, None, &[])
+    }
+
+    fn run_process_plugin_invocation(
+        &mut self,
+        pack_name: &str,
+        process: &PluginProcessSpec,
+        extra_args: &[String],
+        hook_name: Option<&str>,
+        context: &[(&str, String)],
+    ) -> anyhow::Result<i32> {
+        let output = self.run_process_plugin_invocation_capture(
+            pack_name, process, extra_args, hook_name, context, true,
+        )?;
+        if !output.stdout.is_empty() {
+            let _ = std::io::stdout().write_all(&output.stdout);
+        }
+        if !output.stderr.is_empty() {
+            let _ = std::io::stderr().write_all(&output.stderr);
+        }
+        Ok(output.status)
+    }
+
+    fn run_process_plugin_invocation_capture(
+        &mut self,
+        pack_name: &str,
+        process: &PluginProcessSpec,
+        extra_args: &[String],
+        hook_name: Option<&str>,
+        context: &[(&str, String)],
+        report_errors: bool,
+    ) -> anyhow::Result<ProcessPluginInvocationOutput> {
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        let env = std::env::vars().collect::<HashMap<_, _>>();
+        run_process_plugin_invocation_capture_with_env(
+            pack_name,
+            process,
+            extra_args,
+            hook_name,
+            context,
+            report_errors,
+            &env,
+        )
+    }
+    fn run_wasm_plugin_command(
+        &mut self,
+        pack_name: &str,
+        wasm: &PluginWasmSpec,
+        module_path: &Path,
+        permissions: &[String],
+        args: &[String],
+    ) -> anyhow::Result<i32> {
+        self.sync_process_cwd_from_executor_pwd();
+        self.sync_process_path_from_executor_path();
+        let cwd = if permissions
+            .iter()
+            .any(|permission| permission == "cwd:read")
+        {
+            self.executor
+                .get_env("PWD")
+                .map(|pwd| pwd.as_bytes().to_vec())
+        } else {
+            None
+        };
+        let env_values = wasm_plugin_allowed_env_values(permissions, &self.executor);
+        let bytes = match std::fs::read(module_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!(
+                    "winuxsh: wasm plugin '{}' failed to read '{}': {}",
+                    pack_name,
+                    module_path.display(),
+                    err
+                );
+                return Ok(1);
+            }
+        };
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(true).allow_start_fn(false);
+        let engine = wasmi::Engine::new(&config);
+        let module = match wasmi::Module::new(&engine, &bytes) {
+            Ok(module) => module,
+            Err(err) => {
+                eprintln!(
+                    "winuxsh: wasm plugin '{}' failed to compile '{}': {}",
+                    pack_name,
+                    module_path.display(),
+                    err
+                );
+                return Ok(1);
+            }
+        };
+        let mut store = wasmi::Store::new(
+            &engine,
+            WasmPluginStoreState {
+                limits: wasmi::StoreLimitsBuilder::new()
+                    .memory_size(wasm_memory_limit_bytes(wasm.max_memory_pages))
+                    .memories(1)
+                    .tables(1)
+                    .instances(1)
+                    .trap_on_grow_failure(true)
+                    .build(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+                cwd,
+                env_values,
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        if let Err(err) = store.set_fuel(wasm_plugin_fuel_budget(wasm.timeout_millis)) {
+            eprintln!(
+                "winuxsh: wasm plugin '{}' failed to set fuel budget: {}",
+                pack_name, err
+            );
+            return Ok(1);
+        }
+        let mut linker = wasmi::Linker::<WasmPluginStoreState>::new(&engine);
+        if let Err(err) = define_wasm_plugin_host_imports(&mut linker) {
+            eprintln!(
+                "winuxsh: wasm plugin '{}' failed to configure host ABI: {}",
+                pack_name, err
+            );
+            return Ok(1);
+        }
+        let instance = match linker.instantiate_and_start(&mut store, &module) {
+            Ok(instance) => instance,
+            Err(err) => {
+                return Ok(wasm_plugin_error_code(
+                    pack_name,
+                    "failed to instantiate",
+                    module_path,
+                    wasm.timeout_millis,
+                    err,
+                ));
+            }
+        };
+        let main = match instance.get_typed_func::<(), i32>(&store, "winuxsh_plugin_main") {
+            Ok(main) => main,
+            Err(err) => {
+                eprintln!(
+                    "winuxsh: wasm plugin '{}' missing export 'winuxsh_plugin_main' with signature () -> i32 in '{}': {}",
+                    pack_name,
+                    module_path.display(),
+                    err
+                );
+                return Ok(1);
+            }
+        };
+        let call_result = main.call(&mut store, ());
+        flush_wasm_plugin_host_output(&mut store);
+        match call_result {
+            Ok(code) => Ok(code),
+            Err(err) => Ok(wasm_plugin_error_code(
+                pack_name,
+                "failed while running",
+                module_path,
+                wasm.timeout_millis,
+                err,
+            )),
+        }
     }
 
     fn native_selector_enabled(&self) -> bool {
@@ -834,12 +1304,106 @@ impl Shell {
         }
     }
 
-    fn print_native_command_not_found(&self, command: &str) {
-        for line in native_command_not_found_lines(command, true, |candidate| {
-            resolve_native_command_path(candidate).is_some()
-        }) {
+    fn command_not_found_plugin_enabled(&self) -> bool {
+        self.native_plugin_enabled(COMMAND_NOT_FOUND_PROVIDER_NAME)
+            || self
+                .process_plugin_for_provider(COMMAND_NOT_FOUND_PROVIDER_NAME)
+                .is_some()
+    }
+
+    fn print_native_command_not_found(&mut self, command: &str, args: &[String]) {
+        let provider_output = self.command_not_found_provider_output(command, args);
+        for line in command_not_found_lines_with_provider(
+            command,
+            true,
+            |candidate| resolve_native_command_path(candidate).is_some(),
+            provider_output,
+        ) {
             eprintln!("{}", line);
         }
+    }
+
+    fn command_not_found_provider_output(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> CommandNotFoundProviderOutput {
+        let Some((pack_name, process, permissions)) =
+            self.process_plugin_for_provider(COMMAND_NOT_FOUND_PROVIDER_NAME)
+        else {
+            return CommandNotFoundProviderOutput::Empty;
+        };
+        let cwd = if permissions
+            .iter()
+            .any(|permission| permission == "cwd:read")
+        {
+            self.executor.get_env("PWD").map(str::to_string)
+        } else {
+            None
+        };
+        let request =
+            command_not_found_provider_request(command, args, cwd.as_deref(), |candidate| {
+                resolve_native_command_path(candidate).is_some()
+            });
+        let mut provider_args = vec![
+            "--provider".to_string(),
+            COMMAND_NOT_FOUND_PROVIDER_NAME.to_string(),
+            "--command".to_string(),
+            request.command.clone(),
+        ];
+        for arg in &request.args {
+            provider_args.push("--arg".to_string());
+            provider_args.push(arg.clone());
+        }
+        if let Some(cwd) = &request.cwd {
+            provider_args.push("--cwd".to_string());
+            provider_args.push(cwd.clone());
+        }
+        for helper in &request.package_search_helpers {
+            provider_args.push("--helper".to_string());
+            provider_args.push(helper.clone());
+        }
+        let helper_list = request.package_search_helpers.join(";");
+        let context = vec![
+            (
+                "WINUXSH_PROCESS_PLUGIN_PROVIDER",
+                COMMAND_NOT_FOUND_PROVIDER_NAME.to_string(),
+            ),
+            ("WINUXSH_COMMAND_NOT_FOUND_COMMAND", request.command.clone()),
+            ("WINUXSH_COMMAND_NOT_FOUND_HELPERS", helper_list),
+        ];
+        let output = match self.run_process_plugin_invocation_capture(
+            &pack_name,
+            &process,
+            &provider_args,
+            None,
+            &context,
+            false,
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                log::debug!(
+                    "command-not-found provider '{}' invocation failed: {}",
+                    pack_name,
+                    err
+                );
+                return CommandNotFoundProviderOutput::Failed(err.to_string());
+            }
+        };
+        if !output.stderr.is_empty() {
+            log::debug!(
+                "command-not-found provider '{}' wrote stderr: {}",
+                pack_name,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if output.status != 0 {
+            return CommandNotFoundProviderOutput::Failed(format!(
+                "provider process exited with {}",
+                output.status
+            ));
+        }
+        parse_command_not_found_provider_output(&output.stdout)
     }
 
     fn print_command_not_found_hints_if_missing(&self, ast: &Ast) {
@@ -900,6 +1464,7 @@ impl Shell {
         }
 
         let mut ast = parse(&tokens);
+        normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
         if ast.commands.len() != 1 {
@@ -1127,24 +1692,35 @@ impl Shell {
         rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
         let mut ast = parse(&tokens);
+        normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
-        let execution = self
-            .execute_winuxsh_simple_ast(&ast)
-            .or_else(|| self.execute_host_synced_simple_ast(&ast))
-            .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
-                Ok(()) => Ok(self.executor.last_exit_code()),
-                Err(err) => Err(err),
-            });
+        let execution = if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
+            Ok(code)
+        } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
+            Ok(code)
+        } else {
+            self.execute_winuxsh_simple_ast(&ast)
+                .or_else(|| self.execute_host_synced_simple_ast(&ast))
+                .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
+                    Ok(()) => Ok(self.executor.last_exit_code()),
+                    Err(err) => Err(err),
+                })
+        };
 
         let code = match execution {
             Ok(code) => code,
             Err(rubash::executor::ExecuteError::ExitCode(code)) => code,
             Err(rubash::executor::ExecuteError::Return(code)) => code,
             Err(rubash::executor::ExecuteError::CommandNotFound(cmd)) => {
-                eprintln!("winuxsh: {}: command not found", cmd);
+                if self.command_not_found_plugin_enabled() {
+                    let args = command_not_found_args(&ast, &cmd);
+                    self.print_native_command_not_found(&cmd, &args);
+                } else {
+                    eprintln!("winuxsh: {}: command not found", cmd);
+                }
                 127
             }
             Err(e) => {
@@ -1181,51 +1757,6 @@ impl Shell {
         stage.heredoc_delimiter = Some("WINUXSH_PROCESS_STDIN".to_string());
         Ok(())
     }
-    /// Built-in git aliases (oh-my-zsh style).
-    fn default_git_aliases() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("g", "git"),
-            ("ga", "git add"),
-            ("gaa", "git add --all"),
-            ("gb", "git branch"),
-            ("gba", "git branch -a"),
-            ("gbl", "git blame -b -w"),
-            ("gc", "git commit -v"),
-            ("gca", "git commit -v -a"),
-            ("gcam", "git commit -a -m"),
-            ("gcb", "git checkout -b"),
-            ("gcl", "git clone --recurse-submodules"),
-            ("gcm", "git checkout master"),
-            ("gcmsg", "git commit -m"),
-            ("gco", "git checkout"),
-            ("gcp", "git cherry-pick"),
-            ("gd", "git diff"),
-            ("gdca", "git diff --cached"),
-            ("gf", "git fetch"),
-            ("gfa", "git fetch --all --prune"),
-            ("gl", "git pull"),
-            ("glo", "git log --oneline --decorate"),
-            ("gm", "git merge"),
-            ("gp", "git push"),
-            ("gpf", "git push --force-with-lease"),
-            ("gr", "git remote"),
-            ("gra", "git remote add"),
-            ("grb", "git rebase"),
-            ("grh", "git reset HEAD"),
-            ("grhh", "git reset HEAD --hard"),
-            ("grm", "git rm"),
-            ("grs", "git reset"),
-            ("grv", "git remote -v"),
-            ("gsh", "git show"),
-            ("gss", "git status -s"),
-            ("gst", "git status"),
-            ("gsta", "git stash save"),
-            ("gstp", "git stash pop"),
-            ("gstl", "git stash list"),
-            ("gup", "git pull --rebase"),
-        ]
-    }
-
     fn execute_host_synced_simple_ast(
         &mut self,
         ast: &Ast,
@@ -1297,42 +1828,67 @@ impl Shell {
             "setopt" => Some(self.execute_zsh_option_builtin(true, args)),
             "unsetopt" => Some(self.execute_zsh_option_builtin(false, args)),
             "source" => Some(self.execute_source_builtin(args)),
+            "cat" => Some(self.execute_native_cat_builtin(args)),
+            "chmod" => Some(self.execute_native_chmod_builtin(args)),
+            "cp" => Some(self.execute_native_cp_builtin(args)),
+            "kill" => Some(self.execute_native_kill_builtin(args)),
+            "mkdir" => Some(self.execute_native_mkdir_builtin(args)),
+            "mkfifo" => Some(self.execute_native_mkfifo_builtin(args)),
             "pwd" => Some(self.execute_native_pwd_builtin(args)),
+            "rm" => Some(self.execute_native_rm_builtin(args)),
+            "rmdir" => Some(self.execute_native_rmdir_builtin(args)),
+            "touch" => Some(self.execute_native_touch_builtin(args)),
             _ => None,
         }
     }
 
-    fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
-        let mut physical = false;
-        for arg in args {
-            if arg == "--" {
-                break;
-            }
-            if !arg.starts_with('-') || arg == "-" {
-                break;
-            }
-            for option in arg[1..].chars() {
-                match option {
-                    'L' => physical = false,
-                    'P' => physical = true,
-                    other => {
-                        eprintln!("winuxsh: pwd: -{}: invalid option", other);
-                        eprintln!("pwd: usage: pwd [-LP]");
-                        return 2;
-                    }
-                }
-            }
-        }
+    fn execute_native_cat_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_cat(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
 
-        let directory = if physical {
-            std::env::current_dir()
-                .map(|path| path.to_string_lossy().to_string())
-                .unwrap_or_else(|_| self.executor.get_env("PWD").unwrap_or(".").to_string())
-        } else {
-            self.executor.get_env("PWD").unwrap_or(".").to_string()
-        };
-        println!("{}", native_pwd_display_path(&directory));
-        0
+    fn execute_native_chmod_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_chmod(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_cp_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_cp(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_kill_builtin(&self, args: &[String]) -> i32 {
+        native_file_builtins::execute_kill(args)
+    }
+
+    fn execute_native_mkdir_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_mkdir(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_mkfifo_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_mkfifo(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_rm_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_rm(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_rmdir_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_rmdir(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_touch_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_touch(args, |arg| resolve_shell_path_argument(pwd, arg))
+    }
+
+    fn execute_native_pwd_builtin(&self, args: &[String]) -> i32 {
+        let pwd = self.executor.get_env("PWD").unwrap_or(".");
+        native_file_builtins::execute_pwd(args, pwd)
     }
 
     fn execute_source_builtin(&mut self, args: &[String]) -> i32 {
@@ -1519,21 +2075,117 @@ fn normalize_cd_windows_drive_args(ast: &mut Ast) {
     }
 
     for command in &mut ast.commands {
-        if !command
-            .words
-            .first()
-            .is_some_and(|word| word.eq_ignore_ascii_case("cd"))
-        {
-            continue;
-        }
+        normalize_cd_windows_drive_command(command);
+    }
+}
 
-        for word in command.words.iter_mut().skip(1) {
-            if let Some(normalized) = cd_tilde_path_to_slash_drive(word)
-                .or_else(|| windows_drive_path_to_slash_drive(word))
-            {
-                *word = normalized;
-            }
+fn normalize_cd_windows_drive_command(command: &mut rubash::parser::CommandNode) {
+    if let Some(and_or_list) = &mut command.and_or_list {
+        for command in &mut and_or_list.commands {
+            normalize_cd_windows_drive_command(command);
         }
+    }
+
+    if !command
+        .words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("cd"))
+    {
+        return;
+    }
+
+    for word in command.words.iter_mut().skip(1) {
+        if let Some(normalized) =
+            cd_tilde_path_to_slash_drive(word).or_else(|| windows_drive_path_to_slash_drive(word))
+        {
+            *word = normalized;
+        }
+    }
+}
+
+fn normalize_bare_windows_drive_commands(ast: &mut Ast) {
+    if !cfg!(windows) {
+        return;
+    }
+
+    for command in &mut ast.commands {
+        normalize_bare_windows_drive_command(command);
+    }
+}
+
+fn normalize_bare_windows_drive_command(command: &mut rubash::parser::CommandNode) {
+    if let Some(and_or_list) = &mut command.and_or_list {
+        for command in &mut and_or_list.commands {
+            normalize_bare_windows_drive_command(command);
+        }
+    }
+
+    if !is_bare_windows_drive_command_shape(command)
+        || command_has_redirects(command)
+        || !command.assignments.is_empty()
+        || !command.compound_assignments.is_empty()
+        || !command.array_element_assignments.is_empty()
+    {
+        return;
+    }
+
+    let Some(drive_root) = bare_windows_drive_command_root(command) else {
+        return;
+    };
+
+    command.words = vec!["cd".to_string(), drive_root];
+    command.word_kinds = vec![TokenKind::Word, TokenKind::Word];
+    command.word_metadata = command
+        .words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            rubash::parser::WordMetadata::literal(index, word.clone(), word.clone())
+        })
+        .collect();
+}
+
+fn is_bare_windows_drive_command_shape(command: &rubash::parser::CommandNode) -> bool {
+    command.pipe.is_none()
+        && !command.background
+        && !command.inverted
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.time_command.is_none()
+        && command.background_command.is_none()
+        && command.inverted_command.is_none()
+        && !command.subshell
+        && !command.subshell_end
+        && command.for_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.if_command.is_none()
+        && command.loop_command.is_none()
+        && command.conditional_command.is_none()
+        && command.subshell_command.is_none()
+        && command.case_command.is_none()
+        && command.select_command.is_none()
+        && command.function_command.is_none()
+        && command.brace_group.is_none()
+        && command.coproc_command.is_none()
+}
+
+fn bare_windows_drive_command_root(command: &rubash::parser::CommandNode) -> Option<String> {
+    let [word] = command.words.as_slice() else {
+        return None;
+    };
+    if command
+        .word_metadata
+        .first()
+        .is_some_and(|metadata| !metadata.word_quotes.is_empty() || metadata.raw.as_str() != word)
+    {
+        return None;
+    }
+
+    let bytes = word.as_bytes();
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        Some(format!("{}:/", (bytes[0] as char).to_ascii_uppercase()))
+    } else {
+        None
     }
 }
 
@@ -1650,6 +2302,146 @@ fn process_stdin_pipeline_bridge_stage(ast: &mut Ast) -> Option<&mut rubash::par
     .then_some(first)
 }
 
+fn execute_winuxsh_host_external_command(
+    words: &[String],
+    env: &HashMap<String, String>,
+    plugins: &PluginRuntimeState,
+) -> Option<HostExternalCommandOutput> {
+    let [command, args @ ..] = words else {
+        return None;
+    };
+    if command == "cp" {
+        let pwd = env.get("PWD").map(String::as_str).unwrap_or(".");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = native_file_builtins::execute_cp_with_io(
+            args,
+            |arg| resolve_shell_path_argument(pwd, arg),
+            &mut stdout,
+            &mut stderr,
+        );
+        return Some(HostExternalCommandOutput {
+            stdout,
+            stderr,
+            status,
+        });
+    }
+
+    if resolve_native_command_path_with_env(command, env).is_some() {
+        return None;
+    }
+
+    command_not_found_host_external_output(command, args, env, plugins)
+}
+
+fn command_not_found_host_external_output(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    plugins: &PluginRuntimeState,
+) -> Option<HostExternalCommandOutput> {
+    let provider_output =
+        command_not_found_process_provider_output_for_env(command, args, env, plugins);
+    if provider_output.is_none() && !plugins.is_enabled(COMMAND_NOT_FOUND_PROVIDER_NAME) {
+        return None;
+    }
+    let provider_output = provider_output.unwrap_or(CommandNotFoundProviderOutput::Empty);
+    let stderr = command_not_found_lines_with_provider(
+        command,
+        true,
+        |candidate| resolve_native_command_path_with_env(candidate, env).is_some(),
+        provider_output,
+    )
+    .join("\n")
+        + "\n";
+    Some(HostExternalCommandOutput {
+        stdout: Vec::new(),
+        stderr: stderr.into_bytes(),
+        status: 127,
+    })
+}
+
+fn command_not_found_process_provider_output_for_env(
+    command: &str,
+    args: &[String],
+    env: &HashMap<String, String>,
+    plugins: &PluginRuntimeState,
+) -> Option<CommandNotFoundProviderOutput> {
+    let (pack_name, process, permissions) =
+        process_plugin_for_provider_from_state(COMMAND_NOT_FOUND_PROVIDER_NAME, plugins)?;
+    let cwd = if permissions
+        .iter()
+        .any(|permission| permission == "cwd:read")
+    {
+        env.get("PWD").cloned()
+    } else {
+        None
+    };
+    let request = command_not_found_provider_request(command, args, cwd.as_deref(), |candidate| {
+        resolve_native_command_path_with_env(candidate, env).is_some()
+    });
+    let mut provider_args = vec![
+        "--provider".to_string(),
+        COMMAND_NOT_FOUND_PROVIDER_NAME.to_string(),
+        "--command".to_string(),
+        request.command.clone(),
+    ];
+    for arg in &request.args {
+        provider_args.push("--arg".to_string());
+        provider_args.push(arg.clone());
+    }
+    if let Some(cwd) = &request.cwd {
+        provider_args.push("--cwd".to_string());
+        provider_args.push(cwd.clone());
+    }
+    for helper in &request.package_search_helpers {
+        provider_args.push("--helper".to_string());
+        provider_args.push(helper.clone());
+    }
+    let helper_list = request.package_search_helpers.join(";");
+    let context = vec![
+        (
+            "WINUXSH_PROCESS_PLUGIN_PROVIDER",
+            COMMAND_NOT_FOUND_PROVIDER_NAME.to_string(),
+        ),
+        ("WINUXSH_COMMAND_NOT_FOUND_COMMAND", request.command.clone()),
+        ("WINUXSH_COMMAND_NOT_FOUND_HELPERS", helper_list),
+    ];
+    let output = match run_process_plugin_invocation_capture_with_env(
+        &pack_name,
+        &process,
+        &provider_args,
+        None,
+        &context,
+        false,
+        env,
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            log::debug!(
+                "command-not-found provider '{}' invocation failed: {}",
+                pack_name,
+                err
+            );
+            return Some(CommandNotFoundProviderOutput::Failed(err.to_string()));
+        }
+    };
+    if !output.stderr.is_empty() {
+        log::debug!(
+            "command-not-found provider '{}' wrote stderr: {}",
+            pack_name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if output.status != 0 {
+        return Some(CommandNotFoundProviderOutput::Failed(format!(
+            "provider process exited with {}",
+            output.status
+        )));
+    }
+    Some(parse_command_not_found_provider_output(&output.stdout))
+}
+
 fn is_winuxsh_builtin_command(command: &rubash::parser::CommandNode) -> bool {
     winuxsh_builtin_words(command).is_some()
 }
@@ -1688,8 +2480,17 @@ fn winuxsh_builtin_words(command: &rubash::parser::CommandNode) -> Option<(&str,
 fn winuxsh_builtin_name(name: &str) -> Option<&'static str> {
     match name {
         "." | "source" => Some("source"),
+        "cat" => Some("cat"),
+        "chmod" => Some("chmod"),
+        "cp" => Some("cp"),
+        "kill" => Some("kill"),
+        "mkdir" => Some("mkdir"),
+        "mkfifo" => Some("mkfifo"),
         "pwd" => Some("pwd"),
+        "rm" => Some("rm"),
+        "rmdir" => Some("rmdir"),
         "setopt" => Some("setopt"),
+        "touch" => Some("touch"),
         "unsetopt" => Some("unsetopt"),
         _ => None,
     }
@@ -1868,11 +2669,9 @@ fn rewrite_winuxcmd_command_shims_in_stage(
     };
 
     match winuxcmd_command_shim(&tokens[command_index]) {
-        Some(WinuxCmdShim::Grep { needs_exe_shim }) => {
-            if needs_exe_shim {
-                tokens[command_index].value = "grep.exe".to_string();
-                tokens[command_index].raw = "grep.exe".to_string();
-            }
+        Some(WinuxCmdShim::Exe { target }) => {
+            tokens[command_index].value = target.to_string();
+            tokens[command_index].raw = target.to_string();
         }
         None => return,
     }
@@ -1909,25 +2708,27 @@ fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Opti
 }
 
 enum WinuxCmdShim {
-    Grep { needs_exe_shim: bool },
+    Exe { target: &'static str },
 }
 
 fn winuxcmd_command_shim(token: &Token) -> Option<WinuxCmdShim> {
     if !matches!(token.kind, TokenKind::Word) {
         return None;
     }
-    if token.value.eq_ignore_ascii_case("grep") && token.raw.eq_ignore_ascii_case("grep") {
-        return Some(WinuxCmdShim::Grep {
-            needs_exe_shim: true,
-        });
+
+    for (name, target) in WINUXCMD_EXE_SHIMS {
+        if token.value.eq_ignore_ascii_case(name) && token.raw.eq_ignore_ascii_case(name) {
+            return Some(WinuxCmdShim::Exe { target });
+        }
     }
+
     if token.value.eq_ignore_ascii_case("grep.exe") && token.raw.eq_ignore_ascii_case("grep.exe") {
-        return Some(WinuxCmdShim::Grep {
-            needs_exe_shim: false,
-        });
+        return Some(WinuxCmdShim::Exe { target: "grep.exe" });
     }
     None
 }
+
+const WINUXCMD_EXE_SHIMS: &[(&str, &str)] = &[("grep", "grep.exe")];
 
 fn grep_command_name(token: &Token) -> bool {
     token.value.eq_ignore_ascii_case("grep") || token.value.eq_ignore_ascii_case("grep.exe")
@@ -1962,28 +2763,139 @@ fn normalize_winuxcmd_slash_drive_args(ast: &mut Ast) {
     }
 
     for command in &mut ast.commands {
-        let Some(command_name) = command.words.first() else {
-            continue;
-        };
-        if !is_winuxcmd_path_command(command_name) {
-            continue;
-        }
+        normalize_winuxcmd_slash_drive_command(command);
+    }
+}
 
-        for word in command.words.iter_mut().skip(1) {
-            if let Some(normalized) = slash_drive_arg_to_windows_native(word) {
-                *word = normalized;
-            }
+fn normalize_winuxcmd_slash_drive_command(command: &mut rubash::parser::CommandNode) {
+    if let Some(and_or_list) = &mut command.and_or_list {
+        for command in &mut and_or_list.commands {
+            normalize_winuxcmd_slash_drive_command(command);
+        }
+    }
+
+    let Some(command_name) = command.words.first() else {
+        return;
+    };
+    if !is_winuxcmd_path_command(command_name) {
+        return;
+    }
+
+    for word in command.words.iter_mut().skip(1) {
+        if let Some(normalized) = slash_drive_arg_to_windows_native(word) {
+            *word = normalized;
         }
     }
 }
 
 fn is_winuxcmd_path_command(command: &str) -> bool {
-    let command = command.strip_suffix(".exe").unwrap_or(command);
-    matches!(
-        command,
-        "ls" | "cat" | "grep" | "find" | "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "tar"
-    )
+    let command = command.to_ascii_lowercase();
+    let command = command.strip_suffix(".exe").unwrap_or(&command);
+    WINUXCMD_PATH_COMMANDS.contains(&command)
 }
+
+const WINUXCMD_PATH_COMMANDS: &[&str] = &[
+    "awk",
+    "b2sum",
+    "base32",
+    "base64",
+    "basename",
+    "basenc",
+    "cat",
+    "chcon",
+    "chgrp",
+    "chmod",
+    "chown",
+    "chroot",
+    "cksum",
+    "cmp",
+    "col",
+    "column",
+    "comm",
+    "cp",
+    "cpio",
+    "csplit",
+    "cut",
+    "cygpath",
+    "d2u",
+    "dd",
+    "df",
+    "diff",
+    "diff3",
+    "dir",
+    "dirname",
+    "dos2unix",
+    "du",
+    "expand",
+    "fd",
+    "file",
+    "find",
+    "fmt",
+    "fold",
+    "grep",
+    "head",
+    "hexdump",
+    "hmac256",
+    "install",
+    "join",
+    "jq",
+    "less",
+    "link",
+    "ln",
+    "lsof",
+    "ls",
+    "md5sum",
+    "mkdir",
+    "mkfifo",
+    "mknod",
+    "mktemp",
+    "more",
+    "mv",
+    "nl",
+    "od",
+    "paste",
+    "patch",
+    "pathchk",
+    "pr",
+    "ptx",
+    "readlink",
+    "realpath",
+    "rev",
+    "rm",
+    "rmdir",
+    "sdiff",
+    "sed",
+    "sha1sum",
+    "sha224sum",
+    "sha256sum",
+    "sha384sum",
+    "sha512sum",
+    "shred",
+    "shuf",
+    "sort",
+    "split",
+    "stat",
+    "strings",
+    "sum",
+    "tac",
+    "tail",
+    "tar",
+    "tee",
+    "tic",
+    "toe",
+    "touch",
+    "tree",
+    "truncate",
+    "tsort",
+    "u2d",
+    "unexpand",
+    "uniq",
+    "unix2dos",
+    "unlink",
+    "vdir",
+    "wc",
+    "xxd",
+];
 
 fn slash_drive_arg_to_windows_native(value: &str) -> Option<String> {
     if let Some(path) = slash_drive_path_to_windows_native(value) {
@@ -2021,7 +2933,7 @@ fn windows_drive_path_to_slash_drive(value: &str) -> Option<String> {
 
     let drive = (bytes[0] as char).to_ascii_lowercase();
     if bytes.len() == 2 {
-        return Some(format!("/{drive}"));
+        return Some(format!("/{drive}/"));
     }
     if bytes.get(2) == Some(&b'/') {
         return Some(format!("/{drive}{}", &normalized[2..]));
@@ -2144,6 +3056,92 @@ fn single_command_word(ast: &Ast) -> Option<&str> {
     ast.commands[0].words.first().map(String::as_str)
 }
 
+fn command_not_found_args(ast: &Ast, command: &str) -> Vec<String> {
+    if ast.commands.len() != 1 {
+        return Vec::new();
+    }
+    let words = ast.commands[0].words.as_slice();
+    match words {
+        [first, args @ ..] if first == command => args.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandNotFoundProviderRequest {
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    package_search_helpers: Vec<String>,
+}
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandNotFoundProviderOutput {
+    Suggestions(Vec<String>),
+    Empty,
+    Failed(String),
+}
+#[allow(dead_code)]
+fn command_not_found_provider_request<F>(
+    command: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    mut command_exists: F,
+) -> CommandNotFoundProviderRequest
+where
+    F: FnMut(&str) -> bool,
+{
+    let package_search_helpers = ["winget", "scoop", "choco"]
+        .into_iter()
+        .filter(|candidate| command_exists(candidate))
+        .map(str::to_string)
+        .collect();
+    CommandNotFoundProviderRequest {
+        command: command.to_string(),
+        args: args.to_vec(),
+        cwd: cwd.map(str::to_string),
+        package_search_helpers,
+    }
+}
+#[allow(dead_code)]
+fn parse_command_not_found_provider_output(bytes: &[u8]) -> CommandNotFoundProviderOutput {
+    if bytes.len() > COMMAND_NOT_FOUND_PROVIDER_MAX_OUTPUT_BYTES {
+        return CommandNotFoundProviderOutput::Failed(format!(
+            "provider output exceeded {} bytes",
+            COMMAND_NOT_FOUND_PROVIDER_MAX_OUTPUT_BYTES
+        ));
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return CommandNotFoundProviderOutput::Failed("provider output was not UTF-8".to_string());
+    };
+    let mut lines = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim_end_matches(char::from(13));
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.len() > COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES {
+            return CommandNotFoundProviderOutput::Failed(format!(
+                "provider output line exceeded {} bytes",
+                COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES
+            ));
+        }
+        lines.push(line.to_string());
+        if lines.len() > COMMAND_NOT_FOUND_PROVIDER_MAX_LINES {
+            return CommandNotFoundProviderOutput::Failed(format!(
+                "provider output exceeded {} lines",
+                COMMAND_NOT_FOUND_PROVIDER_MAX_LINES
+            ));
+        }
+    }
+    if lines.is_empty() {
+        CommandNotFoundProviderOutput::Empty
+    } else {
+        CommandNotFoundProviderOutput::Suggestions(lines)
+    }
+}
+#[allow(dead_code)]
 fn native_command_not_found_lines<F>(
     command: &str,
     include_package_search: bool,
@@ -2152,7 +3150,29 @@ fn native_command_not_found_lines<F>(
 where
     F: FnMut(&str) -> bool,
 {
+    command_not_found_lines_with_provider(
+        command,
+        include_package_search,
+        &mut command_exists,
+        CommandNotFoundProviderOutput::Empty,
+    )
+}
+fn command_not_found_lines_with_provider<F>(
+    command: &str,
+    include_package_search: bool,
+    mut command_exists: F,
+    provider_output: CommandNotFoundProviderOutput,
+) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
     let mut lines = vec![format!("winuxsh: {}: command not found", command)];
+    if let CommandNotFoundProviderOutput::Suggestions(suggestions) = provider_output {
+        if !suggestions.is_empty() {
+            lines.extend(suggestions);
+            return lines;
+        }
+    }
     lines.extend(native_command_not_found_hint_lines(
         command,
         include_package_search,
@@ -2160,7 +3180,6 @@ where
     ));
     lines
 }
-
 fn native_command_not_found_hint_lines<F>(
     command: &str,
     include_package_search: bool,
@@ -2514,13 +3533,567 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+struct ProcessPluginInvocationOutput {
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl ProcessPluginInvocationOutput {
+    fn status(status: i32) -> Self {
+        Self {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+}
+
+fn process_plugin_for_provider_from_state(
+    provider_name: &str,
+    plugins: &PluginRuntimeState,
+) -> Option<(String, PluginProcessSpec, Vec<String>)> {
+    crate::plugins::active_plugin_inventory()
+        .packs
+        .into_iter()
+        .find_map(|pack| {
+            if pack.kind != PluginKind::Process || !plugins.is_enabled(&pack.name) {
+                return None;
+            }
+            if !pack
+                .exports
+                .providers
+                .iter()
+                .any(|exported| exported == provider_name)
+            {
+                return None;
+            }
+            pack.process
+                .map(|process| (pack.name, process, pack.permissions))
+        })
+}
+
+fn run_process_plugin_invocation_capture_with_env(
+    pack_name: &str,
+    process: &PluginProcessSpec,
+    extra_args: &[String],
+    hook_name: Option<&str>,
+    context: &[(&str, String)],
+    report_errors: bool,
+    env: &HashMap<String, String>,
+) -> anyhow::Result<ProcessPluginInvocationOutput> {
+    let stdout_path = process_plugin_temp_path(&process.command, "stdout");
+    let stderr_path = process_plugin_temp_path(&process.command, "stderr");
+    let stdout = std::fs::File::create(&stdout_path)?;
+    let stderr = std::fs::File::create(&stderr_path)?;
+    let command_path = resolve_native_command_path_with_env(&process.command, env)
+        .unwrap_or_else(|| PathBuf::from(&process.command));
+
+    let mut command = Command::new(command_path);
+    apply_shell_env_to_process_command(&mut command, env);
+    if let Some(cwd) = process_working_dir_from_shell_env(env) {
+        command.current_dir(cwd);
+    }
+    command
+        .args(&process.args)
+        .args(extra_args)
+        .env("WINUXSH_PROCESS_PLUGIN_PACK", pack_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    if let Some(hook_name) = hook_name {
+        command.env("WINUXSH_PROCESS_PLUGIN_HOOK", hook_name);
+    }
+    for (name, value) in context {
+        command.env(name, value);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = std::fs::remove_file(&stdout_path);
+            let _ = std::fs::remove_file(&stderr_path);
+            if report_errors {
+                eprintln!(
+                    "winuxsh: process plugin '{}' failed to run '{}': {}",
+                    pack_name, process.command, err
+                );
+            } else {
+                log::debug!(
+                    "process plugin provider '{}' failed to run '{}': {}",
+                    pack_name,
+                    process.command,
+                    err
+                );
+            }
+            return Ok(ProcessPluginInvocationOutput::status(127));
+        }
+    };
+
+    let timeout = Duration::from_millis(process.timeout_millis.max(1));
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&stdout_path);
+                    let _ = std::fs::remove_file(&stderr_path);
+                    if report_errors {
+                        eprintln!(
+                            "winuxsh: process plugin '{}' command '{}' timed out after {}ms",
+                            pack_name, process.command, process.timeout_millis
+                        );
+                    } else {
+                        log::debug!(
+                            "process plugin provider '{}' command '{}' timed out after {}ms",
+                            pack_name,
+                            process.command,
+                            process.timeout_millis
+                        );
+                    }
+                    return Ok(ProcessPluginInvocationOutput::status(124));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&stdout_path);
+                let _ = std::fs::remove_file(&stderr_path);
+                if report_errors {
+                    eprintln!(
+                        "winuxsh: process plugin '{}' failed while waiting for '{}': {}",
+                        pack_name, process.command, err
+                    );
+                } else {
+                    log::debug!(
+                        "process plugin provider '{}' failed while waiting for '{}': {}",
+                        pack_name,
+                        process.command,
+                        err
+                    );
+                }
+                return Ok(ProcessPluginInvocationOutput::status(1));
+            }
+        }
+    };
+
+    let stdout = std::fs::read(&stdout_path).unwrap_or_default();
+    let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&stdout_path);
+    let _ = std::fs::remove_file(&stderr_path);
+    Ok(ProcessPluginInvocationOutput {
+        status: status.code().unwrap_or(1),
+        stdout,
+        stderr,
+    })
+}
+
+fn apply_shell_env_to_process_command(command: &mut Command, env: &HashMap<String, String>) {
+    for (name, value) in env {
+        if name.eq_ignore_ascii_case("PATH") {
+            command.env(name, process_path_from_shell_path_list(value));
+        } else {
+            command.env(name, value);
+        }
+    }
+}
+
+fn process_working_dir_from_shell_env(env: &HashMap<String, String>) -> Option<PathBuf> {
+    let pwd = env.get("PWD")?;
+    let cwd = PathBuf::from(shell_path_to_host_path(pwd));
+    cwd.is_dir().then_some(cwd)
+}
+
+fn process_plugin_temp_path(command: &str, stream: &str) -> PathBuf {
+    let safe_command: String = command
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "winuxsh-process-plugin-{}-{}-{}-{}",
+        safe_command,
+        stream,
+        std::process::id(),
+        nanos
+    ))
+}
+
+struct WasmPluginStoreState {
+    limits: wasmi::StoreLimits,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    args: Vec<Vec<u8>>,
+    cwd: Option<Vec<u8>>,
+    env_values: HashMap<String, Vec<u8>>,
+}
+
+enum WasmPluginStream {
+    Stdout,
+    Stderr,
+}
+
+const WASM_PLUGIN_HOST_MODULE: &str = "winuxsh:plugin/host";
+const WASM_PLUGIN_MAX_HOST_WRITE_BYTES: usize = 64 * 1024;
+const WASM_PLUGIN_MAX_ARG_BYTES: usize = 64 * 1024;
+const WASM_PLUGIN_MAX_CWD_BYTES: usize = 64 * 1024;
+const WASM_PLUGIN_MAX_ENV_NAME_BYTES: usize = 256;
+const WASM_PLUGIN_MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
+
+fn define_wasm_plugin_host_imports(
+    linker: &mut wasmi::Linker<WasmPluginStoreState>,
+) -> anyhow::Result<()> {
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "stdout_write",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32, len: i32| -> i32 {
+            wasm_plugin_host_write(caller, ptr, len, WasmPluginStream::Stdout)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "stderr_write",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32, len: i32| -> i32 {
+            wasm_plugin_host_write(caller, ptr, len, WasmPluginStream::Stderr)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "arg_count",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>| -> i32 {
+            i32::try_from(caller.data().args.len()).unwrap_or(-1)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "arg_len",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32| -> i32 {
+            wasm_plugin_arg_len(caller, index)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "arg_read",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32, ptr: i32| -> i32 {
+            wasm_plugin_arg_read(caller, index, ptr)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "cwd_len",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>| -> i32 { wasm_plugin_cwd_len(caller) },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "cwd_read",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32| -> i32 {
+            wasm_plugin_cwd_read(caller, ptr)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "env_len",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>, name_ptr: i32, name_len: i32| -> i32 {
+            wasm_plugin_env_len(caller, name_ptr, name_len)
+        },
+    )?;
+    linker.func_wrap(
+        WASM_PLUGIN_HOST_MODULE,
+        "env_read",
+        |caller: wasmi::Caller<'_, WasmPluginStoreState>,
+         name_ptr: i32,
+         name_len: i32,
+         value_ptr: i32|
+         -> i32 { wasm_plugin_env_read(caller, name_ptr, name_len, value_ptr) },
+    )?;
+    Ok(())
+}
+
+fn wasm_plugin_host_write(
+    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
+    ptr: i32,
+    len: i32,
+    stream: WasmPluginStream,
+) -> i32 {
+    let (Ok(offset), Ok(length)) = (usize::try_from(ptr), usize::try_from(len)) else {
+        return -1;
+    };
+    if length > WASM_PLUGIN_MAX_HOST_WRITE_BYTES {
+        return -1;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(wasmi::Extern::into_memory)
+    else {
+        return -1;
+    };
+    let mut bytes = vec![0_u8; length];
+    if memory.read(&caller, offset, &mut bytes).is_err() {
+        return -1;
+    }
+    let stream_buffer = match stream {
+        WasmPluginStream::Stdout => &mut caller.data_mut().stdout,
+        WasmPluginStream::Stderr => &mut caller.data_mut().stderr,
+    };
+    if stream_buffer
+        .len()
+        .checked_add(bytes.len())
+        .map_or(true, |total| total > WASM_PLUGIN_MAX_HOST_WRITE_BYTES)
+    {
+        return -1;
+    }
+    stream_buffer.extend_from_slice(&bytes);
+    0
+}
+
+fn wasm_plugin_arg_len(caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32) -> i32 {
+    let Ok(index) = usize::try_from(index) else {
+        return -1;
+    };
+    caller
+        .data()
+        .args
+        .get(index)
+        .and_then(|arg| i32::try_from(arg.len()).ok())
+        .unwrap_or(-1)
+}
+
+fn wasm_plugin_arg_read(
+    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
+    index: i32,
+    ptr: i32,
+) -> i32 {
+    let (Ok(index), Ok(offset)) = (usize::try_from(index), usize::try_from(ptr)) else {
+        return -1;
+    };
+    let Some(bytes) = caller.data().args.get(index).cloned() else {
+        return -1;
+    };
+    if bytes.len() > WASM_PLUGIN_MAX_ARG_BYTES {
+        return -1;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(wasmi::Extern::into_memory)
+    else {
+        return -1;
+    };
+    if memory.write(&mut caller, offset, &bytes).is_err() {
+        return -1;
+    }
+    i32::try_from(bytes.len()).unwrap_or(-1)
+}
+
+fn wasm_plugin_cwd_len(caller: wasmi::Caller<'_, WasmPluginStoreState>) -> i32 {
+    caller
+        .data()
+        .cwd
+        .as_ref()
+        .and_then(|cwd| i32::try_from(cwd.len()).ok())
+        .unwrap_or(-1)
+}
+
+fn wasm_plugin_cwd_read(mut caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32) -> i32 {
+    let Ok(offset) = usize::try_from(ptr) else {
+        return -1;
+    };
+    let Some(bytes) = caller.data().cwd.clone() else {
+        return -1;
+    };
+    if bytes.len() > WASM_PLUGIN_MAX_CWD_BYTES {
+        return -1;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(wasmi::Extern::into_memory)
+    else {
+        return -1;
+    };
+    if memory.write(&mut caller, offset, &bytes).is_err() {
+        return -1;
+    }
+    i32::try_from(bytes.len()).unwrap_or(-1)
+}
+
+fn wasm_plugin_env_len(
+    caller: wasmi::Caller<'_, WasmPluginStoreState>,
+    name_ptr: i32,
+    name_len: i32,
+) -> i32 {
+    let Some(name) = wasm_plugin_env_name(&caller, name_ptr, name_len) else {
+        return -1;
+    };
+    caller
+        .data()
+        .env_values
+        .get(&name)
+        .filter(|value| value.len() <= WASM_PLUGIN_MAX_ENV_VALUE_BYTES)
+        .and_then(|value| i32::try_from(value.len()).ok())
+        .unwrap_or(-1)
+}
+
+fn wasm_plugin_env_read(
+    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
+    name_ptr: i32,
+    name_len: i32,
+    value_ptr: i32,
+) -> i32 {
+    let Some(name) = wasm_plugin_env_name(&caller, name_ptr, name_len) else {
+        return -1;
+    };
+    let Ok(offset) = usize::try_from(value_ptr) else {
+        return -1;
+    };
+    let Some(bytes) = caller.data().env_values.get(&name).cloned() else {
+        return -1;
+    };
+    if bytes.len() > WASM_PLUGIN_MAX_ENV_VALUE_BYTES {
+        return -1;
+    }
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(wasmi::Extern::into_memory)
+    else {
+        return -1;
+    };
+    if memory.write(&mut caller, offset, &bytes).is_err() {
+        return -1;
+    }
+    i32::try_from(bytes.len()).unwrap_or(-1)
+}
+
+fn wasm_plugin_env_name(
+    caller: &wasmi::Caller<'_, WasmPluginStoreState>,
+    name_ptr: i32,
+    name_len: i32,
+) -> Option<String> {
+    let (Ok(offset), Ok(length)) = (usize::try_from(name_ptr), usize::try_from(name_len)) else {
+        return None;
+    };
+    if length == 0 || length > WASM_PLUGIN_MAX_ENV_NAME_BYTES {
+        return None;
+    }
+    let memory = caller
+        .get_export("memory")
+        .and_then(wasmi::Extern::into_memory)?;
+    let mut bytes = vec![0_u8; length];
+    memory.read(caller, offset, &mut bytes).ok()?;
+    let name = String::from_utf8(bytes).ok()?;
+    wasm_plugin_env_permission_name(&format!("env:read:{name}"))?;
+    Some(name)
+}
+
+fn wasm_plugin_allowed_env_values(
+    permissions: &[String],
+    executor: &Executor,
+) -> HashMap<String, Vec<u8>> {
+    let mut values = HashMap::new();
+    for permission in permissions {
+        let Some(name) = wasm_plugin_env_permission_name(permission) else {
+            continue;
+        };
+        if let Some(value) = executor.get_env(name) {
+            values.insert(name.to_string(), value.as_bytes().to_vec());
+        }
+    }
+    values
+}
+
+fn wasm_plugin_env_permission_name(permission: &str) -> Option<&str> {
+    let name = permission.strip_prefix("env:read:")?;
+    if name.is_empty()
+        || name.len() > WASM_PLUGIN_MAX_ENV_NAME_BYTES
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn flush_wasm_plugin_host_output(store: &mut wasmi::Store<WasmPluginStoreState>) {
+    let state = store.data_mut();
+    if !state.stdout.is_empty() {
+        let _ = std::io::stdout().write_all(&state.stdout);
+    }
+    if !state.stderr.is_empty() {
+        let _ = std::io::stderr().write_all(&state.stderr);
+    }
+}
+
+fn wasm_memory_limit_bytes(max_memory_pages: u32) -> usize {
+    (max_memory_pages as usize).saturating_mul(65_536)
+}
+
+fn wasm_plugin_fuel_budget(timeout_millis: u64) -> u64 {
+    timeout_millis.max(1).saturating_mul(100_000)
+}
+
+fn wasm_plugin_error_code(
+    pack_name: &str,
+    phase: &str,
+    module_path: &Path,
+    timeout_millis: u64,
+    err: wasmi::Error,
+) -> i32 {
+    if err.as_trap_code() == Some(wasmi::TrapCode::OutOfFuel) {
+        eprintln!(
+            "winuxsh: wasm plugin '{}' timed out after {}ms fuel budget while running '{}'",
+            pack_name,
+            timeout_millis,
+            module_path.display()
+        );
+        124
+    } else {
+        eprintln!(
+            "winuxsh: wasm plugin '{}' {} '{}': {}",
+            pack_name,
+            phase,
+            module_path.display(),
+            err
+        );
+        1
+    }
+}
+
 fn resolve_native_command_path(command: &str) -> Option<PathBuf> {
+    resolve_native_command_path_with_path(command, std::env::var_os("PATH")?)
+}
+
+fn resolve_native_command_path_with_env(
+    command: &str,
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    let path = env
+        .get("PATH")
+        .map(|path| process_path_from_shell_path_list(path))
+        .or_else(|| std::env::var("PATH").ok())?;
+    resolve_native_command_path_with_path(command, path)
+}
+
+fn resolve_native_command_path_with_path(
+    command: &str,
+    path: impl AsRef<std::ffi::OsStr>,
+) -> Option<PathBuf> {
     let command_path = PathBuf::from(command);
     if command_path.is_file() {
         return Some(command_path);
     }
 
-    let path = std::env::var_os("PATH")?;
     let has_extension = PathBuf::from(command)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -2533,7 +4106,7 @@ fn resolve_native_command_path(command: &str) -> Option<PathBuf> {
         &[""]
     };
 
-    for dir in std::env::split_paths(&path) {
+    for dir in std::env::split_paths(path.as_ref()) {
         for ext in extensions {
             let candidate = dir.join(format!("{}{}", command, ext));
             if candidate.is_file() {
@@ -2626,14 +4199,6 @@ fn normalize_shell_visible_path(value: &str) -> String {
     }
 }
 
-fn native_pwd_display_path(value: &str) -> String {
-    if cfg!(windows) {
-        shell_path_to_host_path(value).replace('/', "\\")
-    } else {
-        value.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2672,6 +4237,69 @@ mod tests {
         assert!(shell.executor.get_env("WINUXSH_PREEXEC_COMMAND").is_none());
         assert!(shell.executor.get_env("WINUXSH_OLDPWD").is_none());
         assert!(shell.executor.get_env("WINUXSH_PWD").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn process_plugin_hooks_run_for_interactive_lifecycle_events() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-process-hooks");
+        let bundle = temp.join("bundle");
+        let bin = temp.join("bin");
+        let home = temp.join("home");
+        let next_dir = temp.join("next");
+        let config_path = temp.join(".winshrc.toml");
+        let log_path = temp.join("process-hook.log");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&next_dir).unwrap();
+        write_process_hook_test_bundle(
+            &bundle,
+            "9.9.8",
+            &["startup", "precmd", "preexec", "chpwd"],
+            1000,
+        );
+        write_fake_process_hook(&bin, 0, false);
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["process-hook"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+        let _log_guard = EnvVarGuard::set("WINUXSH_PROCESS_HOOK_LOG", &log_path);
+        let old_path = prepend_path_for_test(&bin);
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.run_precmd_hooks();
+        shell
+            .execute_interactive_line(&format!(
+                "cd {}",
+                shell_quote(&shell_display_path(&next_dir))
+            ))
+            .unwrap();
+
+        restore_path_for_test(old_path);
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("hook=startup"), "{log}");
+        assert!(log.contains("hook=precmd"), "{log}");
+        assert!(log.contains("hook=preexec"), "{log}");
+        assert!(log.contains("hook=chpwd"), "{log}");
+        assert!(log.contains("args=--format json --hook precmd"), "{log}");
+        assert!(log.contains("last=0"), "{log}");
+        assert!(log.contains("cmd=cd "), "{log}");
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -2819,6 +4447,75 @@ export AFTER_SETOPT=ok
 
         assert_eq!(lines, vec!["winuxsh: ./missing: command not found"]);
     }
+    #[test]
+    fn command_not_found_provider_request_captures_context() {
+        let request = command_not_found_provider_request(
+            "rg",
+            &["--files".to_string()],
+            Some("C:/work/project"),
+            |command| matches!(command, "winget" | "choco"),
+        );
+        assert_eq!(request.command, "rg");
+        assert_eq!(request.args, vec!["--files".to_string()]);
+        assert_eq!(request.cwd.as_deref(), Some("C:/work/project"));
+        assert_eq!(
+            request.package_search_helpers,
+            vec!["winget".to_string(), "choco".to_string()]
+        );
+    }
+    #[test]
+    fn command_not_found_provider_suggestions_replace_native_hints() {
+        let provider_output = parse_command_not_found_provider_output(
+            b"winuxsh: provider suggests install ripgrep\n  custom search rg\n",
+        );
+        let lines = command_not_found_lines_with_provider("rg", true, |_| true, provider_output);
+        assert_eq!(lines[0], "winuxsh: rg: command not found");
+        assert_eq!(
+            lines[1..],
+            [
+                "winuxsh: provider suggests install ripgrep".to_string(),
+                "  custom search rg".to_string(),
+            ]
+        );
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("wpm install ripgrep")));
+    }
+    #[test]
+    fn command_not_found_provider_empty_output_falls_back_to_native_hints() {
+        let provider_output = parse_command_not_found_provider_output(b"\n\r\n");
+        assert_eq!(provider_output, CommandNotFoundProviderOutput::Empty);
+        let lines = command_not_found_lines_with_provider("awk", false, |_| false, provider_output);
+        assert_eq!(lines[0], "winuxsh: awk: command not found");
+        assert!(lines.iter().any(|line| line.contains("wpm install awk")));
+    }
+    #[test]
+    fn command_not_found_provider_failure_falls_back_to_native_hints() {
+        let lines = command_not_found_lines_with_provider(
+            "rg",
+            true,
+            |command| command == "winget",
+            CommandNotFoundProviderOutput::Failed("timeout".to_string()),
+        );
+        assert_eq!(lines[0], "winuxsh: rg: command not found");
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("wpm install ripgrep")));
+        assert!(lines.iter().any(|line| line.contains("winget search")));
+    }
+    #[test]
+    fn command_not_found_provider_invalid_output_falls_back_to_native_hints() {
+        let provider_output = parse_command_not_found_provider_output(&[0xff, 0xfe]);
+        assert!(matches!(
+            provider_output,
+            CommandNotFoundProviderOutput::Failed(_)
+        ));
+        let lines = command_not_found_lines_with_provider("rg", false, |_| false, provider_output);
+        assert_eq!(lines[0], "winuxsh: rg: command not found");
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("wpm install ripgrep")));
+    }
 
     #[test]
     fn alias_mirror_tracks_successful_interactive_alias_commands() {
@@ -2893,6 +4590,56 @@ export AFTER_SETOPT=ok
     }
 
     #[test]
+    fn windows_drive_only_paths_normalize_to_drive_root() {
+        if cfg!(windows) {
+            assert_eq!(windows_drive_path_to_slash_drive("C:"), Some("/c/".into()));
+            assert_eq!(
+                windows_drive_path_to_slash_drive("C:/Users/me"),
+                Some("/c/Users/me".into())
+            );
+        } else {
+            assert_eq!(windows_drive_path_to_slash_drive("C:"), None);
+        }
+    }
+
+    #[test]
+    fn bare_windows_drive_commands_rewrite_to_cd_drive_root() {
+        let tokens = tokenize("c:; echo keep");
+        let mut ast = parse(&tokens);
+        normalize_bare_windows_drive_commands(&mut ast);
+
+        if cfg!(windows) {
+            assert_eq!(ast.commands[0].words, vec!["cd", "C:/"]);
+            assert_eq!(
+                ast.commands[0].word_kinds,
+                vec![TokenKind::Word, TokenKind::Word]
+            );
+            assert_eq!(ast.commands[0].word_metadata.len(), 2);
+            assert_eq!(ast.commands[1].words, vec!["echo", "keep"]);
+        } else {
+            assert_eq!(ast.commands[0].words, vec!["c:"]);
+        }
+    }
+
+    #[test]
+    fn windows_drive_normalization_descends_into_and_or_lists() {
+        let tokens = tokenize("cd c: && c:");
+        let mut ast = parse(&tokens);
+        normalize_bare_windows_drive_commands(&mut ast);
+        normalize_cd_windows_drive_args(&mut ast);
+
+        if cfg!(windows) {
+            let and_or_list = ast.commands[0].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words, vec!["cd", "/c/"]);
+            assert_eq!(and_or_list.commands[1].words, vec!["cd", "/c/"]);
+        } else {
+            let and_or_list = ast.commands[0].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words, vec!["cd", "c:"]);
+            assert_eq!(and_or_list.commands[1].words, vec!["c:"]);
+        }
+    }
+
+    #[test]
     fn process_path_from_shell_path_list_converts_msys_drive_entries() {
         if cfg!(windows) {
             assert_eq!(
@@ -2956,16 +4703,42 @@ export AFTER_SETOPT=ok
 
     #[test]
     fn winuxcmd_slash_drive_args_are_translated_for_path_commands() {
-        let tokens = tokenize("ls /c/Users; echo /c/Users");
+        let tokens = tokenize(
+            "ls /c/Users; mktemp /c/Users/test.XXXXXX.tmp; echo /c/Users; RealPath.Exe /c/Users; sha256sum /c/Users/file; ln /c/Users/a /c/Users/b; printf /c/Users; mkdir -p /c/Users/tmp && mktemp /c/Users/tmp/test.XXXXXX.tmp",
+        );
         let mut ast = parse(&tokens);
         normalize_winuxcmd_slash_drive_args(&mut ast);
 
         if cfg!(windows) {
             assert_eq!(ast.commands[0].words[1], "C:/Users");
-            assert_eq!(ast.commands[1].words[1], "/c/Users");
+            assert_eq!(ast.commands[1].words[1], "C:/Users/test.XXXXXX.tmp");
+            assert_eq!(ast.commands[2].words[1], "/c/Users");
+            assert_eq!(ast.commands[3].words[1], "C:/Users");
+            assert_eq!(ast.commands[4].words[1], "C:/Users/file");
+            assert_eq!(ast.commands[5].words[1], "C:/Users/a");
+            assert_eq!(ast.commands[5].words[2], "C:/Users/b");
+            assert_eq!(ast.commands[6].words[1], "/c/Users");
+            let and_or_list = ast.commands[7].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words[2], "C:/Users/tmp");
+            assert_eq!(
+                and_or_list.commands[1].words[1],
+                "C:/Users/tmp/test.XXXXXX.tmp"
+            );
         } else {
             assert_eq!(ast.commands[0].words[1], "/c/Users");
-            assert_eq!(ast.commands[1].words[1], "/c/Users");
+            assert_eq!(ast.commands[1].words[1], "/c/Users/test.XXXXXX.tmp");
+            assert_eq!(ast.commands[2].words[1], "/c/Users");
+            assert_eq!(ast.commands[3].words[1], "/c/Users");
+            assert_eq!(ast.commands[4].words[1], "/c/Users/file");
+            assert_eq!(ast.commands[5].words[1], "/c/Users/a");
+            assert_eq!(ast.commands[5].words[2], "/c/Users/b");
+            assert_eq!(ast.commands[6].words[1], "/c/Users");
+            let and_or_list = ast.commands[7].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words[2], "/c/Users/tmp");
+            assert_eq!(
+                and_or_list.commands[1].words[1],
+                "/c/Users/tmp/test.XXXXXX.tmp"
+            );
         }
     }
 
@@ -3062,6 +4835,135 @@ export AFTER_SETOPT=ok
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
         assert_eq!(pipeline.stages[1].words, vec!["grep.exe", "-E", "a.+c"]);
+    }
+
+    #[test]
+    fn native_rm_is_not_rewritten_to_winuxcmd() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("rm -rf -- '-p'");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands[0].words, vec!["rm", "-rf", "--", "-p"]);
+        assert_eq!(
+            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
+            Some("rm")
+        );
+    }
+
+    #[test]
+    fn native_file_and_process_helpers_are_owned_by_winuxsh() {
+        let mut tokens = tokenize(
+            "cat file; chmod +w file; cp src dst; kill -l; mkdir -p dir; mkfifo pipe; rm -rf dir; rmdir dir; touch file",
+        );
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+
+        let names: Vec<_> = ast
+            .commands
+            .iter()
+            .map(|command| winuxsh_builtin_words(command).map(|(name, _)| name))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                Some("cat"),
+                Some("chmod"),
+                Some("cp"),
+                Some("kill"),
+                Some("mkdir"),
+                Some("mkfifo"),
+                Some("rm"),
+                Some("rmdir"),
+                Some("touch"),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_external_cp_is_owned_by_winuxsh_native_hook() {
+        let env = HashMap::from([("PWD".to_string(), ".".to_string())]);
+        let output = execute_winuxsh_host_external_command(
+            &["cp".to_string(), "--version".to_string()],
+            &env,
+            &PluginRuntimeState::default(),
+        )
+        .expect("cp should be handled by winuxsh host hook");
+        assert_eq!(output.status, 0);
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("cp (winuxsh native) "));
+    }
+
+    #[test]
+    fn internal_file_helpers_stay_internal() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("cat file; chmod +x script; cp -R src dst; mkdir -p dir; mkfifo pipe; rm -rf dir; rmdir dir; touch -t 202001010000 file");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands[0].words[0], "cat");
+        assert_eq!(ast.commands[1].words[0], "chmod");
+        assert_eq!(ast.commands[2].words[0], "cp");
+        assert_eq!(ast.commands[3].words[0], "mkdir");
+        assert_eq!(ast.commands[4].words[0], "mkfifo");
+        assert_eq!(ast.commands[5].words[0], "rm");
+        assert_eq!(ast.commands[6].words[0], "rmdir");
+        assert_eq!(ast.commands[7].words[0], "touch");
+    }
+
+    #[test]
+    fn builtin_prefix_keeps_native_rm() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let mut tokens = tokenize("builtin rm -- '-p'");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands[0].words, vec!["builtin", "rm", "--", "-p"]);
+        assert_eq!(
+            winuxsh_builtin_words(&ast.commands[0]).map(|(name, _)| name),
+            Some("rm")
+        );
+    }
+
+    #[test]
+    fn native_rm_removes_dash_prefixed_file_after_separator() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-native-rm-dash-integration");
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        std::fs::write(temp.join("-p"), "payload").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+
+        assert_eq!(shell.execute_line("rm -rf -- '-p'").unwrap(), 0);
+        assert!(!temp.join("-p").exists());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn native_rm_recursively_removes_directory() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-native-rm-recursive-integration");
+        let target = temp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::env::set_current_dir(&temp).unwrap();
+        std::fs::write(target.join("payload.txt"), "payload").unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+
+        assert_eq!(shell.execute_line("rm -r target").unwrap(), 0);
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -3504,6 +5406,541 @@ BACKTICK_VALUE=`whoami`
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    #[test]
+    fn default_official_git_plugin_installs_builtin_alias_pack() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-default-plugin-git");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(&config_path, "[winuxcmd]\nenabled = false\n").unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert_eq!(
+            shell.aliases.get("gst").map(String::as_str),
+            Some("git status")
+        );
+        assert!(shell.plugins.is_enabled("git"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn user_git_aliases_override_official_builtin_git_pack() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-plugin-git-alias-precedence");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[aliases]
+gst = "echo user-git-status"
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["git"]
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert_eq!(
+            shell.aliases.get("gst").map(String::as_str),
+            Some("echo user-git-status")
+        );
+        assert_eq!(
+            shell.aliases.get("gco").map(String::as_str),
+            Some("git checkout")
+        );
+        assert!(shell.plugins.is_enabled("git"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_plugin_git_disable_blocks_builtin_alias_pack() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-disable-plugin-git");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.git]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(!shell.aliases.contains_key("gst"));
+        assert!(!shell.plugins.is_enabled("git"));
+        assert!(shell.plugins.has_decision("git"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn canonical_plugins_enable_docker_builtin_alias_pack() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-plugin-docker");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.docker]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert_eq!(
+            shell.aliases.get("dps").map(String::as_str),
+            Some("docker ps")
+        );
+        assert!(shell.plugins.is_enabled("docker"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_plugin_docker_disable_blocks_builtin_alias_pack() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-disable-plugin-docker");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["docker"]
+
+[plugins.docker]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(!shell.aliases.contains_key("dps"));
+        assert!(!shell.plugins.is_enabled("docker"));
+        assert!(shell.plugins.has_decision("docker"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn user_aliases_override_official_builtin_alias_packs() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-plugin-alias-precedence");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[aliases]
+dps = "echo user-docker"
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["docker"]
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert_eq!(
+            shell.aliases.get("dps").map(String::as_str),
+            Some("echo user-docker")
+        );
+        assert!(shell.plugins.is_enabled("docker"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_keybindings_disable_blocks_legacy_native_widgets() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-disable-keybindings");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.keybindings]
+enabled = false
+
+[zsh.native_widgets]
+enabled = true
+presets = ["history_substring_search"]
+import_bindkeys = true
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(!shell.native_widgets.enabled);
+        assert!(shell.native_widgets.presets.is_empty());
+        assert!(!shell.plugins.is_enabled("keybindings"));
+        assert!(shell.plugins.has_decision("keybindings"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_prompts_disable_blocks_segment_prompt_preset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-disable-prompts");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[shell]
+prompt_style = "segments"
+segment_preset = "classic"
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.prompts]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(matches!(shell.prompt, PromptBackend::Template(_)));
+        assert!(!shell.plugins.is_enabled("prompts"));
+        assert!(shell.plugins.has_decision("prompts"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn installed_bundle_prompt_preset_drives_segment_prompt() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-bundle-prompt-preset");
+        let bundle = temp.join("bundle");
+        std::fs::create_dir_all(bundle.join("packs").join("prompts")).unwrap();
+        std::fs::create_dir_all(bundle.join("prompts")).unwrap();
+        std::fs::write(
+            bundle.join("bundle.toml"),
+            r#"name = "oh-my-winuxsh"
+version = "9.9.9"
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = ["prompts"]
+available = ["prompts"]
+[layout]
+packs_dir = "packs"
+prompts_dir = "prompts"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("packs").join("prompts").join("plugin.toml"),
+            r#"name = "prompts"
+bundle = "oh-my-winuxsh"
+version = "9.9.9"
+kind = "builtin"
+api = "winuxsh:plugin@0.1.0"
+category = "ux"
+summary = "Installed prompt presets"
+default = true
+permissions = []
+required_binaries = []
+[exports]
+aliases = false
+completions = []
+prompt_segments = ["cwd"]
+hooks = []
+commands = []
+keybindings = []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            bundle.join("prompts").join("segments.toml"),
+            r#"[segments.cwd]
+id = "dir"
+description = "test cwd segment"
+[segments.prompt_char]
+id = "prompt_char"
+description = "test prompt char segment"
+[presets.classic]
+left = ["cwd", "prompt_char"]
+right = []
+separator = "|"
+"#,
+        )
+        .unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[shell]
+prompt_style = "segments"
+segment_preset = "classic"
+prompt_symbol = "$"
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _path_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let shell = Shell::new().unwrap();
+        let rendered = match &shell.prompt {
+            PromptBackend::Segments(prompt) => prompt.inner.render_left(),
+            PromptBackend::Template(_) => panic!("expected segment prompt"),
+        };
+
+        assert!(rendered.contains('|'), "{rendered:?}");
+        assert!(shell.plugins.is_enabled("prompts"));
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn canonical_plugins_enable_zoxide_native_shim() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-plugin-zoxide");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["zoxide"]
+
+[plugins.zoxide]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(shell.native_plugin_enabled("zoxide"));
+        assert!(shell.plugins.is_enabled("zoxide"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_plugin_disable_overrides_legacy_zoxide_native_preset() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-plugin-zoxide-disable-legacy");
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.zoxide]
+enabled = false
+
+[zsh.native_plugins]
+enabled = true
+presets = ["zoxide"]
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+
+        let shell = Shell::new().unwrap();
+
+        assert!(!shell.native_plugin_enabled("zoxide"));
+        assert!(!shell.plugins.is_enabled("zoxide"));
+        assert!(shell.plugins.has_decision("zoxide"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    fn write_process_hook_test_bundle(
+        path: &std::path::Path,
+        version: &str,
+        hooks: &[&str],
+        timeout_millis: u64,
+    ) {
+        let hooks = hooks
+            .iter()
+            .map(|hook| format!("{hook:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::create_dir_all(path.join("packs").join("process-hook")).unwrap();
+        std::fs::write(
+            path.join("bundle.toml"),
+            format!(
+                r#"name = "oh-my-winuxsh"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = []
+available = ["process-hook"]
+[layout]
+packs_dir = "packs"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("packs").join("process-hook").join("plugin.toml"),
+            format!(
+                r#"name = "process-hook"
+bundle = "oh-my-winuxsh"
+version = {version:?}
+kind = "process"
+api = "winuxsh:plugin@0.1.0"
+category = "workflow"
+summary = "Process plugin lifecycle hook fixture."
+default = false
+permissions = ["cwd:read", "process:run:winuxsh-process-hook"]
+required_binaries = ["winuxsh-process-hook"]
+[exports]
+aliases = false
+completions = []
+prompt_segments = []
+hooks = [{hooks}]
+commands = []
+keybindings = []
+[process]
+protocol = "winuxsh:process-plugin@0.1.0"
+command = "winuxsh-process-hook"
+args = ["--format", "json"]
+timeout_millis = {timeout_millis}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_fake_process_hook(bin: &std::path::Path, exit_code: i32, sleep_before_exit: bool) {
+        std::fs::create_dir_all(bin).unwrap();
+        if cfg!(windows) {
+            let path = bin.join("winuxsh-process-hook.cmd");
+            let sleep = if sleep_before_exit {
+                "ping -n 3 127.0.0.1 >NUL\n"
+            } else {
+                ""
+            };
+            std::fs::write(
+                path,
+                format!(
+                    "@if not \"%WINUXSH_PROCESS_HOOK_LOG%\"==\"\" echo hook=%WINUXSH_PROCESS_PLUGIN_HOOK%;pack=%WINUXSH_PROCESS_PLUGIN_PACK%;args=%*;last=%WINUXSH_LAST_EXIT_CODE%;cmd=%WINUXSH_PREEXEC_COMMAND%;old=%WINUXSH_OLDPWD%;pwd=%WINUXSH_PWD%>>\"%WINUXSH_PROCESS_HOOK_LOG%\"\n@{}@exit /b {}\n",
+                    sleep, exit_code
+                ),
+            )
+            .unwrap();
+        } else {
+            let path = bin.join("winuxsh-process-hook");
+            let sleep = if sleep_before_exit { "sleep 2\n" } else { "" };
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nif [ -n \"$WINUXSH_PROCESS_HOOK_LOG\" ]; then echo \"hook=$WINUXSH_PROCESS_PLUGIN_HOOK;pack=$WINUXSH_PROCESS_PLUGIN_PACK;args=$*;last=$WINUXSH_LAST_EXIT_CODE;cmd=$WINUXSH_PREEXEC_COMMAND;old=$WINUXSH_OLDPWD;pwd=$WINUXSH_PWD\" >> \"$WINUXSH_PROCESS_HOOK_LOG\"; fi\n{}exit {}\n",
+                    sleep, exit_code
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&path, permissions).unwrap();
+            }
+        }
+    }
+
     fn test_shell(hooks: HookConfig) -> Shell {
         let mut shell = Shell {
             executor: Executor::new(),
@@ -3519,6 +5956,7 @@ BACKTICK_VALUE=`whoami`
             syntax_highlighting: SyntaxHighlightConfig::default(),
             native_widgets: NativeWidgetConfig::default(),
             native_widget_bindings: Vec::new(),
+            plugins: PluginRuntimeState::default(),
             native_plugins: NativePluginConfig::default(),
             hooks,
             aliases: HashMap::new(),
@@ -3566,6 +6004,28 @@ BACKTICK_VALUE=`whoami`
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
         }
     }
 

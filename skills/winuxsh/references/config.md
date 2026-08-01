@@ -1,11 +1,19 @@
-# Minimal Winuxsh Configuration
+# Winuxsh Configuration
 
-Use this reference only when the user asks to configure Winuxsh. Keep edits
-small and reversible.
+Use this reference when configuring Winuxsh, isolating tests, or explaining the
+two config surfaces. Keep user-facing edits small, reversible, and native to
+Winuxsh.
 
-Winuxsh uses `~/.winshrc.toml`.
+Winuxsh uses two user files:
 
-## Small Example
+- `~/.winshrc.toml`: structured control plane for prompt, editor, history,
+  completion, WinuxCmd, hooks, plugins, bundles, package/update metadata, and
+  managed migration state.
+- `~/.winshrc`: interactive REPL shell script for `export`, `alias`, functions,
+  and shell code. It is sourced only for the interactive REPL, not for
+  `winuxsh -c`, script files, stdin script execution, agent tests, or CI.
+
+## Minimal TOML
 
 ```toml
 [shell]
@@ -16,12 +24,13 @@ right_prompt_format = "{time} "
 [editor]
 edit_mode = "emacs"
 
-[aliases]
-ll = "ls -la"
-
 [completions]
 matching = "prefix"
 case_sensitive = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
 ```
 
 Common changes:
@@ -29,7 +38,8 @@ Common changes:
 - Set `edit_mode = "vi"` for vi-style editing.
 - Set `matching = "substring"` for looser completions.
 - Set `right_prompt_format = ""` to disable the right prompt.
-- Add user aliases under `[aliases]`.
+- Put user aliases and functions in `~/.winshrc` unless the feature has a
+  structured TOML field.
 
 ## WinuxCmd Override
 
@@ -40,22 +50,51 @@ Only add this when auto-discovery does not find the intended WinuxCmd:
 path = "D:/tools/winuxcmd/winuxcmd.exe"
 ```
 
-## Zsh Migration
+If the user intentionally wants another utility provider to win through PATH:
 
-Use report/plan/apply/status/rollback flow. Do not source arbitrary zsh files.
-
-```powershell
-winuxsh --zsh-compat-report
-winuxsh --zsh-compat-import-plan
-winuxsh --zsh-compat-import-apply
-winuxsh --zsh-compat-import-status
-winuxsh --zsh-compat-import-rollback-plan
+```toml
+[winuxcmd]
+enabled = false
 ```
 
-For built-in native zsh-style features:
+Do not disable WinuxCmd while debugging a release-style bundle whose command
+links are expected to provide coreutils.
 
-```powershell
-winuxsh --zsh-native-packs
-winuxsh --zsh-profile-plan zsh-lite
-winuxsh --zsh-profile-plan agent
+## Interactive Shell Code
+
+`~/.winshrc` uses Bash syntax:
+
+```bash
+export EDITOR=vim
+alias gs='git status'
+mkcd() { mkdir -p "$1" && cd "$1"; }
 ```
+
+Do not rely on this file for `winuxsh -c` or CI. If command-mode behavior
+depends on an env var, pass it explicitly in the command or test environment.
+
+## Test Isolation
+
+Use `WINUXSH_CONFIG` to point probes at a temporary `.winshrc.toml`:
+
+```bash
+WINUXSH_CONFIG=C:/Temp/winuxsh-test/.winshrc.toml winuxsh -c 'printf "%s\n" "$PWD"'
+```
+
+Plugin and bundle tests may also use:
+
+- `WINUXSH_PLUGIN_BUNDLE_PATH`
+- `WINUXSH_PLUGIN_BUNDLE_ROOT`
+- `WINUXSH_APP_BUNDLE_PATH`
+- `WINUXSH_PLUGIN_LOCK`
+- `WINUXSH_SKIP_WINUXCMD_ACTIVATION`
+
+Treat these as developer/test overrides, not normal user setup.
+
+## Legacy Importer Boundary
+
+Legacy shell importers are for migration/onboarding only. They are not the
+current configuration model, not the plugin system, and not runtime startup.
+Do not source arbitrary legacy startup files, plugin scripts, editor widgets,
+or completion internals. Translate safe intent into native TOML, `~/.winshrc`,
+or Winuxsh plugin suggestions.

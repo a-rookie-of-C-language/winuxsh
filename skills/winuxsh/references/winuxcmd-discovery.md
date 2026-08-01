@@ -1,9 +1,9 @@
-# Discovering WinuxCmd Commands With Progressive Disclosure
+# Discovering WinuxCmd And Utilities
 
-Use this reference when the task needs Unix tools inside Winuxsh. Discover the
-installed WinuxCmd surface instead of assuming a fixed command table. Prefer
-WPM when available because it is WinuxCmd's own package/link manager and can
-quickly expose the active executable set.
+Use this reference when Winuxsh work needs Unix-style tools. Discover the
+active command surface instead of assuming a fixed `/usr/bin` inventory.
+Winuxsh integrates WinuxCmd by putting the directory containing `winuxcmd.exe`
+and its command links on PATH; rubash then resolves external commands normally.
 
 ## Locate WinuxCmd
 
@@ -13,104 +13,124 @@ cmd_dir=$(dirname "$(command -v winuxcmd.exe)")
 printf "%s\n" "$cmd_dir"
 ```
 
-If `winuxcmd.exe` is missing, Winuxsh may still run shell builtins, but Unix
-tools such as `ls`, `grep`, `find`, `cp`, `mv`, and `rm` may not be available.
-Ask the user to install or expose WinuxCmd rather than substituting PowerShell
-aliases.
+Winuxsh's search order for WinuxCmd is:
+
+1. `WINUXCMD_PATH`, pointing to `winuxcmd.exe` or its directory.
+2. `winuxcmd.exe` beside the active `winuxsh.exe`.
+3. `winuxcmd/winuxcmd.exe` beside the active `winuxsh.exe`.
+4. `utils/winuxcmd/winuxcmd.exe` beside the active `winuxsh.exe`.
+5. `winuxcmd.exe` found through Windows PATH.
+
+`~/.winshrc.toml` can also set `[winuxcmd].path`; read `config.md` before
+changing user config.
+
+## Identify The Active Utility
+
+```bash
+command -v ls
+command -v cat
+command -v grep
+command -v find
+ls --version 2>/dev/null || ls --help | head -20
+grep --version 2>/dev/null || grep --help | head -20
+```
+
+Users may have WinuxCmd, GNU coreutils, uutils, BusyBox, Git, Node-installed
+CLIs, or other providers on PATH. Windows `find.exe` is especially
+collision-prone; inspect `command -v find` before assuming GNU-style `find`
+flags.
 
 ## Probe WPM First
 
-Modern WinuxCmd builds include WPM as an internal command and often expose a
-`wpm.exe` hardlink after activation.
+Modern WinuxCmd exposes WPM either as `wpm` or through `winuxcmd.exe wpm`:
 
 ```bash
-winuxcmd.exe wpm version
+wpm --version || winuxcmd.exe wpm version
 winuxcmd.exe wpm links list --root "$cmd_dir"
 winuxcmd.exe wpm index status --root "$cmd_dir"
 winuxcmd.exe wpm list --root "$cmd_dir"
 ```
 
-Interpretation:
+Use WPM when tools are missing or stale:
 
-- `wpm links list` discloses the command-link surface WinuxCmd can expose.
-- `wpm index status` discloses the local/bundled package index and package
-  count without fetching network data.
-- `wpm list` discloses indexed packages such as `winuxcmd`, `jq`, `ncat`, `7zip`,
-  `zstd`, or `yq` when present in the installed index.
-- If `winuxcmd.exe wpm ...` reports `command not found: wpm`, the installed
-  WinuxCmd is older; fall back to directory inspection.
+```bash
+winuxcmd.exe wpm search jq --root "$cmd_dir"
+winuxcmd.exe wpm info jq --root "$cmd_dir"
+winuxcmd.exe wpm install jq --root "$cmd_dir"
+winuxcmd.exe wpm update winuxcmd --root "$cmd_dir"
+```
 
-Do not assume `wpm.exe` exists. Prefer `winuxcmd.exe wpm ...` because it works
-before command links are rebuilt.
+`wpm update winuxcmd` updates WinuxCmd packages. `winuxsh --self-update`
+updates the shell itself. Keep these mechanisms distinct.
 
-## Rebuild Links When Appropriate
+Some builds print the same generic help for `winuxcmd.exe wpm --help` and
+subcommand help. Prefer direct, side-effect-free probes such as `version`,
+`index status`, `list`, `search`, `info`, and `links list` before assuming a
+subcommand is missing.
 
-If `wpm` exists but common commands such as `ls.exe` or `grep.exe` are missing,
-rebuild links in the selected WinuxCmd root:
+## Rebuild Command Links
+
+If WPM exists but common command links such as `ls.exe`, `grep.exe`, or
+`wpm.exe` are missing, rebuild links in the selected WinuxCmd root:
 
 ```bash
 winuxcmd.exe wpm links rebuild --root "$cmd_dir" --force
 ```
 
-Use this only for the WinuxCmd directory the user or bundle actually uses. Do
-not rebuild links in an unrelated winget or development install.
+Run this only for the WinuxCmd directory the user or release bundle actually
+uses. Do not modify an unrelated development or winget install. In read-only or
+no-edit validation, do not rebuild; report the missing links and provide the
+rebuild command as the next action.
 
-## Fallback: List Available Executables
+## Activation Failure Diagnostics
 
-List command shims beside `winuxcmd.exe`:
+If startup prints `winuxcmd activation failed`, keep diagnostics read-only until
+the user permits repair:
 
 ```bash
+command -v winuxcmd.exe || true
 cmd_dir=$(dirname "$(command -v winuxcmd.exe)")
-ls "$cmd_dir" | sed -n 's/\.exe$//p' | sort
+printf "%s\n" "$cmd_dir"
+ls "$cmd_dir" | head -40
+winuxcmd.exe wpm version
+winuxcmd.exe wpm links list --root "$cmd_dir"
+winuxcmd.exe wpm index status --root "$cmd_dir"
+winuxcmd.exe wpm list --root "$cmd_dir" | head -80
+for c in ls grep cat find wpm; do printf "%s=" "$c"; command -v "$c" || true; done
 ```
 
-Also inspect WinuxCmd's own command index:
+If `winuxcmd.exe` is present but command links are missing, the likely next
+step is `winuxcmd.exe wpm links rebuild --root "$cmd_dir" --force`. If the
+selected root is a repo bundle or release artifact, say so explicitly before
+changing it.
+
+## Get Help
 
 ```bash
-winuxcmd.exe --help
-winuxcmd.exe help
-```
-
-Do not assume `winuxcmd.exe --list` exists.
-
-## Get Command Help
-
-Use one of these forms:
-
-```bash
+winuxcmd.exe wpm --help
 winuxcmd.exe grep --help
-man grep
 grep --help
+man grep
 ```
 
-When outside Winuxsh, wrap the lookup through Winuxsh:
+From Codex/pwsh, keep help probes inside Winuxsh:
 
 ```powershell
-winuxsh -c 'winuxcmd.exe grep --help | head -40'
-winuxsh -c 'man ls | head -60'
-```
-
-For WPM itself:
-
-```bash
-winuxsh -c 'winuxcmd.exe wpm | head -40'
-winuxsh -c 'winuxcmd.exe wpm info winuxcmd --root "$(dirname "$(command -v winuxcmd.exe)")"'
+winuxsh -c 'winuxcmd.exe wpm --help | head -80'
+winuxsh -c 'grep --help | head -40'
 ```
 
 ## Avoid Host-Shell Alias Collisions
 
-PowerShell aliases can shadow names such as `ls`, `cat`, and `man`. To inspect
-WinuxCmd behavior, run inside Winuxsh or call explicit `.exe` names:
+Pwsh aliases can shadow names such as `ls`, `cat`, and `man`. To inspect
+Winuxsh behavior, run the lookup inside Winuxsh:
 
 ```powershell
-winuxsh -c 'ls -la'
-winuxsh -c 'man grep'
+winuxsh -c 'command -v ls; ls -la'
+winuxsh -c 'command -v cat; cat --help | head -20'
 ```
 
-Inside Winuxsh, prefer normal Unix command names after verifying they resolve:
-
-```bash
-command -v ls
-command -v grep
-command -v find
-```
+If a user intentionally disables WinuxCmd and relies on another provider,
+respect that setup for user tasks. For this repository's release-style tests,
+missing `ls`, `grep`, `tr`, or similar commands usually means WinuxCmd command
+links need repair.

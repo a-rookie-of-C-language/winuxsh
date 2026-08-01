@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::completion::{CompletionBehavior, CompletionMatchMode};
+use crate::plugins::OFFICIAL_BUNDLE_NAME;
 use crate::prompt::PromptIndicators;
 
 /// Shell configuration, loaded from `~/.winshrc.toml`.
@@ -58,7 +59,10 @@ impl EditorMode {
             "emacs" => Self::Emacs,
             "vi" => Self::Vi,
             other => {
-                log::warn!("Unknown editor edit_mode '{}', falling back to emacs", other);
+                log::warn!(
+                    "Unknown editor edit_mode '{}', falling back to emacs",
+                    other
+                );
                 Self::Emacs
             }
         }
@@ -124,10 +128,7 @@ impl ZshCompatLevel {
             "warn" => Self::Warn,
             "experimental" => Self::Experimental,
             other => {
-                log::warn!(
-                    "Unknown zsh compat_level '{}', falling back to safe",
-                    other
-                );
+                log::warn!("Unknown zsh compat_level '{}', falling back to safe", other);
                 Self::Safe
             }
         }
@@ -242,6 +243,31 @@ impl Default for NativePluginConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginConfig {
+    pub enabled: bool,
+    pub bundles: Vec<String>,
+    pub load: Vec<String>,
+    pub packs: HashMap<String, PluginPackConfig>,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bundles: vec![OFFICIAL_BUNDLE_NAME.to_string()],
+            load: Vec::new(),
+            packs: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginPackConfig {
+    pub enabled: Option<bool>,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutosuggestConfig {
     pub enabled: bool,
     pub strategies: Vec<String>,
@@ -303,7 +329,11 @@ fn parse_autosuggest_strategy_value(value: &str) -> Vec<String> {
         .split(|ch: char| ch.is_whitespace() || ch == ',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(|part| part.trim_matches('"').trim_matches('\'').to_ascii_lowercase())
+        .map(|part| {
+            part.trim_matches('"')
+                .trim_matches('\'')
+                .to_ascii_lowercase()
+        })
         .collect()
 }
 
@@ -365,7 +395,11 @@ fn parse_zsh_arrayish_value(value: &str) -> Vec<String> {
         .split(|ch: char| ch.is_whitespace() || ch == ',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(|part| part.trim_matches('"').trim_matches('\'').to_ascii_lowercase())
+        .map(|part| {
+            part.trim_matches('"')
+                .trim_matches('\'')
+                .to_ascii_lowercase()
+        })
         .collect()
 }
 
@@ -396,28 +430,29 @@ struct WinshrcToml {
     completions: Option<CompletionsToml>,
     winuxcmd: Option<WinuxCmdToml>,
     hooks: Option<HooksToml>,
+    plugins: Option<PluginsToml>,
     zsh: Option<ZshToml>,
     git_prompt: Option<GitPromptToml>,
 }
 
 #[derive(Debug, Deserialize)]
- struct ShellToml {
-     prompt_format: Option<String>,
-     prompt_symbol: Option<String>,
-     right_prompt_format: Option<String>,
-     git_prompt_format: Option<String>,
-     prompt_indicator: Option<String>,
-     emacs_indicator: Option<String>,
-     vi_insert_indicator: Option<String>,
-     vi_normal_indicator: Option<String>,
-     multiline_indicator: Option<String>,
-     history_search_indicator: Option<String>,
-     history_search_fail_indicator: Option<String>,
+struct ShellToml {
+    prompt_format: Option<String>,
+    prompt_symbol: Option<String>,
+    right_prompt_format: Option<String>,
+    git_prompt_format: Option<String>,
+    prompt_indicator: Option<String>,
+    emacs_indicator: Option<String>,
+    vi_insert_indicator: Option<String>,
+    vi_normal_indicator: Option<String>,
+    multiline_indicator: Option<String>,
+    history_search_indicator: Option<String>,
+    history_search_fail_indicator: Option<String>,
     prompt_style: Option<String>,
     segment_preset: Option<String>,
     left_prompt_elements: Option<Vec<String>>,
     right_prompt_elements: Option<Vec<String>>,
- }
+}
 
 #[derive(Debug, Deserialize)]
 struct ThemeToml {
@@ -526,6 +561,21 @@ struct NativePluginToml {
     presets: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PluginsToml {
+    enabled: Option<bool>,
+    bundles: Option<Vec<String>>,
+    load: Option<Vec<String>>,
+    #[serde(flatten)]
+    packs: HashMap<String, PluginPackToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginPackToml {
+    enabled: Option<bool>,
+    permissions: Option<Vec<String>>,
+}
+
 /// User-configurable git prompt symbols.
 ///
 /// Each field is a format string where `{n}` is replaced by the count.
@@ -593,6 +643,7 @@ pub struct FullConfig {
     pub winuxcmd_enabled: bool,
     pub winuxcmd_path: Option<PathBuf>,
     pub hooks: HookConfig,
+    pub plugins: PluginConfig,
     pub zsh: ZshConfig,
     pub git_prompt: GitPromptConfig,
 }
@@ -613,8 +664,9 @@ impl Default for FullConfig {
             completion_behavior: CompletionBehavior::default(),
             winuxcmd_enabled: true,
             winuxcmd_path: None,
-            hooks: HookConfig::default(), 
-            zsh: ZshConfig::default(), 
+            hooks: HookConfig::default(),
+            plugins: PluginConfig::default(),
+            zsh: ZshConfig::default(),
             git_prompt: GitPromptConfig::default(),
         }
     }
@@ -667,22 +719,26 @@ pub fn default_config_path() -> PathBuf {
 
 fn build_config(parsed: WinshrcToml) -> FullConfig {
     let zsh = parsed.zsh.map(build_zsh_config).unwrap_or_default();
+    let plugins = parsed.plugins.map(build_plugin_config).unwrap_or_default();
     let shell = parsed.shell;
     let completions = parsed.completions;
     let shell_config = ShellConfig {
         prompt_format: shell.as_ref().and_then(|s| s.prompt_format.clone()),
         right_prompt_format: shell.as_ref().and_then(|s| s.right_prompt_format.clone()),
-        prompt_symbol: shell.as_ref().and_then(|s| s.prompt_symbol.clone()).unwrap_or_else(|| "%".to_string()),
+        prompt_symbol: shell
+            .as_ref()
+            .and_then(|s| s.prompt_symbol.clone())
+            .unwrap_or_else(|| "%".to_string()),
         git_prompt_format: shell.as_ref().and_then(|s| s.git_prompt_format.clone()),
-     prompt_indicators: shell
-         .as_ref()
-         .map(build_prompt_indicators)
-         .unwrap_or_default(),
+        prompt_indicators: shell
+            .as_ref()
+            .map(build_prompt_indicators)
+            .unwrap_or_default(),
         prompt_style: shell.as_ref().and_then(|s| s.prompt_style.clone()),
         segment_preset: shell.as_ref().and_then(|s| s.segment_preset.clone()),
         left_prompt_elements: shell.as_ref().and_then(|s| s.left_prompt_elements.clone()),
         right_prompt_elements: shell.as_ref().and_then(|s| s.right_prompt_elements.clone()),
- };
+    };
 
     FullConfig {
         shell: shell_config,
@@ -718,6 +774,7 @@ fn build_config(parsed: WinshrcToml) -> FullConfig {
             .unwrap_or(true),
         winuxcmd_path: parsed.winuxcmd.and_then(|w| w.path).map(PathBuf::from),
         hooks: parsed.hooks.map(build_hook_config).unwrap_or_default(),
+        plugins,
         zsh,
         git_prompt: build_git_prompt_config(parsed.git_prompt),
     }
@@ -725,7 +782,9 @@ fn build_config(parsed: WinshrcToml) -> FullConfig {
 
 fn build_git_prompt_config(parsed: Option<GitPromptToml>) -> GitPromptConfig {
     let defaults = GitPromptConfig::default();
-    let Some(p) = parsed else { return defaults; };
+    let Some(p) = parsed else {
+        return defaults;
+    };
     GitPromptConfig {
         staged: p.staged.unwrap_or(defaults.staged),
         unstaged: p.unstaged.unwrap_or(defaults.unstaged),
@@ -806,7 +865,10 @@ fn expand_tilde_path(value: &str) -> PathBuf {
     if value == "~" {
         return home();
     }
-    if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
         return home().join(rest);
     }
     PathBuf::from(value)
@@ -850,6 +912,27 @@ fn build_hook_config(parsed: HooksToml) -> HookConfig {
         precmd: parsed.precmd.unwrap_or_default(),
         preexec: parsed.preexec.unwrap_or_default(),
         chpwd: parsed.chpwd.unwrap_or_default(),
+    }
+}
+
+fn build_plugin_config(parsed: PluginsToml) -> PluginConfig {
+    let defaults = PluginConfig::default();
+    PluginConfig {
+        enabled: parsed.enabled.unwrap_or(defaults.enabled),
+        bundles: parsed.bundles.unwrap_or(defaults.bundles),
+        load: parsed.load.unwrap_or_default(),
+        packs: parsed
+            .packs
+            .into_iter()
+            .map(|(name, pack)| (name, build_plugin_pack_config(pack)))
+            .collect(),
+    }
+}
+
+fn build_plugin_pack_config(parsed: PluginPackToml) -> PluginPackConfig {
+    PluginPackConfig {
+        enabled: parsed.enabled,
+        permissions: parsed.permissions.unwrap_or_default(),
     }
 }
 
@@ -1158,7 +1241,10 @@ history_search_indicator = "history:{term} "
         assert_eq!(config.shell.prompt_indicators.emacs, "$ ");
         assert_eq!(config.shell.prompt_indicators.vi_insert, "$ ");
         assert_eq!(config.shell.prompt_indicators.vi_normal, "$ ");
-        assert_eq!(config.shell.prompt_indicators.history_search, "history:{term} ");
+        assert_eq!(
+            config.shell.prompt_indicators.history_search,
+            "history:{term} "
+        );
         assert_eq!(
             config.shell.prompt_indicators.history_search_fail,
             "history:{term} "
@@ -1205,6 +1291,41 @@ path = "D:/tools/winuxcmd/winuxcmd.exe"
         assert_eq!(
             config.winuxcmd_path,
             Some(PathBuf::from("D:/tools/winuxcmd/winuxcmd.exe"))
+        );
+    }
+
+    #[test]
+    fn parses_plugin_config() {
+        let config = parse_config(
+            r#"
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = ["git", "prompts", "keybindings"]
+
+[plugins.git]
+enabled = true
+permissions = ["cwd:read", "process:run:git"]
+
+[plugins.zoxide]
+enabled = false
+permissions = ["cwd:read", "shell:cwd:write", "process:run:zoxide"]
+"#,
+        );
+
+        assert!(config.plugins.enabled);
+        assert_eq!(config.plugins.bundles, vec!["oh-my-winuxsh"]);
+        assert_eq!(config.plugins.load, vec!["git", "prompts", "keybindings"]);
+
+        let git = config.plugins.packs.get("git").unwrap();
+        assert_eq!(git.enabled, Some(true));
+        assert_eq!(git.permissions, vec!["cwd:read", "process:run:git"]);
+
+        let zoxide = config.plugins.packs.get("zoxide").unwrap();
+        assert_eq!(zoxide.enabled, Some(false));
+        assert_eq!(
+            zoxide.permissions,
+            vec!["cwd:read", "shell:cwd:write", "process:run:zoxide"]
         );
     }
 
@@ -1280,7 +1401,12 @@ presets = ["direnv"]
         assert_eq!(config.zsh.syntax_highlighting.highlighters, vec!["main"]);
         assert_eq!(config.zsh.syntax_highlighting.max_length, Some(512));
         assert_eq!(
-            config.zsh.syntax_highlighting.styles.get("command").unwrap(),
+            config
+                .zsh
+                .syntax_highlighting
+                .styles
+                .get("command")
+                .unwrap(),
             "fg=green,bold"
         );
         assert!(config.zsh.dynamic_completions.enabled);

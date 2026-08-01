@@ -130,7 +130,10 @@ const NATIVE_KUBECTL_ALIASES: &[(&str, &str)] = &[
     ("kdelf", "kubectl delete -f"),
     ("kdelk", "kubectl delete -k"),
     ("kge", "kubectl get events --sort-by=\".lastTimestamp\""),
-    ("kgew", "kubectl get events --sort-by=\".lastTimestamp\" --watch"),
+    (
+        "kgew",
+        "kubectl get events --sort-by=\".lastTimestamp\" --watch",
+    ),
     ("kgp", "kubectl get pods"),
     ("kgpl", "kubectl get pods -l"),
     ("kgpn", "kubectl get pods -n"),
@@ -325,12 +328,18 @@ impl ZshImportReport {
         out.push(format!("PATH entries: {}", self.path_entries.len()));
         out.push(format!("fpath entries: {}", self.fpath_entries.len()));
         out.push(format!("plugins: {}", self.plugins.len()));
-        out.push(format!("completion assets: {}", self.completion_assets.len()));
+        out.push(format!(
+            "completion assets: {}",
+            self.completion_assets.len()
+        ));
         out.push(format!(
             "dynamic completion sources: {}",
             self.dynamic_completion_sources.len()
         ));
-        out.push(format!("native hook suggestions: {}", self.native_hooks.len()));
+        out.push(format!(
+            "native hook suggestions: {}",
+            self.native_hooks.len()
+        ));
         out.push(format!(
             "native widget suggestions: {}",
             self.native_widgets.len()
@@ -793,9 +802,9 @@ pub fn native_zsh_packs_json() -> Result<String, serde_json::Error> {
 
 pub fn native_zsh_packs_text() -> String {
     let mut out = Vec::new();
-    out.push("Native zsh plugin packs".to_string());
+    out.push("Legacy zsh migration pack mappings".to_string());
     out.push(
-        "Preinstalled means native winuxsh support; no Oh My Zsh or zsh plugin source is vendored or sourced."
+        "These mappings point zsh plugin intent to Winuxsh-native features; no Oh My Zsh or zsh plugin source is vendored or sourced."
             .to_string(),
     );
     out.push(String::new());
@@ -874,7 +883,9 @@ pub fn zsh_profile_plan_toml(profile: ZshNativeProfile) -> String {
         "# This uses native winuxsh zsh packs; it does not vendor or source zsh plugin scripts."
             .to_string(),
     );
-    out.push("# Apply support will reuse winuxsh managed config blocks in a later phase.".to_string());
+    out.push(
+        "# Apply support will reuse winuxsh managed config blocks in a later phase.".to_string(),
+    );
     out.push(String::new());
 
     match profile {
@@ -1362,7 +1373,10 @@ pub fn import_plan_toml(options: &ZshImportOptions, report: &ZshImportReport) ->
         out.push(String::new());
         out.push("# native dynamic zsh plugin presets detected".to_string());
         out.push("# They remain disabled until you explicitly set enabled = true.".to_string());
-        out.push("# winuxsh implements these through native hooks/providers, not zsh sourcing.".to_string());
+        out.push(
+            "# winuxsh implements these through native hooks/providers, not zsh sourcing."
+                .to_string(),
+        );
         out.push("[zsh.native_plugins]".to_string());
         out.push("enabled = false".to_string());
         out.push(format!("presets = {}", toml_array(&native_plugin_presets)));
@@ -1374,7 +1388,9 @@ pub fn import_plan_toml(options: &ZshImportOptions, report: &ZshImportReport) ->
             "# zsh lifecycle hooks detected: {}",
             report.native_hooks.len()
         ));
-        out.push("# Review and translate these zsh functions before enabling native hooks.".to_string());
+        out.push(
+            "# Review and translate these zsh functions before enabling native hooks.".to_string(),
+        );
         out.push("# winuxsh never sources zsh hook function bodies directly.".to_string());
         out.push("# [hooks]".to_string());
         for hook in ["precmd", "preexec", "chpwd"] {
@@ -1391,8 +1407,13 @@ pub fn import_plan_toml(options: &ZshImportOptions, report: &ZshImportReport) ->
             "# zsh autoload/function helpers detected: {}",
             report.zsh_functions.len()
         ));
-        out.push("# Review before translating; winuxsh never sources zsh function bodies directly.".to_string());
-        out.push("# Function suggestions are future native helpers, providers, or presets.".to_string());
+        out.push(
+            "# Review before translating; winuxsh never sources zsh function bodies directly."
+                .to_string(),
+        );
+        out.push(
+            "# Function suggestions are future native helpers, providers, or presets.".to_string(),
+        );
         for todo in zsh_function_todos_for_import_plan(report) {
             out.push(format!("# {}", todo));
         }
@@ -1409,7 +1430,9 @@ pub fn import_plan_toml(options: &ZshImportOptions, report: &ZshImportReport) ->
         } else {
             out.push("# zsh native widget presets detected from plugin names".to_string());
         }
-        out.push("# Review and translate these into native reedline widgets/keybindings.".to_string());
+        out.push(
+            "# Review and translate these into native reedline widgets/keybindings.".to_string(),
+        );
         out.push("# winuxsh never sources ZLE widget function bodies directly.".to_string());
         let has_standard_bindkeys = has_supported_standard_widget_bindkeys(report);
         if !native_widget_presets.is_empty() || has_standard_bindkeys {
@@ -1489,8 +1512,7 @@ pub fn inspect_import_config_status(
         Ok(content) => (true, content),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, String::new()),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to read {}", config_path.display()))
+            return Err(err).with_context(|| format!("failed to read {}", config_path.display()))
         }
     };
 
@@ -1505,10 +1527,7 @@ pub fn inspect_import_config_status(
             (ZshImportApplyReadiness::ReplaceExistingBlock, None)
         }
         Ok(_) => (ZshImportApplyReadiness::AddNewBlock, None),
-        Err(err) => (
-            ZshImportApplyReadiness::Blocked,
-            Some(err.to_string()),
-        ),
+        Err(err) => (ZshImportApplyReadiness::Blocked, Some(err.to_string())),
     };
 
     Ok(ZshImportConfigStatus {
@@ -1612,7 +1631,11 @@ pub fn zsh_compat_doctor_text(
         "Import config: exists={}, managed_block={}, toml={}",
         yes_no(status.config_exists),
         block_state_label(status.block_state),
-        if status.toml_valid { "valid" } else { "invalid" }
+        if status.toml_valid {
+            "valid"
+        } else {
+            "invalid"
+        }
     ));
     if let Some(error) = &status.toml_error {
         out.push(format!("TOML detail: {}", error));
@@ -1665,8 +1688,7 @@ pub fn apply_import_plan_to_config_with_backup_suffix(
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to read {}", config_path.display()))
+            return Err(err).with_context(|| format!("failed to read {}", config_path.display()))
         }
     };
 
@@ -1679,12 +1701,8 @@ pub fn apply_import_plan_to_config_with_backup_suffix(
 
     let backup_path = if config_path.exists() {
         let backup_path = unique_backup_path_for(config_path, backup_suffix);
-        std::fs::copy(config_path, &backup_path).with_context(|| {
-            format!(
-                "failed to create config backup {}",
-                backup_path.display()
-            )
-        })?;
+        std::fs::copy(config_path, &backup_path)
+            .with_context(|| format!("failed to create config backup {}", backup_path.display()))?;
         Some(backup_path)
     } else {
         None
@@ -1734,11 +1752,7 @@ pub fn apply_safe_aliases(
     summary
 }
 
-pub fn apply_alias(
-    executor: &mut rubash::executor::Executor,
-    name: &str,
-    value: &str,
-) -> bool {
+pub fn apply_alias(executor: &mut rubash::executor::Executor, name: &str, value: &str) -> bool {
     if !is_identifierish(name) {
         return false;
     }
@@ -1940,7 +1954,11 @@ fn run_dynamic_completion_source(
             source.command
         ));
     }
-    if source.args.iter().any(|arg| !is_safe_dynamic_completion_arg(arg)) {
+    if source
+        .args
+        .iter()
+        .any(|arg| !is_safe_dynamic_completion_arg(arg))
+    {
         return Err(format!(
             "dynamic completion command has unsafe args: {}",
             source.args.join(" ")
@@ -2317,7 +2335,9 @@ fn scan_content(
             report.diagnostics.push(ZshCompatDiagnostic {
                 severity: DiagnosticSeverity::Info,
                 feature: "source".to_string(),
-                message: "Oh My Zsh loader detected; scanner will inspect layout instead of sourcing it".to_string(),
+                message:
+                    "Oh My Zsh loader detected; scanner will inspect layout instead of sourcing it"
+                        .to_string(),
                 source_file: source_file.map(Path::to_path_buf),
                 line: Some(line_no),
             });
@@ -2401,9 +2421,12 @@ fn scan_oh_my_zsh_layout(
             continue;
         }
 
-        let source_dir = [zsh_custom.join("plugins").join(&plugin_name), zsh_dir.join("plugins").join(&plugin_name)]
-            .into_iter()
-            .find(|path| path.is_dir());
+        let source_dir = [
+            zsh_custom.join("plugins").join(&plugin_name),
+            zsh_dir.join("plugins").join(&plugin_name),
+        ]
+        .into_iter()
+        .find(|path| path.is_dir());
 
         let Some(source_dir) = source_dir else {
             let alias_count = apply_native_plugin_pack(report, &plugin_name);
@@ -2507,8 +2530,7 @@ fn scan_oh_my_zsh_theme(
         zsh_dir.join("themes").join(&theme_file_name),
     ]
     .into_iter()
-    .find(|path| path.is_file())
-    else {
+    .find(|path| path.is_file()) else {
         report.diagnostics.push(ZshCompatDiagnostic {
             severity: DiagnosticSeverity::Info,
             feature: "theme".to_string(),
@@ -2599,8 +2621,11 @@ fn apply_native_plugin_pack(report: &mut ZshImportReport, plugin_name: &str) -> 
         return 0;
     };
 
-    let mut seen_aliases: HashSet<String> =
-        report.aliases.iter().map(|alias| alias.name.clone()).collect();
+    let mut seen_aliases: HashSet<String> = report
+        .aliases
+        .iter()
+        .map(|alias| alias.name.clone())
+        .collect();
     let mut added = 0usize;
     for (name, value) in aliases {
         if !is_identifierish(name) || !seen_aliases.insert((*name).to_string()) {
@@ -2618,7 +2643,9 @@ fn apply_native_plugin_pack(report: &mut ZshImportReport, plugin_name: &str) -> 
     added
 }
 
-fn native_plugin_aliases(plugin_name: &str) -> Option<&'static [(&'static str, &'static str)]> {
+pub(crate) fn native_plugin_aliases(
+    plugin_name: &str,
+) -> Option<&'static [(&'static str, &'static str)]> {
     match plugin_name {
         "git" => Some(NATIVE_GIT_ALIASES),
         "docker" => Some(NATIVE_DOCKER_ALIASES),
@@ -2648,7 +2675,9 @@ fn apply_native_dynamic_completion_preset(report: &mut ZshImportReport, plugin_n
     true
 }
 
-fn native_dynamic_completion_source(plugin_name: &str) -> Option<(&'static str, &'static [&'static str])> {
+fn native_dynamic_completion_source(
+    plugin_name: &str,
+) -> Option<(&'static str, &'static [&'static str])> {
     match plugin_name {
         "kubectl" => Some(("kubectl", &["completion", "zsh"])),
         _ => None,
@@ -2773,10 +2802,18 @@ fn classify_plugin(
     }
 
     if native_ux {
-        return (PluginImportTier::Tier3Native, PluginImportKind::NativeUx, capabilities);
+        return (
+            PluginImportTier::Tier3Native,
+            PluginImportKind::NativeUx,
+            capabilities,
+        );
     }
     if has_unsupported && has_safe_assets {
-        return (PluginImportTier::Tier2Partial, PluginImportKind::Partial, capabilities);
+        return (
+            PluginImportTier::Tier2Partial,
+            PluginImportKind::Partial,
+            capabilities,
+        );
     }
     if has_unsupported {
         return (
@@ -3299,10 +3336,16 @@ fn translate_zsh_prompt_literal(value: &str) -> String {
 
 fn decode_prompt_value(value: &str) -> String {
     let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix("$'").and_then(|v| v.strip_suffix('\'')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("$'")
+        .and_then(|v| v.strip_suffix('\''))
+    {
         return decode_c_style_escapes(inner);
     }
-    if let Some(inner) = trimmed.strip_prefix("$\"").and_then(|v| v.strip_suffix('"')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("$\"")
+        .and_then(|v| v.strip_suffix('"'))
+    {
         return decode_c_style_escapes(inner);
     }
     let decoded = if is_wrapped_quote(trimmed) {
@@ -3555,10 +3598,9 @@ fn native_widget_todos_for_import_plan(report: &ZshImportReport) -> Vec<String> 
     let mut todos = Vec::new();
     for suggestion in &report.native_widgets {
         let todo = match (&suggestion.function, &suggestion.keymap, &suggestion.key) {
-            (Some(function), _, None) => format!(
-                "TODO native widget: {} -> {}",
-                suggestion.widget, function
-            ),
+            (Some(function), _, None) => {
+                format!("TODO native widget: {} -> {}", suggestion.widget, function)
+            }
             (_, Some(keymap), Some(key)) => format!(
                 "TODO native keybinding: {} {} -> {}",
                 keymap, key, suggestion.widget
@@ -3752,13 +3794,9 @@ struct ZshImportApplyPreview {
     replaced_existing_block: bool,
 }
 
-fn preview_import_plan_update(
-    original: &str,
-    plan: &str,
-) -> anyhow::Result<ZshImportApplyPreview> {
+fn preview_import_plan_update(original: &str, plan: &str) -> anyhow::Result<ZshImportApplyPreview> {
     let block = managed_import_block(plan);
-    let (next_config, replaced_existing_block) =
-        replace_managed_import_block(original, &block)?;
+    let (next_config, replaced_existing_block) = replace_managed_import_block(original, &block)?;
     toml::from_str::<toml::Value>(&next_config).with_context(|| {
         "generated zsh import block would make ~/.winshrc.toml invalid; run \
          --zsh-compat-import-plan and merge manually"
@@ -3770,10 +3808,7 @@ fn preview_import_plan_update(
     })
 }
 
-fn replace_managed_import_block(
-    original: &str,
-    block: &str,
-) -> anyhow::Result<(String, bool)> {
+fn replace_managed_import_block(original: &str, block: &str) -> anyhow::Result<(String, bool)> {
     let Some((start, end)) = managed_import_block_range(original)? else {
         let mut next = original.to_string();
         if !next.trim().is_empty() {
@@ -3875,8 +3910,7 @@ fn backup_paths_for(config_path: &Path) -> anyhow::Result<Vec<PathBuf>> {
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to inspect {}", parent.display()))
+            return Err(err).with_context(|| format!("failed to inspect {}", parent.display()))
         }
     }
 
@@ -3952,10 +3986,17 @@ fn record_assignment(
                 add_fpath_entry(report, env_map, entry);
             }
         }
-        "ZDOTDIR" | "ZSH" | "ZSH_CUSTOM" | "ZSH_CACHE_DIR" | "CASE_SENSITIVE"
-        | "HYPHEN_INSENSITIVE" | "ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE"
-        | "ZSH_AUTOSUGGEST_STRATEGY" | "ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE"
-        | "ZSH_HIGHLIGHT_STYLES" | "ZSH_HIGHLIGHT_HIGHLIGHTERS"
+        "ZDOTDIR"
+        | "ZSH"
+        | "ZSH_CUSTOM"
+        | "ZSH_CACHE_DIR"
+        | "CASE_SENSITIVE"
+        | "HYPHEN_INSENSITIVE"
+        | "ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE"
+        | "ZSH_AUTOSUGGEST_STRATEGY"
+        | "ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE"
+        | "ZSH_HIGHLIGHT_STYLES"
+        | "ZSH_HIGHLIGHT_HIGHLIGHTERS"
         | "ZSH_HIGHLIGHT_MAXLENGTH" => {
             env_map.insert(key.clone(), expanded.clone());
         }
@@ -3992,7 +4033,9 @@ fn add_path_entry(
     if value.is_empty() || (skip_existing_var && is_path_var_ref(value)) {
         return;
     }
-    report.path_entries.push(PathBuf::from(expand_value(value, env_map)));
+    report
+        .path_entries
+        .push(PathBuf::from(expand_value(value, env_map)));
 }
 
 fn add_fpath_entry(report: &mut ZshImportReport, env_map: &HashMap<String, String>, value: &str) {
@@ -4000,12 +4043,13 @@ fn add_fpath_entry(report: &mut ZshImportReport, env_map: &HashMap<String, Strin
     if value.is_empty() || value == "$fpath" || value == "${fpath}" {
         return;
     }
-    report.fpath_entries.push(PathBuf::from(expand_value(value, env_map)));
+    report
+        .fpath_entries
+        .push(PathBuf::from(expand_value(value, env_map)));
 }
 
 fn is_omz_source_line(line: &str) -> bool {
-    (line.starts_with("source ") || line.starts_with(". "))
-        && line.contains("oh-my-zsh.sh")
+    (line.starts_with("source ") || line.starts_with(". ")) && line.contains("oh-my-zsh.sh")
 }
 
 fn scan_unsupported(
@@ -4015,10 +4059,26 @@ fn scan_unsupported(
     report: &mut ZshImportReport,
 ) {
     for (needle, feature, message) in [
-        ("zle ", "zle", "ZLE widgets require native reedline implementation"),
-        ("zle\t", "zle", "ZLE widgets require native reedline implementation"),
-        ("zmodload", "zmodload", "zsh modules are not available in winuxsh"),
-        ("zpty", "zpty", "zpty-backed plugins require a real zsh interpreter"),
+        (
+            "zle ",
+            "zle",
+            "ZLE widgets require native reedline implementation",
+        ),
+        (
+            "zle\t",
+            "zle",
+            "ZLE widgets require native reedline implementation",
+        ),
+        (
+            "zmodload",
+            "zmodload",
+            "zsh modules are not available in winuxsh",
+        ),
+        (
+            "zpty",
+            "zpty",
+            "zpty-backed plugins require a real zsh interpreter",
+        ),
         (
             "add-zsh-hook",
             "zsh-hook",
@@ -4049,8 +4109,16 @@ fn scan_unsupported(
             "autoload",
             "autoloaded zsh functions are not executed",
         ),
-        ("BUFFER", "zle-buffer", "BUFFER/CURSOR style plugins are not executed"),
-        ("CURSOR", "zle-buffer", "BUFFER/CURSOR style plugins are not executed"),
+        (
+            "BUFFER",
+            "zle-buffer",
+            "BUFFER/CURSOR style plugins are not executed",
+        ),
+        (
+            "CURSOR",
+            "zle-buffer",
+            "BUFFER/CURSOR style plugins are not executed",
+        ),
         (
             "region_highlight",
             "zle-highlighting",
@@ -4201,7 +4269,10 @@ fn parse_hook_functions_array(line: &str) -> Vec<(String, String)> {
     let Some((array_name, value)) = line.split_once('=') else {
         return Vec::new();
     };
-    let array_name = array_name.trim().strip_suffix('+').unwrap_or(array_name.trim());
+    let array_name = array_name
+        .trim()
+        .strip_suffix('+')
+        .unwrap_or(array_name.trim());
     let (hook, array_name) = match array_name {
         "precmd_functions" => ("precmd", "precmd_functions"),
         "preexec_functions" => ("preexec", "preexec_functions"),
@@ -4212,7 +4283,10 @@ fn parse_hook_functions_array(line: &str) -> Vec<(String, String)> {
         return Vec::new();
     }
     let value = value.trim();
-    let Some(inner) = value.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
         return Vec::new();
     };
     split_shell_words(inner)
@@ -4383,9 +4457,9 @@ fn parse_bindkey_widget_binding(line: &str) -> Option<(Option<String>, String, S
 
 fn is_safe_zle_name(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch == '_' || ch == '-' || ch == '.' || ch == ':' || ch.is_ascii_alphanumeric())
+        && value.chars().all(|ch| {
+            ch == '_' || ch == '-' || ch == '.' || ch == ':' || ch.is_ascii_alphanumeric()
+        })
 }
 
 fn is_safe_key_sequence(value: &str) -> bool {
@@ -4970,7 +5044,10 @@ fn matching_close_paren(value: &str) -> Option<usize> {
 
 fn merge_flags(target: &mut Vec<FlagDef>, incoming: Vec<FlagDef>) {
     for flag in incoming {
-        if let Some(existing) = target.iter_mut().find(|existing| same_flag(existing, &flag)) {
+        if let Some(existing) = target
+            .iter_mut()
+            .find(|existing| same_flag(existing, &flag))
+        {
             if existing.short.is_none() {
                 existing.short = flag.short.clone();
             }

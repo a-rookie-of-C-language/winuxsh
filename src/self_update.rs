@@ -179,6 +179,33 @@ fn resolve_latest_release(repo: &str, timeout_ms: i32) -> Result<GitHubRelease> 
     })
 }
 
+pub fn resolve_latest_github_release_tag(repo: &str) -> Result<String> {
+    Ok(resolve_latest_release(repo, HTTP_TIMEOUT_MS)?.tag_name)
+}
+
+pub fn github_release_asset_url(repo: &str, tag: &str, asset_name: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/{tag}/{asset_name}")
+}
+
+pub fn download_github_release_asset(
+    repo: &str,
+    tag: &str,
+    asset_name: &str,
+    cache_dir_name: &str,
+) -> Result<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join(cache_dir_name)
+        .join(tag.trim_start_matches('v'));
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(safe_asset_name(asset_name));
+    let url = github_release_asset_url(repo, tag, asset_name);
+    let bytes =
+        http_get_bytes(&url).with_context(|| format!("download {asset_name} from {url}"))?;
+    std::fs::write(&path, bytes)
+        .with_context(|| format!("write downloaded release asset {}", path.display()))?;
+    Ok(path)
+}
+
 fn download_asset(repo: &str, tag: &str, asset: &GitHubAsset) -> Result<PathBuf> {
     let dir = std::env::temp_dir()
         .join("winuxsh-self-update")
@@ -582,7 +609,7 @@ fn versioned_installer_asset(repo: &str, tag: &str, arch: &str) -> GitHubAsset {
     let name = format!("winuxsh-v{version}-win-{arch}-setup.exe");
     GitHubAsset {
         name: name.clone(),
-        browser_download_url: format!("https://github.com/{repo}/releases/download/{tag}/{name}"),
+        browser_download_url: github_release_asset_url(repo, tag, &name),
     }
 }
 
@@ -777,6 +804,18 @@ mod tests {
             "https://github.com/unixwin/winuxsh/releases/latest/download/winuxsh-win-x64-setup.exe"
         );
         assert_eq!(assets[1].name, "winuxsh-v0.8.2-win-x64-setup.exe");
+    }
+
+    #[test]
+    fn builds_generic_github_release_asset_url() {
+        assert_eq!(
+            github_release_asset_url(
+                "unixwin/oh-my-winuxsh",
+                "v1.0.0",
+                "oh-my-winuxsh-1.0.0.zip"
+            ),
+            "https://github.com/unixwin/oh-my-winuxsh/releases/download/v1.0.0/oh-my-winuxsh-1.0.0.zip"
+        );
     }
 
     #[test]

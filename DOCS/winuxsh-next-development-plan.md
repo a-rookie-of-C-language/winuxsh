@@ -178,16 +178,18 @@ Verification:
 
 - Provide a Windows Terminal profile recommendation.
 - Provide a minimal default `.winshrc.toml` optimized for users and agents.
-- Add a native zsh plugin pack manifest and zsh-lite profile planner:
-  `DOCS/winuxsh-native-zsh-plugin-pack-plan.md`.
+- Add the official Winuxsh plugin bundle plan:
+  `DOCS/plugin-system-direction.md` and
+  `DOCS/oh-my-winuxsh-bundle-plan.md`.
 - Keep config backward compatible.
-- Add Oh My Zsh layout import before designing any online Oh-My-Winuxsh registry:
+- Keep zsh migration as an onboarding adapter before designing any online
+  plugin registry:
   - completion assets
-  - alias-only plugins
+  - alias-only migration hints
   - themes/prompt snippets
-  - native autosuggestion/highlighting modules
-- Keep direct zsh plugin compatibility tiered:
-  - import completion-only and alias-only plugins first
+  - native Winuxsh plugin suggestions
+- Keep direct zsh plugin execution out of scope:
+  - import completion-only and alias-only intent first
   - translate simple prompt/theme snippets second
   - reimplement autosuggestions/highlighting natively
   - report and skip arbitrary ZLE/zmodload/zpty plugins
@@ -199,11 +201,16 @@ Verification:
 
 ## Phase 6 - v3 Design Gate
 
-- Plugin framework is the v3 design topic, with WASM/WASI as the preferred
-  long-term execution model and only for UX/package extension:
+- Plugin framework is the v3 design topic, starting with a built-in registry
+  and `oh-my-winuxsh` official bundle:
+  - `kind = "builtin"` first-party packs
+  - `[plugins]` TOML control plane
+  - bundle update and rollback
+  - process bridge for external tools
+  - WASM/WASI as the preferred long-term third-party runtime
   - completion providers
   - prompt/theme providers
-  - helper commands as external processes
+  - lifecycle hooks and helper commands
 - Do not design plugins that extend rubash parser/executor.
 - Build a rubash capability matrix before considering any host-level semantic
   work.

@@ -126,12 +126,12 @@ Nushell's syntax, data pipeline model, plugin ABI, or command semantics.
 | External completer bridge | Carapace-like external completion command | Not started | v2.3/v3 candidate, secondary to zsh asset import |
 | History | path, size, sync, ignore-space, SQLite/isolation | Configurable plaintext file | Keep `[history]` small; defer sync/isolation until usage proves it |
 | Edit mode | `bindkey -e/-v`, mode indicators, cursor shape | Emacs/Vi done | Import simple bindkey mode and add prompt/cursor polish |
-| Keybindings | ZLE widgets and bindkey maps | Common built-in ZLE widgets mapped to reedline | Keep native subset conservative; arbitrary ZLE plugin scripts are deferred |
+| Keybindings | zsh-style bindkey names and native editor actions | Common action names mapped to reedline | Keep native subset conservative; no ZLE runtime |
 | Menus | Completion/history menu config | Configurable page size and max entry lines | Keep native menu controls small; defer zstyle menu/select/group/order translation |
 | Prompt | `PROMPT`, `RPROMPT`, `%~`, `%F{}`, Git segments | Left prompt template | Translate common zsh prompt/theme forms into native config |
 | Theme | Oh My Zsh themes and native color config | Prompt/status colors only | Add theme translator before online theme market |
-| Plugins | Oh My Zsh `plugins=(...)` and `$ZSH_CUSTOM` | Not started | Import completion/alias/theme assets first; native modules for editor UX |
-| Package layer | Oh My Zsh-style plugins/themes/completions | Not started | Oh-My-Winuxsh starts as local compatibility/package layer |
+| Plugins | Official Winuxsh plugins and first-party packs | Planned | Built-in registry first, then process bridge, then WASM |
+| Package layer | Bundled `oh-my-winuxsh` plugins/themes/completions | Planned | Official bundle ships with Winuxsh and updates independently |
 | Job control | jobs/fg/bg/kill | Rubash-owned | Validate host wiring only; do not reimplement in winuxsh |
 | Terminal integration | OSC/Kitty protocol hints | Not started | Optional polish, after core UX |
 

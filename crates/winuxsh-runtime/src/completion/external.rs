@@ -261,15 +261,24 @@ fn cache_key_to_filename(key: &str) -> String {
 
 const DEFAULT_COMPLETION_DEFS: &[(&str, &str)] = &[
     ("cat", include_str!("../../completions/defaults/cat.toml")),
-    ("chmod", include_str!("../../completions/defaults/chmod.toml")),
+    (
+        "chmod",
+        include_str!("../../completions/defaults/chmod.toml"),
+    ),
     ("cp", include_str!("../../completions/defaults/cp.toml")),
     ("ls", include_str!("../../completions/defaults/ls.toml")),
     ("find", include_str!("../../completions/defaults/find.toml")),
     ("grep", include_str!("../../completions/defaults/grep.toml")),
-    ("mkdir", include_str!("../../completions/defaults/mkdir.toml")),
+    (
+        "mkdir",
+        include_str!("../../completions/defaults/mkdir.toml"),
+    ),
     ("mv", include_str!("../../completions/defaults/mv.toml")),
     ("rm", include_str!("../../completions/defaults/rm.toml")),
-    ("touch", include_str!("../../completions/defaults/touch.toml")),
+    (
+        "touch",
+        include_str!("../../completions/defaults/touch.toml"),
+    ),
     ("git", include_str!("../../completions/defaults/git.toml")),
 ];
 
@@ -310,6 +319,19 @@ impl ExternalCompletionPlugin {
             } else {
                 self.definitions.insert(def.command.clone(), def);
             }
+        }
+    }
+
+    /// Replace command definitions wholesale.
+    ///
+    /// This is used for official bundle assets: a newer bundle definition should
+    /// be able to update or remove data from the compiled fallback definition.
+    pub fn replace_definitions<I>(&mut self, definitions: I)
+    where
+        I: IntoIterator<Item = CommandDef>,
+    {
+        for def in definitions {
+            self.definitions.insert(def.command.clone(), def);
         }
     }
 
@@ -634,7 +656,46 @@ impl ExternalCompletionPlugin {
             }
         }
 
+        if Self::is_subcommand_position(def, context, prev.as_deref(), &word) {
+            return Self::complete_subcommands(def, context, &word);
+        }
+
         None
+    }
+
+    fn is_subcommand_position(
+        def: &CommandDef,
+        context: &CompletionContext,
+        prev: Option<&str>,
+        word: &str,
+    ) -> bool {
+        if def.subcommands.is_empty() || context.is_command_position() || word.starts_with('-') {
+            return false;
+        }
+        prev == Some(def.command.as_str())
+    }
+
+    fn complete_subcommands(
+        def: &CommandDef,
+        context: &CompletionContext,
+        word: &str,
+    ) -> Option<CompletionResult> {
+        let mut completions = Vec::new();
+        let mut descriptions = Vec::new();
+        for subcommand in &def.subcommands {
+            if context.behavior.matches(&subcommand.name, word) {
+                completions.push(subcommand.name.clone());
+                descriptions.push(subcommand.description.clone());
+            }
+        }
+        if completions.is_empty() {
+            None
+        } else {
+            Some(CompletionResult::with_descriptions(
+                completions,
+                descriptions,
+            ))
+        }
     }
 
     /// Return the flags applicable to the current sub-command (if any),

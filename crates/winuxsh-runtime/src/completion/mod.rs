@@ -1,15 +1,15 @@
 // Completion module for WinSH
 // Provides Tab completion for commands, paths, and variables
 
+pub mod bash_import;
 pub mod command;
 pub mod completer;
 pub mod external;
-pub mod bash_import;
 pub mod path;
 pub mod runtime;
 pub mod variables;
 
-pub use completer::{WinuxshCompleter, CompletionState};
+pub use completer::{CompletionState, WinuxshCompleter};
 
 use std::path::PathBuf;
 
@@ -304,21 +304,15 @@ mod tests {
 
     #[test]
     fn test_get_current_word_handles_escapes_and_quotes() {
-        let escaped = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "ls two\\ w".to_string(),
-            9,
-        );
+        let escaped =
+            CompletionContext::new(PathBuf::from("/home/user"), "ls two\\ w".to_string(), 9);
         let escaped_word = escaped.get_current_shell_word().unwrap();
         assert_eq!(escaped_word.value, "two w");
         assert_eq!(escaped_word.start, 3);
         assert_eq!(escaped.current_word_span(), Some((3, 9)));
 
-        let quoted = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "ls \"two w".to_string(),
-            9,
-        );
+        let quoted =
+            CompletionContext::new(PathBuf::from("/home/user"), "ls \"two w".to_string(), 9);
         let quoted_word = quoted.get_current_shell_word().unwrap();
         assert_eq!(quoted_word.value, "two w");
         assert_eq!(quoted_word.quote, Some('"'));
@@ -330,8 +324,7 @@ mod tests {
         let empty = CompletionContext::new(PathBuf::from("/home/user"), "".to_string(), 0);
         assert!(empty.is_command_position());
 
-        let partial =
-            CompletionContext::new(PathBuf::from("/home/user"), "gre".to_string(), 3);
+        let partial = CompletionContext::new(PathBuf::from("/home/user"), "gre".to_string(), 3);
         assert!(partial.is_command_position());
 
         let after_pipe =
@@ -345,25 +338,24 @@ mod tests {
             CompletionContext::new(PathBuf::from("/home/user"), "echo two\\ w".to_string(), 11);
         assert!(!escaped_arg.is_command_position());
 
-        let quoted_pipe =
-            CompletionContext::new(PathBuf::from("/home/user"), "echo \"|\" | gre".to_string(), 14);
+        let quoted_pipe = CompletionContext::new(
+            PathBuf::from("/home/user"),
+            "echo \"|\" | gre".to_string(),
+            14,
+        );
         assert!(quoted_pipe.is_command_position());
     }
 
     #[test]
     fn test_is_path_completion() {
-        let ctx = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "cat /tmp/fil".to_string(),
-            12,
-        );
+        let ctx =
+            CompletionContext::new(PathBuf::from("/home/user"), "cat /tmp/fil".to_string(), 12);
         assert!(ctx.is_path_completion());
     }
 
     #[test]
     fn test_blank_argument_position_is_path_completion() {
-        let arg =
-            CompletionContext::new(PathBuf::from("/home/user"), "ls ".to_string(), 3);
+        let arg = CompletionContext::new(PathBuf::from("/home/user"), "ls ".to_string(), 3);
         assert!(arg.is_path_completion());
 
         let after_pipe =
@@ -374,11 +366,7 @@ mod tests {
 
     #[test]
     fn test_is_variable_completion() {
-        let ctx = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "echo $HOM".to_string(),
-            9,
-        );
+        let ctx = CompletionContext::new(PathBuf::from("/home/user"), "echo $HOM".to_string(), 9);
         assert!(ctx.is_variable_completion());
     }
 
@@ -391,11 +379,8 @@ mod tests {
         );
         assert_eq!(value.get_prev_token(), Some("--flag".to_string()));
 
-        let blank = CompletionContext::new(
-            PathBuf::from("/home/user"),
-            "cmd --flag ".to_string(),
-            11,
-        );
+        let blank =
+            CompletionContext::new(PathBuf::from("/home/user"), "cmd --flag ".to_string(), 11);
         assert_eq!(blank.get_prev_token(), Some("--flag".to_string()));
     }
 }
@@ -509,10 +494,7 @@ fn shell_words_in_segment(segment: &str, offset: usize) -> Vec<ShellWord> {
 
 fn make_shell_word(segment: &str, offset: usize, start: usize, end: usize) -> ShellWord {
     let raw = segment[start..end].to_string();
-    let quote = raw
-        .chars()
-        .next()
-        .filter(|ch| *ch == '\'' || *ch == '"');
+    let quote = raw.chars().next().filter(|ch| *ch == '\'' || *ch == '"');
     ShellWord {
         start: offset + start,
         end: offset + end,

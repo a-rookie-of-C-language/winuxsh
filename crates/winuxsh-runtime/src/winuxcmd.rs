@@ -31,9 +31,11 @@ fn find_winuxcmd_with_report() -> WinuxCmdSearchReport {
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
 
-    find_winuxcmd_with_report_from_sources(override_path.as_deref(), exe_dir.as_deref(), |checked| {
-        find_winuxcmd_on_path(checked)
-    })
+    find_winuxcmd_with_report_from_sources(
+        override_path.as_deref(),
+        exe_dir.as_deref(),
+        |checked| find_winuxcmd_on_path(checked),
+    )
 }
 
 fn find_winuxcmd_with_report_from_sources<F>(
@@ -411,7 +413,10 @@ mod tests {
         let text = error.to_string();
 
         assert!(text.contains("checked:"), "{text}");
-        assert!(text.contains(&dir.join("winuxcmd.exe").display().to_string()), "{text}");
+        assert!(
+            text.contains(&dir.join("winuxcmd.exe").display().to_string()),
+            "{text}"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
