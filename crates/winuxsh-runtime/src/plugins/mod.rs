@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub const OFFICIAL_BUNDLE_NAME: &str = "oh-my-winuxsh";
 const OFFICIAL_BUNDLE_VERSION: &str = "1.0.0";
@@ -19,12 +19,14 @@ const PLUGIN_INDEX_SIGNATURE_POLICY: &str = "unsupported";
 const PROCESS_PLUGIN_PROTOCOL: &str = "winuxsh:process-plugin@0.1.0";
 const WASM_PLUGIN_PROTOCOL: &str = "winuxsh:wasm-plugin@0.1.0";
 const COMMAND_NOT_FOUND_PROVIDER: &str = "command-not-found";
+const SOURCE_PLUGIN_HOOKS: &[&str] = &["startup", "precmd", "preexec", "chpwd"];
 const MANAGED_BLOCK_START: &str = "# >>> winuxsh plugins >>>";
 const MANAGED_BLOCK_END: &str = "# <<< winuxsh plugins <<<";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Builtin,
+    Source,
     Process,
     Wasm,
 }
@@ -32,6 +34,7 @@ impl PluginKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
+            Self::Source => "source",
             Self::Process => "process",
             Self::Wasm => "wasm",
         }
@@ -86,6 +89,10 @@ pub struct PluginProcessSpec {
     pub timeout_millis: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSourceSpec {
+    pub entry: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginWasmSpec {
     pub protocol: String,
     pub module: String,
@@ -119,6 +126,8 @@ pub struct PluginPackRecord {
     pub required_binaries: Vec<String>,
     #[serde(default)]
     pub exports: PluginExportsRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginSourceSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<PluginProcessSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,6 +395,8 @@ struct BundlePackToml {
     #[serde(default)]
     exports: PluginExportsRecord,
     #[serde(default)]
+    source: Option<PluginSourceSpec>,
+    #[serde(default)]
     process: Option<PluginProcessSpec>,
     #[serde(default)]
     wasm: Option<PluginWasmSpec>,
@@ -607,6 +618,7 @@ fn load_official_bundle_inventory_from_path(
             permissions: manifest.permissions,
             required_binaries: manifest.required_binaries,
             exports: manifest.exports,
+            source: manifest.source,
             process: manifest.process,
             wasm: manifest.wasm,
         });
@@ -813,6 +825,7 @@ fn static_pack(
         permissions: strings_from_static(permissions),
         required_binaries: strings_from_static(required_binaries),
         exports,
+        source: None,
         process: None,
         wasm: None,
     }
@@ -888,6 +901,7 @@ fn plugin_execution_model(pack: &PluginPackRecord) -> &'static str {
             "none_declarative"
         }
         PluginKind::Builtin => "host_builtin",
+        PluginKind::Source => "shell_source",
         PluginKind::Process if !pack.exports.providers.is_empty() => "process_provider",
         PluginKind::Process => "process",
         PluginKind::Wasm => "wasm_command",
@@ -902,6 +916,9 @@ fn plugin_externalization_class(pack: &PluginPackRecord) -> &'static str {
     {
         return "pure_provider_candidate";
     }
+    if pack.kind == PluginKind::Source {
+        return "shell_source";
+    }
     match pack.name.as_str() {
         "docker" | "kubectl" | "keybindings" | "themes" => "declarative_asset",
         "git" | "npm" | "prompts" => "mixed_declarative_native",
@@ -913,6 +930,7 @@ fn plugin_externalization_class(pack: &PluginPackRecord) -> &'static str {
         _ => match pack.kind {
             PluginKind::Builtin if builtin_pack_is_asset_only(pack) => "declarative_asset",
             PluginKind::Builtin => "host_builtin",
+            PluginKind::Source => "shell_source",
             PluginKind::Process => "external_tool_adapter",
             PluginKind::Wasm => "wasm_code_bearing",
         },
@@ -942,30 +960,39 @@ fn readiness(
     }
 }
 fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
+    if pack.kind == PluginKind::Source
+        && matches!(
+            pack.name.as_str(),
+            "zoxide" | "direnv" | "dotenv" | "fzf" | "last-working-dir" | "thefuck"
+        )
+    {
+        return readiness("current_shell_source", "none", true, false, "none");
+    }
+
     match pack.name.as_str() {
         "git" => readiness(
-            "declarative_assets_plus_native_prompt_segment",
+            "source_assets_plus_native_prompt_segment",
             "prompt_segment_provider_abi",
             false,
             true,
             "compiled_prompt_segment",
         ),
         "docker" => readiness(
-            "asset_only_declarative_schema_tbd",
-            "asset_only_schema_marker",
+            "current_shell_source_plus_declarative_assets",
+            "none",
             false,
             true,
             "minimal_compiled_alias_completion_fallback",
         ),
         "kubectl" => readiness(
-            "asset_only_declarative_schema_tbd",
-            "asset_only_schema_marker",
+            "current_shell_source_plus_declarative_assets",
+            "none",
             false,
             true,
             "minimal_compiled_alias_completion_fallback",
         ),
         "npm" => readiness(
-            "declarative_assets_plus_native_dynamic_completion",
+            "source_assets_plus_native_dynamic_completion",
             "completion_provider_abi",
             false,
             true,
@@ -1079,6 +1106,7 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
                 "compiled_native_fallback",
             ),
             "fixture" => readiness("fixture", "none", false, false, "none"),
+            "shell_source" => readiness("current_shell_source", "none", true, false, "none"),
             _ => match pack.kind {
                 PluginKind::Builtin => readiness(
                     "host_builtin_until_classified",
@@ -1087,6 +1115,9 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
                     true,
                     "host_builtin",
                 ),
+                PluginKind::Source => {
+                    readiness("current_shell_source", "none", true, false, "none")
+                }
                 PluginKind::Process => readiness("process_adapter", "none", false, false, "none"),
                 PluginKind::Wasm => readiness(
                     "wasm_command",
@@ -1255,6 +1286,10 @@ pub fn plugin_pack_text(name: &str) -> Option<String> {
         "  providers: {}\n",
         list_or_none(&pack.exports.providers)
     ));
+    if let Some(source) = &pack.source {
+        out.push_str("Source:\n");
+        out.push_str(&format!("  entry: {}\n", source.entry));
+    }
     let keybinding_lines = plugin_keybinding_metadata_lines(&inventory, pack);
     if !keybinding_lines.is_empty() {
         out.push_str("Keybinding metadata:\n");
@@ -1564,6 +1599,11 @@ pub fn plugin_permission_review(
     let mut notes = Vec::new();
     if pack.kind == PluginKind::Wasm {
         notes.push("Winuxsh wasmi sandbox without native process permissions".to_string());
+    } else if pack.kind == PluginKind::Source {
+        notes.push(
+            "Source pack; startup code is sourced into the current interactive shell session."
+                .to_string(),
+        );
     }
     match plugin_externalization_class(&pack) {
         "declarative_asset" => notes.push(
@@ -1577,6 +1617,9 @@ pub fn plugin_permission_review(
         ),
         "shell_effect_candidate" => notes.push(
             "Shell-effect pack remains host-owned until env/cwd/history effects are explicit and permissioned.".to_string(),
+        ),
+        "shell_source" => notes.push(
+            "Shell source pack; code runs in the current interactive session after plugin review and enablement.".to_string(),
         ),
         _ => {}
     }
@@ -1662,6 +1705,13 @@ fn permission_detail(token: &str, pack: &PluginPackRecord) -> PermissionReviewIt
             "high",
             "process",
             format!("May execute the native command '{}'.", command),
+        )
+    } else if token == "shell:source" {
+        (
+            "high",
+            "shell",
+            "May source bundle-owned Winuxsh shell code into the current interactive session."
+                .to_string(),
         )
     } else if token == "cwd:read" {
         (
@@ -2013,6 +2063,7 @@ fn validate_bundle_inventory_for_update(
         validate_provider_exports_contract(pack)?;
         match pack.kind {
             PluginKind::Builtin => {}
+            PluginKind::Source => validate_source_pack_contract(pack, root)?,
             PluginKind::Process => validate_process_pack_contract(pack)?,
             PluginKind::Wasm => validate_wasm_pack_contract(pack, root)?,
         }
@@ -2215,6 +2266,12 @@ fn validate_provider_exports_contract(pack: &PluginPackRecord) -> anyhow::Result
             }
         }
         PluginKind::Process => {}
+        PluginKind::Source => {
+            anyhow::bail!(
+                "source pack '{}' must not export providers until sourced provider hooks are implemented",
+                pack.name
+            );
+        }
         PluginKind::Wasm => {
             anyhow::bail!(
                 "wasm pack '{}' must not export providers until a WASM provider ABI is implemented",
@@ -2232,6 +2289,53 @@ fn validate_provider_exports_contract(pack: &PluginPackRecord) -> anyhow::Result
             pack.name,
             COMMAND_NOT_FOUND_PROVIDER
         );
+    }
+    Ok(())
+}
+fn validate_source_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow::Result<()> {
+    let source = pack
+        .source
+        .as_ref()
+        .ok_or_else(|| anyhow!("source pack '{}' is missing [source]", pack.name))?;
+    if !pack
+        .permissions
+        .iter()
+        .any(|permission| permission == "shell:source")
+    {
+        anyhow::bail!(
+            "source pack '{}' must declare permission 'shell:source'",
+            pack.name
+        );
+    }
+    let path = safe_bundle_relative_path(root, &source.entry).ok_or_else(|| {
+        anyhow!(
+            "source pack '{}' entry '{}' must be a bundle-local relative path",
+            pack.name,
+            source.entry
+        )
+    })?;
+    if path.extension().and_then(|value| value.to_str()) != Some("winux") {
+        anyhow::bail!(
+            "source pack '{}' entry '{}' must end in .winux",
+            pack.name,
+            source.entry
+        );
+    }
+    if !path.is_file() {
+        anyhow::bail!(
+            "source pack '{}' entry '{}' does not exist",
+            pack.name,
+            source.entry
+        );
+    }
+    for hook in &pack.exports.hooks {
+        if !SOURCE_PLUGIN_HOOKS.contains(&hook.as_str()) {
+            anyhow::bail!(
+                "source pack '{}' exports unsupported hook '{}'",
+                pack.name,
+                hook
+            );
+        }
     }
     Ok(())
 }
@@ -2343,6 +2447,47 @@ fn validate_wasm_module_artifact(
         );
     }
     Ok(())
+}
+#[derive(Debug, Clone)]
+pub struct SourcePluginScript {
+    pub pack: String,
+    pub path: PathBuf,
+}
+pub fn source_plugin_scripts(state: &PluginRuntimeState) -> Vec<SourcePluginScript> {
+    source_plugin_scripts_for_hook(state, "startup")
+}
+pub fn source_plugin_scripts_for_hook(
+    state: &PluginRuntimeState,
+    hook_name: &str,
+) -> Vec<SourcePluginScript> {
+    let inventory = active_plugin_inventory();
+    let Some(root) = inventory.path.as_ref() else {
+        return Vec::new();
+    };
+    inventory
+        .packs
+        .into_iter()
+        .filter_map(|pack| {
+            if pack.kind != PluginKind::Source || !state.is_enabled(&pack.name) {
+                return None;
+            }
+            if !source_plugin_exports_hook(&pack.exports.hooks, hook_name) {
+                return None;
+            }
+            let source = pack.source?;
+            let path = safe_bundle_relative_path(root, &source.entry)?;
+            path.is_file().then_some(SourcePluginScript {
+                pack: pack.name,
+                path,
+            })
+        })
+        .collect()
+}
+fn source_plugin_exports_hook(hooks: &[String], hook_name: &str) -> bool {
+    if hook_name == "startup" && hooks.is_empty() {
+        return true;
+    }
+    hooks.iter().any(|hook| hook == hook_name)
 }
 pub fn plugin_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
     let inventory = active_plugin_inventory();
@@ -2689,6 +2834,20 @@ fn bundle_asset_path(
         _ => return None,
     };
     Some(root.join(dir).join(format!("{name}.{extension}")))
+}
+fn safe_bundle_relative_path(root: &Path, value: &str) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(root.join(path))
 }
 fn bundle_layout(root: &Path) -> anyhow::Result<BundleLayoutToml> {
     let text = fs::read_to_string(root.join("bundle.toml"))?;

@@ -19,7 +19,7 @@
 - Zsh compatibility is now a migration and onboarding layer, not the plugin system identity. Keep the scanner/importer safe, but do not expand toward a zsh interpreter, zsh plugin runtime, or ZLE runtime.
 - The plugin system is Winuxsh-native and built into winuxsh. `oh-my-winuxsh` is the official bundled plugin distribution, not an Oh My Zsh fork.
 - Use `~/.winshrc.toml` as the plugin control plane for enablement, permissions, bundle versions, and managed updates. Keep `~/.winshrc` as the user shell script plane.
-- Start plugin implementation with a manifest-backed `builtin` registry for existing first-party packs. WASM/WASI is the long-term third-party runtime; process plugins are an adapter/debug bridge, not the main ecosystem.
+- Use the manifest-backed registry as the control plane for every runtime. Use `source` packs with bundle-local `.winux` scripts for Oh My-style shell helpers, keep `builtin` for host-owned native behavior and fallback, use WASM/WASI as the long-term sandbox/provider runtime, and keep process plugins as an adapter/debug bridge rather than the main ecosystem.
 
 ## Development Rules
 

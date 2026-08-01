@@ -17,9 +17,10 @@ The goal is a clean open-source product line:
 - Existing "zsh compatibility" work is treated as migration tooling and
   first-party Winuxsh implementations, not as zsh plugin support.
 - TOML remains the plugin control plane. RC remains the user script plane.
-- Builtin plugins ship first. WASM follows after the host API stabilizes.
-  Process/IPC remains an adapter/debug backend. DLL/FFI is not a public plugin
-  ABI.
+- Bundle-local `.winux` source plugins are the Oh My-style shell customization
+  runtime. Builtin remains the native fallback for host-owned behavior. WASM
+  follows after the host API stabilizes. Process/IPC remains an adapter/debug
+  backend. DLL/FFI is not a public plugin ABI.
 
 ## Current State
 
@@ -49,6 +50,10 @@ Completed in this branch:
   deterministic stdout/stderr writes, simple command args, and permission-gated
   cwd/env reads without opening files, processes, env mutation, or arbitrary
   shell mutation.
+- Source plugins have a first-class host path for reviewed, bundle-local
+  `.winux` startup scripts. They load for interactive REPL startup and `-C`,
+  before user `~/.winshrc`, and they do not run for ordinary `winuxsh -c`,
+  script files, or stdin execution.
 
 ## Phase 0 - Direction Lock
 
@@ -59,12 +64,15 @@ Winuxsh:
 - Document that plugins are Winuxsh-native.
 - Document that zsh compatibility is migration-only.
 - Decide that TOML is the plugin control plane and RC is user shell code.
-- Decide runtime order: `builtin` first, `wasm` later, `process` as adapter.
+- Decide runtime roles: `source` for trusted shell startup customization,
+  `builtin` for native fallback/host-owned behavior, `process` as adapter,
+  and `wasm` for future sandbox/provider work.
 
 oh-my-winuxsh:
 
 - Preserve legacy repository state with a branch/tag.
-- Rebuild the working branch around bundle manifests, not sourced scripts.
+- Rebuild the working branch around bundle manifests plus reviewed `.winux`
+  source scripts, not arbitrary zsh or legacy `.winsh` scripts.
 
 Done when:
 
@@ -79,7 +87,8 @@ Winuxsh:
 
 - Add runtime data model for:
   - bundle name and version;
-  - plugin name, kind, category, default state;
+  - plugin name, kind (`builtin`, `source`, `process`, `wasm`), category,
+    default state;
   - permissions;
   - required binaries;
   - exports: aliases, completions, prompt segments, hooks, commands,
@@ -433,6 +442,41 @@ Done when:
 - A process plugin can expose a command or hook through the same manifest model.
 - Failure, timeout, stderr, and exit status are deterministic.
 
+## Phase 7a - Source Runtime
+
+Status: implemented on the current branch for reviewed bundle-local `.winux`
+startup scripts.
+
+Winuxsh:
+
+- Add `kind = "source"` with `[source] entry = "packs/<name>/init.winux"`.
+- Require source entries to be bundle-local relative paths ending in `.winux`.
+- Require the high-risk `shell:source` permission before a source pack can be
+  installed by bundle update validation.
+- Source enabled packs during interactive startup and the `-C` one-shot REPL
+  path before process startup hooks and before user `~/.winshrc`.
+- Keep `winuxsh -c`, script files, and stdin execution deterministic and free
+  of plugin startup code.
+- Expose `WINUXSH_PLUGIN_NAME`, `WINUXSH_PLUGIN_DIR`,
+  `WINUXSH_PLUGIN_SOURCE`, and `WINUXSH_REPL_PLUGIN_STARTUP=1` while each
+  source script runs, then unset them.
+
+oh-my-winuxsh:
+
+- Migrate first-party devtool shell helpers (`git`, `docker`, `kubectl`,
+  `npm`) to source packs with `init.winux` entries.
+- Keep static aliases/completions as bundle assets so source scripts do not
+  need to duplicate every table.
+- Add a `templates/source` authoring template and validate `.winux` suffixes.
+
+Done when:
+
+- Updating the official bundle can add or change first-party `.winux` shell
+  helpers without replacing `winuxsh.exe`.
+- User `~/.winshrc` runs after source packs and can override official aliases
+  or functions.
+- Bad source manifests fail bundle validation before the active lock changes.
+
 ## Phase 8 - WASM/WASI Backend
 
 Status: minimal command execution implemented on the current branch; full WASI/component host remains future work.
@@ -501,8 +545,8 @@ Current branch progress:
 
 oh-my-winuxsh:
 
-- Keep official first-party packs builtin unless WASM has a clear distribution
-  benefit.
+- Keep official first-party packs as source or builtin unless WASM has a clear
+  sandbox/provider benefit.
 - Added `wasm-hello` as an explicit opt-in host API fixture, not as a required
   runtime for current builtins.
 
@@ -564,8 +608,8 @@ Current branch progress:
 - oh-my-winuxsh now includes `docs/authoring.md` with manifest schema,
   permission token descriptions, runtime contracts, asset rules, and a release
   checklist.
-- The bundle ships copyable `templates/builtin`, `templates/process`, and
-  `templates/wasm` manifests.
+- The bundle ships copyable `templates/source`, `templates/builtin`,
+  `templates/process`, and `templates/wasm` manifests.
 - `tools/validate_bundle.py` validates the authoring guide, templates, package
   index, release metadata, and CI workflow so the public authoring surface is
   mechanically checked.
@@ -606,7 +650,8 @@ Current branch progress:
 oh-my-winuxsh:
 
 - Keep legacy branch/tag available.
-- Do not reintroduce sourced script plugins.
+- Do not reintroduce sourced zsh or legacy `.winsh` script plugins; only
+  reviewed bundle-local `.winux` source packs are supported.
 
 Done when:
 

@@ -3,11 +3,13 @@
 This note is the authoritative direction for the Winuxsh plugin system.
 The execution sequence lives in [Plugin System Roadmap](plugin-system-roadmap.md).
 
-Winuxsh plugins are Winuxsh-native. They are not zsh plugins, not an
-Oh My Zsh compatibility layer, and not a way to source arbitrary shell startup
-code. The old zsh migration pack mappings are treated as the first batch of
-Winuxsh-owned features that now live behind a real plugin registry and an
-official bundled distribution.
+Winuxsh plugins are Winuxsh-native. They are not zsh plugins and not an
+Oh My Zsh compatibility layer. The plugin system can now load reviewed,
+bundle-local `.winux` source scripts for Oh My-style shell customization, but
+it must not source arbitrary `.zsh`, legacy `.winsh`, or user-discovered rc
+fragments as plugin code. The old zsh migration pack mappings are treated as
+the first batch of Winuxsh-owned features that now live behind a real plugin
+registry and an official bundled distribution.
 
 ## Decision
 
@@ -22,10 +24,11 @@ official bundled distribution.
   detect familiar `.zshrc` intent and suggest Winuxsh plugins, but it must not
   define the plugin system's identity.
 - Treat the current `builtin` packs as a first-party transition layer, not as
-  the final definition of what a plugin can be. The bundle may look TOML-heavy
-  today because many current packs are declarations over Winuxsh-owned code.
-  Future code-bearing packs should move through the same manifest and
-  permission model using `wasm` or `process` runtimes.
+  the final definition of what a plugin can be. Oh My-style aliases,
+  functions, and startup helpers should migrate into bundle-local `.winux`
+  source packs guarded by `shell:source`; sandboxed providers and commands
+  should move through the same manifest and permission model using `wasm` or
+  `process` runtimes.
 - Do not support ZLE. Only a small set of zsh-style keybinding names may be
   translated to native reedline editor actions.
 
@@ -42,11 +45,12 @@ winuxsh core
 
 oh-my-winuxsh bundled distribution
   - official first-party plugin manifests
-  - aliases, completions, prompt presets, keybinding presets
+  - .winux source scripts, aliases, completions, prompt presets, keybinding presets
   - builtin adapters for existing native Winuxsh features
   - independent version and update channel
 
 external plugins
+  - source plugins for reviewed, trusted shell startup code
   - wasm plugins as the preferred long-term third-party runtime
   - process plugins as a compatibility/debug bridge
 ```
@@ -62,20 +66,22 @@ The plugin model intentionally separates declaration from execution:
   bash-like shell code there: aliases, exports, functions, and local startup
   behavior.
 - `oh-my-winuxsh` is a distributable bundle. It can carry static assets
-  directly, and it can carry or reference code-bearing artifacts only through
-  explicit runtime contracts such as `wasm` or `process`.
+  directly, and it can carry code-bearing artifacts only through explicit
+  runtime contracts: `.winux` source scripts, `process`, or `wasm`.
 
 TOML is not meant to replace bash syntax. It cannot and should not express
 arbitrary shell behavior. A pack that only needs aliases, completions, prompt
 presets, keybinding metadata, or themes can be pure TOML. A pack that needs
-real behavior must either be a first-party `builtin` implemented by Winuxsh, a
-`process` adapter, or a sandboxed `wasm` plugin.
+shell-language behavior can be a `source` pack with a bundle-local
+`packs/<name>/init.winux` entry. A pack that needs native process isolation can
+use `process`; a pack that needs sandboxed deterministic code should use
+`wasm` as that ABI matures. Native host-only features remain `builtin`.
 
-This differs from zsh and many bash plugin ecosystems, where a plugin is often
-just an rc fragment that gets sourced. Winuxsh keeps that freedom for the
-user's own rc file, but does not use sourced third-party rc code as the
-distributed plugin mechanism. Third-party plugin code should be auditable from
-the manifest before it runs.
+This deliberately borrows the useful part of zsh and bash plugin ecosystems:
+small startup scripts can mutate the current shell by being sourced. The
+Winuxsh boundary is stricter: source plugin scripts must be declared in the
+manifest, live inside the bundle, use the `.winux` suffix, and request the
+high-risk `shell:source` permission before they are enabled.
 
 ## Runtime Kinds
 
@@ -84,19 +90,27 @@ execution backends:
 
 | kind | Purpose | Stability |
 | --- | --- | --- |
-| `builtin` | Existing Rust implementations shipped inside winuxsh | First target |
+| `builtin` | Existing Rust implementations shipped inside winuxsh | Native fallback / host-owned features |
+| `source` | Bundle-local `.winux` shell startup scripts sourced into the current interactive session | First-class Oh My-style runtime |
 | `wasm` | Third-party and distributable plugins through WASM/WASI | Long-term target |
 | `process` | External tool bridge, debugging, and compatibility adapters | Supported but not the main ecosystem |
 
-This means IPC/process plugins and WASM plugins are mutually exclusive at the
+This means source, IPC/process, and WASM plugins are mutually exclusive at the
 single plugin instance level, but not at the architecture level. They are just
 runtime backends behind the same plugin contract.
 
-WASM does not replace `~/.winshrc`. The rc file remains the user's personal
-trusted script surface. WASM is for distributable plugin code that should run
+Source plugins run during interactive startup and the `-C` one-shot REPL path,
+before user `~/.winshrc`. Ordinary `winuxsh -c`, script files, and stdin script
+execution stay quiet and do not load source plugins. The user rc file remains
+last in the startup order so personal aliases, functions, and exports can
+override official pack defaults.
+
+WASM does not replace source plugins or `~/.winshrc`. The rc file remains the
+user's personal trusted script surface. Source plugins are the reviewed shell
+customization surface. WASM is for distributable plugin code that should run
 under a host contract with explicit permissions, resource limits, and a stable
-ABI. In other words, rc is the user's freedom surface; WASM is the plugin
-ecosystem's safety surface.
+ABI. In other words, rc is the user's freedom surface; source is the Oh
+My-style bundle surface; WASM is the sandbox/provider surface.
 
 The current WASM command ABI is intentionally small: command modules export
 `winuxsh_plugin_main() -> i32`, can write deterministic stdout/stderr through
@@ -124,7 +138,7 @@ load = ["git", "zoxide", "keybindings"]
 
 [plugins.git]
 enabled = true
-permissions = ["cwd:read", "process:run:git"]
+permissions = ["shell:source", "cwd:read", "process:run:git"]
 
 [plugins.zoxide]
 enabled = false
@@ -170,7 +184,9 @@ oh-my-winuxsh/
   bundle.toml
   packs/
     git/plugin.toml
+    git/init.winux
     docker/plugin.toml
+    docker/init.winux
     kubectl/plugin.toml
     npm/plugin.toml
     zoxide/plugin.toml
@@ -209,8 +225,10 @@ winuxsh plugin rollback oh-my-winuxsh
 
 ## Existing Feature Migration
 
-Do not rewrite existing features into WASM first. Move them behind the plugin
-registry as `kind = "builtin"` where appropriate.
+Do not rewrite existing features into WASM first. Move shell-language helpers
+behind the plugin registry as `kind = "source"` where `.winux` startup code is
+the natural fit, and keep native host behavior as `kind = "builtin"` where
+Winuxsh still owns the implementation.
 
 Keep as core interactive features:
 
@@ -236,19 +254,21 @@ Move into the bundled plugin registry as first-party packs:
 - `prompts`.
 
 This is a transitional product shape. It is acceptable for a first-party pack
-to be `kind = "builtin"` while the host APIs are still young, but that should
-not become the only long-term plugin model. Builtin packs should be reviewed
-periodically and split into external runtime packs when doing so improves
-distribution, auditability, or third-party extensibility.
+to be `kind = "builtin"` while the host APIs are still young, but builtin
+should not become the only long-term plugin model. Builtin packs should be
+reviewed periodically and split into `source`, `process`, or `wasm` runtime
+packs when doing so improves distribution, auditability, or third-party
+extensibility.
 
 Candidate migration groups:
 
 | Group | Direction |
 | --- | --- |
 | Static assets: aliases, completion tables, themes, prompt presets, keybinding metadata | Keep in `oh-my-winuxsh` as TOML assets. No code runtime required. |
+| Oh My-style shell helpers: aliases, functions, exports, startup glue | Use `kind = "source"` with a bundle-local `init.winux` and `shell:source`. |
 | Pure providers: command-not-found suggestions, prompt segment calculation, completion providers, formatters | Prefer future `wasm` where the plugin is mostly input -> output. |
 | External-tool adapters: `thefuck`, `direnv`, `fzf`-style launchers | Prefer `process` when native process behavior or interactive tools are the point. |
-| Shell-mutating helpers: `zoxide`, `dotenv`, lifecycle hooks, env/cwd changes | Migrate only after host APIs exist for `env:write`, `shell:cwd:write`, scoped file reads, hook context, and rollback/failure behavior. |
+| Shell-mutating helpers: `zoxide`, `dotenv`, lifecycle hooks, env/cwd changes | Use `source` only when trusted shell mutation is the product requirement; use future effect APIs for sandboxed/third-party mutation. |
 | Core shell machinery: rubash parser/executor, reedline primitives, Windows cwd/env/path synchronization, native builtins | Keep in Winuxsh core. Do not externalize just to make the bundle appear more code-rich. |
 
 Migration order:
@@ -282,17 +302,20 @@ Use:
 name = "git"
 bundle = "oh-my-winuxsh"
 version = "1.0.0"
-kind = "builtin"
+kind = "source"
 api = "winuxsh:plugin@0.1.0"
 summary = "Git aliases, completions, and prompt segments."
-permissions = ["cwd:read", "process:run:git"]
+permissions = ["shell:source", "cwd:read", "process:run:git"]
 
 [exports]
 aliases = true
 completions = ["git"]
 prompt_segments = ["git"]
-hooks = []
+hooks = ["startup"]
 commands = []
+
+[source]
+entry = "packs/git/init.winux"
 
 [settings]
 show_dirty = true
@@ -309,14 +332,16 @@ plan. The short version is:
 3. install and load the bundled `oh-my-winuxsh` baseline;
 4. add independent bundle update/rollback and `plugin-lock.toml`;
 5. move first-party data assets into the bundle where safe;
-6. add `process` only as an adapter/debug backend;
-7. add `wasm` after the host API is stable.
+6. add `source` runtime for reviewed bundle-local `.winux` shell startup code;
+7. add `process` only as an adapter/debug backend;
+8. add `wasm` after the host API is stable.
 
 ## Non-goals
 
 - No zsh plugin runtime.
 - No ZLE runtime.
-- No arbitrary `source plugin.zsh`.
+- No arbitrary `source plugin.zsh`, legacy `.winsh`, or user-discovered rc
+  fragments as plugin code.
 - No plugin access to rubash parser/executor internals.
 - No DLL/FFI plugin ABI for community plugins.
 - No plugin behavior that depends on executing `~/.winshrc`.

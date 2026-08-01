@@ -9,7 +9,6 @@ pub mod completion;
 pub mod config;
 pub mod ctrl_c;
 pub mod git_status;
-pub(crate) mod native_file_builtins;
 pub mod plugins;
 pub mod prompt;
 pub mod prompt_segments;

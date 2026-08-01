@@ -105,6 +105,34 @@ preexec = ["export WINUXSH_REPL_PREEXEC_RAN=yes"]
 }
 
 #[test]
+fn command_mode_can_source_user_winshrc_explicitly() {
+    let temp = unique_temp_dir("winuxsh-command-mode-source-winshrc");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "").unwrap();
+    std::fs::write(
+        home.join(".winshrc"),
+        "export WINUXSH_EXPLICIT_SOURCE_RC=loaded\n",
+    )
+    .unwrap();
+
+    let output = run_winuxsh(
+        &[
+            "-c",
+            "source ~/.winshrc; echo rc:$WINUXSH_EXPLICIT_SOURCE_RC",
+        ],
+        &start,
+        &home,
+    );
+
+    assert_success(&output, "command mode explicit source ~/.winshrc");
+    assert_eq!(stdout_text(&output).trim(), "rc:loaded");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
     let temp = unique_temp_dir("winuxsh-repl-command-cat-tilde");
     let home = temp.join("home");
