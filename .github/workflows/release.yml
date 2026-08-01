@@ -45,6 +45,9 @@ jobs:
       - name: Checkout rubash path dependency
         run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
 
+      - name: Checkout oh-my-winuxsh bundle
+        run: git clone --depth 1 https://github.com/unixwin/oh-my-winuxsh.git ../oh-my-winuxsh
+
       - name: Resolve release inputs
         id: release
         shell: pwsh
@@ -149,6 +152,7 @@ jobs:
           ./scripts/package-release.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
+            -OhMyWinuxshBundlePath "..\oh-my-winuxsh" `
             -Configuration release `
             -Target "${{ matrix.rust_target }}" `
             -Arch "${{ matrix.arch }}"
