@@ -418,8 +418,10 @@ fn redirected_recursive_cp_uses_path_command_not_winuxsh_native_builtin() {
     assert_success(&output, "redirected recursive cp path dispatch");
     let stdout = stdout_lines(&output);
     assert!(
-        stdout.first().is_some_and(|line| line.contains("WinuxCmd")),
-        "cp --version should come from WinuxCmd/PATH, got {stdout:?}"
+        stdout
+            .first()
+            .is_some_and(|line| line.starts_with("cp (") && !line.contains("winuxsh native")),
+        "cp --version should come from PATH, not winuxsh native cp, got {stdout:?}"
     );
     assert_eq!(
         std::fs::read_to_string(dest.join("sub").join("file.txt")).unwrap(),
