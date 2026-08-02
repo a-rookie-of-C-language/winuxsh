@@ -9,6 +9,7 @@ use reedline::{Highlighter, StyledText};
 use crate::autosuggest::parse_zsh_style;
 use crate::completion::command::CommandCompleter;
 use crate::config::SyntaxHighlightConfig;
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SyntaxKind {
@@ -513,9 +514,9 @@ fn path_kind(word: &str) -> Option<SyntaxKind> {
 fn resolve_path(word: &str) -> PathBuf {
     let word = shell_unescape_word(word.trim_matches(|ch| matches!(ch, '\'' | '"' | ')' | '(')));
     let expanded = if word == "~" {
-        dirs::home_dir()
+        shell_home_dir()
     } else if let Some(rest) = word.strip_prefix("~/").or_else(|| word.strip_prefix("~\\")) {
-        dirs::home_dir().map(|home| home.join(rest))
+        shell_home_dir().map(|home| home.join(shell_path_to_host_path(rest)))
     } else {
         None
     };

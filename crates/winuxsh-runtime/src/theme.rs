@@ -1,6 +1,8 @@
-//! Theme system for winuxsh
+//! Theme API for winuxsh.
 //!
-//! Defines prompt / output colours for the shell.
+//! Winuxsh core owns the style schema and resolution hooks. Official themes
+//! live in external bundles such as oh-my-winuxsh. Core does not ship
+//! selectable official themes.
 
 use std::path::{Path, PathBuf};
 
@@ -32,75 +34,23 @@ pub struct UserThemeEntry {
 impl Theme {
     pub fn default_theme() -> Self {
         Self {
-            name: "default".to_string(),
-            prompt_user: Style::new().bold().fg(Color::Green),
-            prompt_host: Style::new().bold().fg(Color::Cyan),
-            prompt_dir: Style::new().bold().fg(Color::Blue),
-            prompt_symbol: Style::new().fg(Color::White),
+            name: "unstyled".to_string(),
+            prompt_user: Style::new().bold().fg(Color::Default),
+            prompt_host: Style::new().bold().fg(Color::Default),
+            prompt_dir: Style::new().bold().fg(Color::Default),
+            prompt_symbol: Style::new().fg(Color::Default),
             error: Style::new().fg(Color::Red),
             warning: Style::new().fg(Color::Yellow),
             success: Style::new().fg(Color::Green),
             git_clean: Style::new().fg(Color::Green),
             git_dirty: Style::new().fg(Color::Yellow),
             git_status_detail: Style::new().fg(Color::Cyan),
-        }
-    }
-
-    pub fn dark() -> Self {
-        Self {
-            name: "dark".to_string(),
-            prompt_user: Style::new().bold().fg(Color::White),
-            prompt_host: Style::new().bold().fg(Color::White),
-            prompt_dir: Style::new().bold().fg(Color::LightCyan),
-            prompt_symbol: Style::new().fg(Color::White),
-            error: Style::new().fg(Color::Red),
-            warning: Style::new().fg(Color::Yellow),
-            success: Style::new().fg(Color::Green),
-            git_clean: Style::new().fg(Color::Green),
-            git_dirty: Style::new().fg(Color::Yellow),
-            git_status_detail: Style::new().fg(Color::Cyan),
-        }
-    }
-
-    pub fn light() -> Self {
-        Self {
-            name: "light".to_string(),
-            prompt_user: Style::new().bold().fg(Color::Black),
-            prompt_host: Style::new().bold().fg(Color::DarkGray),
-            prompt_dir: Style::new().bold().fg(Color::Blue),
-            prompt_symbol: Style::new().fg(Color::Black),
-            error: Style::new().fg(Color::Red),
-            warning: Style::new().fg(Color::Yellow),
-            success: Style::new().fg(Color::Green),
-            git_clean: Style::new().fg(Color::Green),
-            git_dirty: Style::new().fg(Color::Yellow),
-            git_status_detail: Style::new().fg(Color::Cyan),
-        }
-    }
-
-    pub fn colorful() -> Self {
-        Self {
-            name: "colorful".to_string(),
-            prompt_user: Style::new().bold().fg(Color::LightRed),
-            prompt_host: Style::new().bold().fg(Color::LightYellow),
-            prompt_dir: Style::new().bold().fg(Color::LightGreen),
-            prompt_symbol: Style::new().bold().fg(Color::LightMagenta),
-            error: Style::new().bold().fg(Color::Red),
-            warning: Style::new().bold().fg(Color::Yellow),
-            success: Style::new().bold().fg(Color::Green),
-            git_clean: Style::new().bold().fg(Color::Green),
-            git_dirty: Style::new().bold().fg(Color::Yellow),
-            git_status_detail: Style::new().bold().fg(Color::Cyan),
         }
     }
 }
 
 /// Look up a theme by name.
 pub fn by_name(name: &str) -> Theme {
-    if let Some(theme) = builtin_by_name(name) {
-        return theme;
-    }
-
     if let Some(theme) = load_user_theme(name) {
         return theme;
     }
@@ -109,31 +59,22 @@ pub fn by_name(name: &str) -> Theme {
         return theme;
     }
 
-    log::warn!("Theme '{}' not found, falling back to default", name);
+    log::warn!(
+        "Theme '{}' not found in user themes or active bundles; oh-my-winuxsh theme bundle may be missing or invalid",
+        name
+    );
     Theme::default_theme()
 }
 
-fn builtin_by_name(name: &str) -> Option<Theme> {
-    match name {
-        "default" => Some(Theme::default_theme()),
-        "dark" => Some(Theme::dark()),
-        "light" => Some(Theme::light()),
-        "colorful" => Some(Theme::colorful()),
-        _ => None,
-    }
-}
-
-/// List all available theme names.
+/// Core ships no official theme names. Official themes are discovered from
+/// user theme files and active plugin bundles.
 pub fn list_names() -> &'static [&'static str] {
-    &["default", "dark", "light", "colorful"]
+    &[]
 }
 
-/// List built-in names plus user and active official bundle theme names.
+/// List user and active bundle theme names.
 pub fn list_available_names() -> Vec<String> {
-    let mut names = list_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
+    let mut names: Vec<String> = Vec::new();
     for entry in user_theme_entries() {
         if !names
             .iter()
@@ -156,7 +97,7 @@ fn load_user_theme(name: &str) -> Option<Theme> {
 }
 
 fn user_theme_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".winuxsh").join("themes"))
+    crate::path_utils::shell_home_dir().map(|home| home.join(".winuxsh").join("themes"))
 }
 
 pub fn user_theme_entries() -> Vec<UserThemeEntry> {
@@ -286,7 +227,11 @@ impl UserThemeToml {
 #[derive(Debug, Deserialize)]
 struct UserStyleToml {
     fg: Option<String>,
+    bg: Option<String>,
     bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    dimmed: Option<bool>,
 }
 
 impl UserStyleToml {
@@ -294,14 +239,43 @@ impl UserStyleToml {
         if let Some(fg) = self.fg {
             style = style.fg(parse_color(&fg)?);
         }
+        if let Some(bg) = self.bg {
+            style = style.on(parse_color(&bg)?);
+        }
         if let Some(bold) = self.bold {
             style.is_bold = bold;
+        }
+        if let Some(italic) = self.italic {
+            style.is_italic = italic;
+        }
+        if let Some(underline) = self.underline {
+            style.is_underline = underline;
+        }
+        if let Some(dimmed) = self.dimmed {
+            style.is_dimmed = dimmed;
         }
         Some(style)
     }
 }
 
 fn parse_color(value: &str) -> Option<Color> {
+    let raw = value.trim().to_ascii_lowercase();
+    if let Some(hex) = raw.strip_prefix('#') {
+        return parse_hex_color(hex).or_else(|| {
+            log::warn!("Unknown theme color '{}'", value);
+            None
+        });
+    }
+    if raw.len() == 6 && raw.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return parse_hex_color(&raw).or_else(|| {
+            log::warn!("Unknown theme color '{}'", value);
+            None
+        });
+    }
+    if let Ok(number) = raw.parse::<u8>() {
+        return Some(Color::Fixed(number));
+    }
+
     let key = value
         .chars()
         .filter(|ch| *ch != '_' && *ch != '-' && !ch.is_whitespace())
@@ -327,11 +301,22 @@ fn parse_color(value: &str) -> Option<Color> {
         "lightcyan" => Some(Color::LightCyan),
         "white" => Some(Color::White),
         "lightgray" | "lightgrey" => Some(Color::LightGray),
+        "default" => Some(Color::Default),
         _ => {
             log::warn!("Unknown theme color '{}'", value);
             None
         }
     }
+}
+
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
 }
 
 #[cfg(test)]
@@ -340,28 +325,14 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn builtin_theme_names_stay_stable() {
-        assert_eq!(list_names(), &["default", "dark", "light", "colorful"]);
+    fn core_exports_no_official_theme_names() {
+        assert!(list_names().is_empty());
     }
 
     #[test]
-    fn builtins_take_precedence_over_user_theme_files() {
-        let dir = unique_temp_dir("winuxsh-theme-builtins");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("dark.toml"),
-            r#"
-[prompt_user]
-fg = "red"
-bold = false
-"#,
-        )
-        .unwrap();
-
-        let builtin = Theme::dark();
-        assert_eq!(builtin_by_name("dark"), Some(builtin));
-
-        let _ = std::fs::remove_dir_all(dir);
+    fn missing_theme_uses_unstyled_schema_default() {
+        let theme = by_name("__missing_theme__");
+        assert_eq!(theme.name, "unstyled");
     }
 
     #[test]
@@ -408,6 +379,53 @@ bold = true
 [prompt_user]
 fg = "not-a-color"
 "#,
+        )
+        .unwrap();
+
+        assert!(load_user_theme_from_dir("broken", &dir).is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn loads_hex_background_and_style_bits_from_theme_file() {
+        let dir = unique_temp_dir("winuxsh-theme-hex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("neon.toml"),
+            r##"
+[prompt_user]
+fg = "#ff00ff"
+bg = "102030"
+bold = false
+italic = true
+underline = true
+dimmed = true
+"##,
+        )
+        .unwrap();
+
+        let theme = load_user_theme_from_dir("neon", &dir).unwrap();
+        assert_eq!(theme.prompt_user.foreground, Some(Color::Rgb(255, 0, 255)));
+        assert_eq!(theme.prompt_user.background, Some(Color::Rgb(16, 32, 48)));
+        assert!(!theme.prompt_user.is_bold);
+        assert!(theme.prompt_user.is_italic);
+        assert!(theme.prompt_user.is_underline);
+        assert!(theme.prompt_user.is_dimmed);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_hex_theme_color_is_ignored() {
+        let dir = unique_temp_dir("winuxsh-theme-invalid-hex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.toml"),
+            r##"
+[prompt_user]
+fg = "#ff00zz"
+"##,
         )
         .unwrap();
 
@@ -472,3 +490,5 @@ fg = "not-a-color"
         std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
     }
 }
+
+

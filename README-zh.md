@@ -1,335 +1,125 @@
 # Winuxsh
 
-中文 | [English](README.md)
+> **Windows 上的原生 Bash。** 不是 WSL，不是虚拟机，不是 `/mnt/c`，更不是 cmdlet。
+> 不是你记忆中的那个 Bash，但原汁原味的程度没两样。这次，参数一个都不会少。
 
-一个 Windows 原生、感觉像 bash 和 zsh 的 shell，不需要 MSYS2、Git Bash、
-Cygwin、WSL 隔离层，也不走 PowerShell 语义。写给人类和 coding agent 用。
+中文 · [English](README.md)
+
+[![Winuxsh CI](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml)
+[![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/unixwin/winuxsh)](https://github.com/unixwin/winuxsh/stargazers)
+
+一个原生 Windows 二进制。Bash 语法。Windows 路径。真 Windows 程序。
+Unix 命令随包附赠。你的命令和你的工具之间，没有模拟层，也没有翻译官——
+你 AI agent 想摔跤都没地方摔。
+
+<img src="assets/demo.gif" alt="Winuxsh 交互会话：git prompt、grep、sed 原地编辑、awk 管道、tree" width="760"/>
+
+就这些。这就是全部卖点。
+
+## 一句话卖点
+
+**你需要的不是 WSL——是 Winuxsh。**
+
+每个 Windows shell 都要你交出点什么。CMD 冻结在 1987 年。PowerShell
+不是 Bash——你的 `for`、`grep`、引号直觉，落地即碎。WSL 是你要领养一整个
+Linux 发行版才能打印个目录。Git Bash 模拟 Unix 并*猜*你的路径，而 Windows
+原生工具根本不说它的方言。
+
+Winuxsh 全部还给你：
+
+- **真·Bash** — `if`、`for`、`case`、`$(...)`、管道、heredoc、函数、数组。引擎是 [rubash](https://github.com/unixwin/rubash)，GNU Bash 官方测试套件 **86/86 全绿**。
+- **Windows 路径，原生** — `C:\...`、`C:/...` 原样可用，`/c/...` 输入也听得懂，输出永远是原生。原生工具拿到原生路径，零猜测。
+- **Unix 命令随包附赠** — `ls`、`cat`、`grep`、`find`、`test`、`printf`…… 来自 WinuxCmd，什么都不用装。
+- **真 Windows 程序，直接调** — `git.exe`、`node.exe`、`python.exe`、`cargo.exe`。你的 PATH 就是你的 PATH。
+- **一个你愿意天天看的 prompt** — 27 款主题（agnoster、spaceship、tokyonight、p10 家族……）、会"长牙"的 git 提示、语法高亮、自动建议、vi/emacs 双模式。
+- **带权限模型的插件** — 40+ 随包插件（`git`、`docker`、`kubectl`、`npm`、`zoxide`、`fzf`、`thefuck`……），第三方插件跑在 WASM 沙箱里。
+
+## AI 原生
+
+每个 AI 编程 agent 都会说 Bash。在 Windows 上，它们大多被锁在 PowerShell
+里——就是那个著名的*吃参数*的 shell：
 
 ```text
-me@DESKTOP C:\Users\me\repo\winuxsh  git:(master) ●2 ✚1 ↑1 ?3
-%
+# PowerShell 5.1                              # Winuxsh
+> node -e "console.log(JSON.stringify(        ❯ node -e "console.log(JSON.stringify(
+    process.argv.slice(1)))" "a b" "" "c\"d"    process.argv.slice(1)))" "a b" "" "c\"d"
+    "e\f" "---"                                 "e\f" "---"
+
+ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 ```
 
-这个 prompt 直接显示了分支、dirty 状态、staged/unstaged 数量、ahead/behind
-和 untracked 文件 —— oh-my-zsh 的 `git_prompt_status` 风格，全部用 Rust
-原生实现。只要 `cd` 进一个 git 仓库就能用。
+写了 5 个参数：PowerShell 直接语法报错，Winuxsh 五个全到、一个字节不少。
+连 [Codex 在 Windows 上都被锁死 PowerShell](https://github.com/openai/codex/issues/31548)，
+用户正在公开投票要求逃生。
+完整案卷见 [Why Winuxsh](docs/src/why-winuxsh.md)。
 
-## 核心公式
+这就是键盘另一头的人经历的日常：
 
-```text
-winuxsh = rubash shell engine + winuxcmd coreutils + reedline frontend
-```
+<img src="assets/demo-drama.gif" alt="动画剧情：用户和 codex 对话，PowerShell 吃掉参数，用户崩溃，winuxsh 救场" width="520"/>
 
-- `rubash` 提供 shell 语言能力：解析、执行、内置命令、管道、重定向、别名、
-  函数和作业语义。
-- `winuxcmd.exe` 通过 Windows `PATH` 注入提供 Unix 工具集（`ls`、`cat`、
-  `grep`、`find`、`cp`、`mv`、`rm`、`mkdir`）。
-- `reedline` 提供交互前端：编辑、历史、补全菜单、提示和 prompt 渲染。
-- `~` 就是普通的 Windows 用户家目录。`PATH`、环境变量、cwd、stdout、stderr、
-  exit code 都是正常 Windows 进程状态。
-
-Winuxsh 不是 `zsh.exe`。它会安全地读取你的 `.zshrc` 和 Oh My Zsh 配置意图，
-然后用 Rust 原生实现有用的部分。
-
-## 为什么用它
-
-如果你在 PowerShell 里打了个 `ls` 却看到一张属性表的输出，或者看着 coding agent
-因为 `test -f Cargo.toml` 在 pwsh 里不存在而失败，winuxsh 就是答案。它给想要
-在 Windows 上写 bash 的人用的，也给希望 agent 能跑和 Linux 上相同命令的人用的。
-
-Winuxsh 给你：
-
-- **Windows 上真正的 bash 兼容 shell**：`if`、`for`、`while`、`case`、函数、
-  heredoc、管道、重定向、`$(...)` 全都可用。
-- **Windows 原生进程行为**：没有假的 `/c` 文件系统、没有 MSYS 隔离、
-  没有 PowerShell 的 wildcard 惊喜。`cd D:\repo` 后 `pwd` 输出
-  `D:/repo`，就是 Windows 原生的路径。
-- **Zsh 一样的交互体验**：自动建议、语法高亮、Vi/Emacs 编辑、Ctrl+R 历史搜索、
-  多行 PS2 提示、丰富的 Tab 补全。
-- **Agent 友好的 CLI**：`winuxsh -c ...` 和 `winuxsh script.sh`
-  保持安静、确定性，正确传递 stdout、stderr 和 exit code。
-- **安全的 zsh 迁移路径**：winuxsh 扫描你的 `.zshrc` 和 Oh My Zsh，
-  输出可审阅的导入计划，只有你确认后才写入配置。
-
-## 看一下效果
-
-从源码构建：
+`winuxsh -c` 是一份契约，不是边角料：**无 banner、stdout/stderr 稳定、
+退出码精确传递。** agent 写什么，进程就收到什么。
 
 ```sh
-cargo build --release
+winuxsh -c 'test -f Cargo.toml && echo build' && echo "exit=$?"
+winuxsh deploy.sh
 ```
 
-启动交互式 shell：
+## 安装
+
+去 [Releases](https://github.com/unixwin/winuxsh/releases) 下载
+`winuxsh-v*-win-*-setup.exe`，双击，完事——不需要管理员权限，它会配好
+你的 PATH 和 Windows Terminal 配置。嫌重？拿 `.zip` 便携版（首次启动自动
+激活 Unix 命令）。源码构建：
 
 ```sh
-target\release\winuxsh.exe
+git clone https://github.com/unixwin/winuxsh.git && cd winuxsh
+cargo build --release && target\release\winuxsh.exe
 ```
 
-如果你下载的是 release 包，第一次启动时 winuxsh 会自动执行：
+保持最新：`winuxsh --self-update`。
 
-```bash
-winuxsh winuxcmd/activate-winuxcmd.sh
-```
+## 从 zsh 搬过来？
 
-它只在缺少命令链接时运行一次，在 `winuxcmd/` 目录下生成本地链接，之后
-`ls`、`cat`、`grep` 就能直接用。
+Winuxsh 先扫描你的 `.zshrc`，给你看计划，确认后再应用，自动备份：
 
-发布包同时提供安装器和 portable zip。安装器会安装到用户目录、加入用户 PATH、
-写入 Windows Terminal profile，并支持 `winuxsh --self-update` 通过原生 WinHTTP 拉取最新安装器。
-portable zip 继续保留，适合 agent、脚本和不想写入系统配置的用户。
-
-试一下：
-
-```bash
-cd C:\Users\me\repo\winuxsh
-pwd                          # 输出 C:/Users/me/repo/winuxsh
-git status                   # prompt 自动显示分支和 dirty 状态
-ls -la                       # winuxcmd 提供的 Unix 风格目录列表
-echo $(git rev-parse --short HEAD)
-for i in 1 2 3; do echo $i; done
-if [ -f Cargo.toml ]; then echo "是 Rust 项目"; fi
-```
-
-原生 Windows 路径可直接作为 shell 输入：
-
-```bash
-ls C:\Users
-ls C:/Users/YourName         # 两种路径风格都支持
-cd C:/Users/YourName/repo
-```
-
-多行命令会等待块完成后再执行，和标准 shell 一样：
-
-```bash
-HTTP_CODE=200
-if [ $HTTP_CODE -eq 200 ]; then
-  echo "OK"
-fi
-```
-
-## Zsh 用户从这里开始
-
-不要直接把 zsh 插件源码拷贝进 winuxsh。先让 winuxsh 检查你现有的配置，
-然后决定导入什么：
-
-```pwsh
-winuxsh --zsh-compat-report         # 人类可读的 ~/.zshrc 扫描报告
-winuxsh --zsh-compat-report-json    # 同上,机器可读
-winuxsh --zsh-compat-import-plan    # 看看会写什么到 ~/.winshrc.toml
-```
-
-如果计划看起来没问题，再显式应用：
-
-```pwsh
+```sh
+winuxsh --zsh-compat-report
 winuxsh --zsh-compat-import-apply
-winuxsh --zsh-compat-import-status
-winuxsh --zsh-compat-doctor
 ```
 
-回滚也是先出计划：
+## 终端彩蛋
 
-```pwsh
-winuxsh --zsh-compat-import-rollback-plan
-```
-
-低风险日常 profile 或确定性 agent profile：
-
-```pwsh
-winuxsh --zsh-profile-plan zsh-lite
-winuxsh --zsh-profile-plan agent
-```
-
-详细教程：[Zsh 迁移教程](DOCS/zsh-migration-guide.md)。
-
-## 官方 Winuxsh 插件
-
-Winuxsh 会内置自己的插件系统。`oh-my-winuxsh` 是官方 bundled plugin
-distribution，定位类似 winuxcmd 对 coreutils 的关系：随 winuxsh 发行，
-也支持之后独立更新和回滚。
-
-release 包会在 `winuxsh.exe` 旁边带一份 `bundles/oh-my-winuxsh` 离线基线；
-之后通过 `%LOCALAPPDATA%` 或 plugin lock 安装的 bundle 会优先覆盖这份基线。
-
-这些不是 zsh 插件，也不是 Oh My Zsh fork。它们是 Winuxsh 自己实现和维护的
-first-party packs。`.zshrc` 最多作为一次性迁移来源，不能定义插件系统身份。
-
-当前插件 inventory、搜索、权限 review 和安装会通过统一 CLI 查看：
+Winuxsh 的终端不只能跑命令——还能打印图片。[terminal-flags](https://github.com/caomengxuan666/terminal-flags)
+项目可以把任意图片/GIF 转成独立 ANSI 打印脚本：
 
 ```sh
-winuxsh plugin list
-winuxsh plugin search git
-winuxsh plugin review git
-winuxsh plugin install git
-winuxsh plugin uninstall git
+winuxsh flags/taffy.sh         # 照片，直接显示在终端里
+winuxsh flags/qiu-dance.sh     # GIF 动画，帧率原样保留
 ```
 
-现有 `--zsh-native-packs` / `--zsh-native-packs-json` 会保留为兼容入口，
-但新文档和新实现应迁移到 `winuxsh plugin ...`。
+真彩色半块像素，运行时不需要 Python 或 Pillow：
 
-核心交互能力：
-
-- autosuggestions —— 基于历史的 inline 建议
-- syntax highlighting —— Winuxsh 原生高亮
-- prompt engine —— 内置 prompt 和 segment 渲染
-- keybinding presets —— 常见键位映射，不是 ZLE runtime
-
-官方 bundle 中的 first-party packs：
-
-- `git` —— Git 别名、补全、prompt segment
-- `docker`、`kubectl`、`npm`
-- `command-not-found`、`direnv`、`dotenv`、`zoxide`、`thefuck`、`fzf`、
-  `last-working-dir`
-- `prompts`、`keybindings`
-
-会读取项目文件、执行外部命令或改变 shell 状态的 pack 默认关闭，
-必须在 `~/.winshrc.toml` 中显式启用。
-
-## 配置
-
-`~/.winshrc.toml` 是结构化设置文件，负责 prompt、editor、history、
-completion、plugins、permissions、bundle version 这类可声明配置。
-`~/.winshrc` 是唯一的 REPL 启动脚本文件，负责 `export`、`alias`、函数、
-以及用户想写的 shell 逻辑。
-`.zshrc` 仅作为导入源读取，不作为运行时启动文件。
-
-最小示例：
-
-```toml
-[shell]
-prompt_format = "{user}@{host} {cwd} {git_prompt} {symbol}"
-right_prompt_format = ""
-multiline_indicator = "> "
-
-[editor]
-edit_mode = "emacs" # emacs | vi
-
-[history]
-path = "~/.winuxsh_history"
-max_size = 10000
-ignore_space_prefixed = true
-
-[theme]
-current_theme = "default" # default | dark | light | colorful | ocean | forest | cyberpunk | minimal | ~/.winuxsh/themes/<name>.toml
-
-[completions]
-matching = "prefix" # prefix | substring
-case_sensitive = false
-max_command_results = 500
-completion_dirs = []
-
-[menus]
-completion_page_size = 10
-history_page_size = 10
-max_entry_lines = 5
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["git", "prompts", "keybindings"]
-
-[plugins.git]
-enabled = true
-permissions = ["cwd:read", "process:run:git"]
-
-[plugins.zoxide]
-enabled = false
-permissions = ["cwd:read", "process:run:zoxide"]
-
-[winuxcmd]
-# 可选覆盖；省略时从 PATH 自动发现。
-# path = "D:/tools/winuxcmd/winuxcmd.exe"
-```
-
-`~/.winshrc` 使用 shell 语法：
-
-```bash
-export EDITOR=vim
-alias ll='ls -la'
-alias gst='git status'
-
-hello() {
-  echo "hello from winuxsh"
-}
-```
-
-`{git_prompt}` 占位符在 git 仓库里显示分支和紧凑状态符号，不在 git 目录时为空。
-符号含义：`●N` 暂存、`✚N` 已修改、`?N` 未跟踪、`↑N` 领先、`↓N` 落后、
-`⚑N` 储藏、`✖N` 冲突。分支颜色在 clean 时是绿色，dirty 时自动变黄。
-
-zsh compat import 只在显式运行 `--zsh-compat-import-apply` 时写入 managed block。
-
-## Rubash 负责的 shell 语义
-
-Shell 语言层面的东西全部走 rubash，包括：
-
-- 变量和命令替换
-- 管道和重定向
-- 别名和函数
-- `if`、`for`、`while`、`case`、函数、heredoc、续行
-- 脚本文件和 `-c` 整体执行
-- 多行复合命令收集为一次执行
-
-作业控制和可执行语法也归 rubash 管；winuxsh 不重复实现。这让 winuxsh 保持精炼，
-shell 层面能直接受益于 rubash 通过的 bash 上游测试；当前验证分层见 [Rubash Bash 能力矩阵](DOCS/rubash-bash-compat-matrix.md)。
-
-## 补全系统
-
-Winuxsh 补全支持：
-
-- 内置 winuxcmd 命令定义（`ls`、`grep`、`find`、`cat`、`cp`、`mv`、`rm`、
-  `mkdir`、`touch`、`chmod`，现在还有 `git`）
-- `git` 子命令感知：`git add <Tab>`、`git commit -<Tab>`、`git push --<Tab>`
-  都能得到实际的 flag 候选
-- 从 Windows `PATH` / `PATHEXT` 补全命令
-- 支持空格路径 quote/escape 的路径补全
-- 环境变量补全
-- `completion_dirs` 中的用户 TOML 定义
-- 可安全翻译的 zsh completion assets
-- 显式 allowlist + timeout 的 dynamic/runtime completion providers
-
-用户 TOML 定义会覆盖内置定义，所以你的 `~/.winuxsh/completions/ls.toml` 优先于
-自带的 `ls.toml`。
-
-## 架构
-
-```text
-winuxsh.exe
-├── winuxsh runtime (Rust)
-│   ├── rubash::Executor        shell 语言引擎
-│   ├── reedline REPL           编辑、历史、菜单、提示
-│   ├── completion system       TOML、zsh 导入、缓存、PATH 命令
-│   ├── zsh compatibility       扫描器、导入计划、原生 pack
-│   ├── theme/prompt            模板、内置主题、官方 bundle 主题和用户主题
-│   ├── git status              通过 `git status --porcelain` 获取分支和计数
-│   ├── config                  ~/.winshrc.toml
-│   └── ctrl_c                  Win32 Ctrl+C 处理
-├── rubash lib                  解析器/执行器/内置命令
-└── winuxcmd.exe                通过 PATH 注入的 Unix coreutils
-```
-
-## 非目标
-
-- 不做 PowerShell 语义或 wildcard 行为
-- 不做 MSYS2 / Git Bash / Cygwin / WSL 隔离
-- 不采用 Nushell 语法或结构化管道模型
-- 不在 winuxsh 内实现 zsh 解析器或 ZLE 运行时
-- 不在启动时盲目 source `.zshrc` 或 zsh 插件脚本
-- 不把 zsh 插件兼容作为 Winuxsh 插件系统身份
-- 不引入 winuxcmd FFI/DLL
-- 不重复实现 rubash 的解析器/执行器或核心 shell 语义
+<img src="assets/demo-qiu-dance.gif" alt="秋表情动画在 Winuxsh 终端里播放，由生成的 shell 脚本打印" width="560"/>
 
 ## 文档
 
-- [快速开始](DOCS/getting-started.md)
-- [插件系统方向](DOCS/plugin-system-direction.md)
-- [插件系统路线](DOCS/plugin-system-roadmap.md)
-- [Oh My Winuxsh Bundle Plan](DOCS/oh-my-winuxsh-bundle-plan.md)
-- [Zsh 迁移教程](DOCS/zsh-migration-guide.md)
-- [Roadmap](DOCS/winuxsh-roadmap.md)
-- [架构](DOCS/architecture.md)
-- [原生 Zsh Plugin Pack Plan](DOCS/winuxsh-native-zsh-plugin-pack-plan.md)
-- [Zsh 兼容计划](DOCS/zsh-compatibility-plan.md)
-- [定位与功能地图](DOCS/winuxsh-positioning-and-feature-map.md)
+完整文档站：**[docs](https://unixwin.github.io/winuxsh/)** · [快速上手](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [高级用法](docs/src/advanced-usage.md) · [Zsh 迁移指南](docs/src/zsh-migration-guide.md) · [架构](docs/src/architecture.md)
+
+底层三件套：[rubash](https://github.com/unixwin/rubash)（Bash 引擎）· WinuxCmd（Unix 命令）· [reedline](https://github.com/nushell/reedline)（行编辑器）
+
+## FAQ
+
+- **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix；Winuxsh 是原生 Windows 进程：原生路径、直接执行 Windows 二进制、Bash 兼容发生在语言引擎里，不在假的文件系统里。
+- **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 Winuxsh。
+- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。结构化的插件状态在 `~/.winshrc.toml`。
+
+---
+
+如果 Winuxsh 让你免了一次"为了跑 grep 先开个 Linux 虚拟机"的体验，
+[给仓库点个 Star](https://github.com/unixwin/winuxsh)，顺便告诉一个
+还在用 CMD 的朋友。★
 
 ## License
 

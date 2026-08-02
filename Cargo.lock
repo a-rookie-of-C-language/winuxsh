@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "winuxsh"
-version = "0.9.4"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "winuxsh-runtime"
-version = "0.9.4"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "colored",

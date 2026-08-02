@@ -1,10 +1,8 @@
 //! Winuxsh-native plugin inventory, bundle assets, and plugin CLI helpers.
 use crate::completion::external::{CommandDef, FlagDef, SubcommandDef};
 use crate::config::{PluginConfig, ZshConfig};
-use crate::git_status::GitPromptSymbols;
-use crate::prompt_segments::{SegmentId, SegmentPreset, SegmentPromptConfig};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::theme::Theme;
-use crate::zsh_compat::NativeWidgetSuggestion;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +28,7 @@ const MANAGED_BLOCK_END: &str = "# <<< winuxsh plugins <<<";
 pub enum PluginKind {
     Builtin,
     Source,
+    Bridge,
     Process,
     Wasm,
 }
@@ -38,6 +37,7 @@ impl PluginKind {
         match self {
             Self::Builtin => "builtin",
             Self::Source => "source",
+            Self::Bridge => "bridge",
             Self::Process => "process",
             Self::Wasm => "wasm",
         }
@@ -319,42 +319,6 @@ pub struct PluginThemeCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginPromptCatalogEntry {
-    pub name: String,
-    pub source: String,
-    pub trust_source: String,
-    pub owner: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pack: Option<String>,
-    #[serde(flatten)]
-    pub preset: PromptPresetAsset,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginKeybindingCatalogEntry {
-    pub name: String,
-    pub source: String,
-    pub trust_source: String,
-    pub owner: String,
-    pub keymap: String,
-    pub summary: String,
-    pub bindings: Vec<PluginKeybindingCatalogBinding>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pack: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-}
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginKeybindingCatalogBinding {
-    pub key: String,
-    pub action: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
 #[derive(Debug, Deserialize)]
 struct BundleToml {
     name: String,
@@ -439,6 +403,28 @@ struct BundlePackToml {
     process: Option<PluginProcessSpec>,
     #[serde(default)]
     wasm: Option<PluginWasmSpec>,
+}
+#[derive(Debug, Deserialize)]
+struct FrameworkPluginToml {
+    name: String,
+    version: String,
+    kind: PluginKind,
+    entry: String,
+    summary: String,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    bundle: Option<String>,
+    #[serde(default)]
+    category: Option<PluginCategory>,
+    #[serde(default)]
+    default: Option<bool>,
+    #[serde(default)]
+    permissions: Vec<String>,
+    #[serde(default)]
+    required_binaries: Vec<String>,
+    #[serde(default)]
+    exports: PluginExportsRecord,
 }
 #[derive(Debug, Deserialize)]
 struct BundleIndexToml {
@@ -539,12 +525,11 @@ struct BundleKeybindingsToml {
     #[serde(default)]
     bindings: Vec<BundleKeybindingToml>,
 }
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct BundleKeybindingToml {
     key: String,
     action: String,
-    #[serde(default)]
-    description: Option<String>,
 }
 pub fn effective_plugin_state(config: &PluginConfig, zsh: &ZshConfig) -> PluginRuntimeState {
     let mut state = PluginRuntimeState::default();
@@ -631,6 +616,40 @@ fn load_official_bundle_inventory_from_path(
         .with_context(|| format!("failed to read {}", bundle_path.display()))?;
     let bundle: BundleToml = toml::from_str(&bundle_text)
         .with_context(|| format!("failed to parse {}", bundle_path.display()))?;
+    let mut packs = load_legacy_bundle_pack_records(path, &bundle)?;
+    let framework_packs = load_framework_plugin_records(path, &bundle)?;
+    if !framework_packs.is_empty() {
+        let framework_names = framework_packs
+            .iter()
+            .map(|pack| pack.name.clone())
+            .collect::<BTreeSet<_>>();
+        let has_prompt_core = framework_names.contains("prompt-core");
+        let has_theme_plugins = framework_names
+            .iter()
+            .any(|name| name.starts_with("theme-"));
+        packs.retain(|pack| {
+            !framework_names.contains(&pack.name)
+                && !(pack.name == "prompts" && has_prompt_core)
+                && !(pack.name == "themes" && has_theme_plugins)
+        });
+        packs.extend(framework_packs);
+    }
+    let trust_source = plugin_trust_source_for(&bundle.name, source).to_string();
+    Ok(PluginInventory {
+        bundle: bundle.name,
+        version: bundle.version,
+        api: bundle.api,
+        min_winuxsh: bundle.min_winuxsh,
+        source: source.to_string(),
+        trust_source,
+        path: Some(path.to_path_buf()),
+        packs,
+    })
+}
+fn load_legacy_bundle_pack_records(
+    path: &Path,
+    bundle: &BundleToml,
+) -> anyhow::Result<Vec<PluginPackRecord>> {
     let pack_names = if bundle.packs.available.is_empty() {
         bundle.packs.default.clone()
     } else {
@@ -663,17 +682,149 @@ fn load_official_bundle_inventory_from_path(
             wasm: manifest.wasm,
         });
     }
-    let trust_source = plugin_trust_source_for(&bundle.name, source).to_string();
-    Ok(PluginInventory {
-        bundle: bundle.name,
-        version: bundle.version,
-        api: bundle.api,
-        min_winuxsh: bundle.min_winuxsh,
-        source: source.to_string(),
-        trust_source,
-        path: Some(path.to_path_buf()),
-        packs,
-    })
+    Ok(packs)
+}
+fn load_framework_plugin_records(
+    path: &Path,
+    bundle: &BundleToml,
+) -> anyhow::Result<Vec<PluginPackRecord>> {
+    let plugins_dir = path.join("plugins");
+    if !plugins_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut manifests = Vec::new();
+    for entry in fs::read_dir(&plugins_dir)
+        .with_context(|| format!("failed to read {}", plugins_dir.display()))?
+    {
+        let entry = entry?;
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = plugin_dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let manifest_path = plugin_dir.join("plugin.toml");
+        if manifest_path.is_file() {
+            manifests.push((name.to_string(), manifest_path));
+        }
+    }
+    manifests.sort_by(|(left, _), (right, _)| {
+        framework_plugin_sort_key(left)
+            .cmp(&framework_plugin_sort_key(right))
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut packs = Vec::new();
+    for (dir_name, manifest_path) in manifests {
+        let text = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest: FrameworkPluginToml = toml::from_str(&text)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        if manifest.name != dir_name {
+            anyhow::bail!(
+                "framework plugin manifest {} names '{}' but lives in '{}'",
+                manifest_path.display(),
+                manifest.name,
+                dir_name
+            );
+        }
+        if !safe_asset_name(&manifest.name) {
+            anyhow::bail!("framework plugin '{}' has an unsafe name", manifest.name);
+        }
+        let source = if manifest.kind == PluginKind::Source {
+            Some(PluginSourceSpec {
+                entry: framework_plugin_source_entry(&dir_name, &manifest.entry)?,
+            })
+        } else {
+            None
+        };
+        packs.push(PluginPackRecord {
+            name: manifest.name.clone(),
+            bundle: manifest
+                .bundle
+                .unwrap_or_else(|| bundle.name.clone()),
+            version: manifest.version,
+            kind: manifest.kind,
+            api: manifest
+                .api
+                .unwrap_or_else(|| PLUGIN_API_VERSION.to_string()),
+            category: manifest
+                .category
+                .unwrap_or_else(|| framework_plugin_category(&manifest.name, &manifest.exports)),
+            summary: manifest.summary,
+            default: manifest
+                .default
+                .unwrap_or_else(|| framework_plugin_default(&manifest.name)),
+            permissions: manifest.permissions,
+            required_binaries: manifest.required_binaries,
+            exports: manifest.exports,
+            source,
+            process: None,
+            wasm: None,
+        });
+    }
+    Ok(packs)
+}
+fn framework_plugin_source_entry(dir_name: &str, entry: &str) -> anyhow::Result<String> {
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        anyhow::bail!(
+            "framework plugin '{}' entry '{}' must be plugin-local relative path",
+            dir_name,
+            entry
+        );
+    }
+    Ok(format!("plugins/{}/{}", dir_name, entry.replace('\\', "/")))
+}
+fn framework_plugin_category(name: &str, exports: &PluginExportsRecord) -> PluginCategory {
+    if name == COMMAND_NOT_FOUND_PROVIDER
+        || exports
+            .providers
+            .iter()
+            .any(|provider| provider == COMMAND_NOT_FOUND_PROVIDER)
+    {
+        return PluginCategory::Hints;
+    }
+    if matches!(name, "direnv" | "dotenv") {
+        return PluginCategory::Environment;
+    }
+    if matches!(name, "git" | "docker" | "kubectl" | "npm") {
+        return PluginCategory::Devtools;
+    }
+    if name == "prompt-core"
+        || name == "keybindings"
+        || name.starts_with("theme-")
+        || !exports.themes.is_empty()
+        || !exports.keybindings.is_empty()
+        || !exports.prompt_segments.is_empty()
+    {
+        return PluginCategory::Ux;
+    }
+    PluginCategory::Workflow
+}
+fn framework_plugin_default(name: &str) -> bool {
+    matches!(name, "prompt-core" | "git" | "theme-minimal" | "keybindings")
+}
+fn framework_plugin_sort_key(name: &str) -> u8 {
+    match name {
+        "prompt-core" => 0,
+        "git" => 10,
+        "docker" | "kubectl" | "npm" => 20,
+        "zoxide" | "direnv" | "dotenv" | "fzf" | "last-working-dir" | "thefuck" => 30,
+        "command-not-found" | "keybindings" => 40,
+        "theme-minimal" => 50,
+        _ if name.starts_with("theme-") => 60,
+        _ => 100,
+    }
 }
 fn compiled_plugin_inventory() -> PluginInventory {
     PluginInventory {
@@ -942,6 +1093,7 @@ fn plugin_execution_model(pack: &PluginPackRecord) -> &'static str {
         }
         PluginKind::Builtin => "host_builtin",
         PluginKind::Source => "shell_source",
+        PluginKind::Bridge => "host_bridge",
         PluginKind::Process if !pack.exports.providers.is_empty() => "process_provider",
         PluginKind::Process => "process",
         PluginKind::Wasm => "wasm_command",
@@ -971,6 +1123,7 @@ fn plugin_externalization_class(pack: &PluginPackRecord) -> &'static str {
             PluginKind::Builtin if builtin_pack_is_asset_only(pack) => "declarative_asset",
             PluginKind::Builtin => "host_builtin",
             PluginKind::Source => "shell_source",
+            PluginKind::Bridge => "host_bridge",
             PluginKind::Process => "external_tool_adapter",
             PluginKind::Wasm => "wasm_code_bearing",
         },
@@ -1012,31 +1165,31 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
     match pack.name.as_str() {
         "git" => readiness(
             "source_assets_plus_native_prompt_segment",
-            "none",
-            true,
+            "prompt_segment_provider_abi",
             false,
-            "none",
+            true,
+            "compiled_prompt_segment",
         ),
         "docker" => readiness(
             "current_shell_source_plus_declarative_assets",
             "none",
-            true,
+            false,
             true,
             "minimal_compiled_alias_completion_fallback",
         ),
         "kubectl" => readiness(
             "current_shell_source_plus_declarative_assets",
             "none",
-            true,
+            false,
             true,
             "minimal_compiled_alias_completion_fallback",
         ),
         "npm" => readiness(
             "source_assets_plus_native_dynamic_completion",
-            "none",
-            true,
+            "completion_provider_abi",
             false,
-            "none",
+            true,
+            "native_dynamic_completion",
         ),
         "zoxide" => readiness(
             "native_until_effect_runtime",
@@ -1067,8 +1220,8 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
             "native_builtin",
         ),
         "command-not-found" => readiness(
-            "host_builtin_and_process_provider",
-            "wasm_provider_abi",
+            "process_provider_available_builtin_until_migration",
+            "bundle_migration_decision,wasm_provider_abi",
             false,
             true,
             "compiled_native_hints",
@@ -1088,25 +1241,25 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
             "native_builtin",
         ),
         "keybindings" => readiness(
-            "declarative_asset_plus_native_reedline_actions",
-            "none",
+            "asset_only_declarative_schema_tbd",
+            "asset_only_schema_marker,reedline_actions_stay_native",
             false,
-            false,
-            "none",
+            true,
+            "native_reedline_actions",
         ),
         "prompts" => readiness(
             "declarative_presets_plus_native_segments",
-            "none",
+            "prompt_segment_provider_abi",
             false,
-            false,
-            "none",
+            true,
+            "native_prompt_segments",
         ),
         "themes" => readiness(
-            "declarative_asset_plus_native_theme_renderer",
-            "none",
+            "asset_only_declarative_schema_tbd",
+            "asset_only_schema_marker,theme_renderer_stays_native",
             false,
-            false,
-            "none",
+            true,
+            "native_theme_renderer",
         ),
         "process-echo" => readiness("process_command_fixture", "none", false, false, "none"),
         "process-hook" => readiness(
@@ -1125,11 +1278,11 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
         ),
         _ => match plugin_externalization_class(pack) {
             "declarative_asset" => readiness(
-                "declarative_asset_plus_host_consumer",
-                "none",
+                "asset_only_declarative_schema_tbd",
+                "asset_only_schema_marker",
                 false,
-                false,
-                "none",
+                true,
+                "compiled_or_bundle_asset_fallback",
             ),
             "shell_effect_candidate" => readiness(
                 "native_until_effect_runtime",
@@ -1158,6 +1311,13 @@ fn plugin_readiness_profile(pack: &PluginPackRecord) -> PluginReadinessProfile {
                 PluginKind::Source => {
                     readiness("current_shell_source", "none", true, false, "none")
                 }
+                PluginKind::Bridge => readiness(
+                    "host_bridge",
+                    "host_api_boundary",
+                    false,
+                    true,
+                    "native_host_bridge",
+                ),
                 PluginKind::Process => readiness("process_adapter", "none", false, false, "none"),
                 PluginKind::Wasm => readiness(
                     "wasm_command",
@@ -1644,6 +1804,10 @@ pub fn plugin_permission_review(
             "Source pack; startup code is sourced into the current interactive shell session."
                 .to_string(),
         );
+    } else if pack.kind == PluginKind::Bridge {
+        notes.push(
+            "Bridge pack; plugin-owned identity is wired to a host-owned API surface.".to_string(),
+        );
     }
     match plugin_externalization_class(&pack) {
         "declarative_asset" => notes.push(
@@ -1653,7 +1817,7 @@ pub fn plugin_permission_review(
             "Mixed pack: static bundle assets are declarative, while dynamic behavior remains Winuxsh-owned.".to_string(),
         ),
         "pure_provider_candidate" => notes.push(
-            "Provider pack; command-not-found is wired to the host call-site and process-provider bridge. WASM providers still need a separate ABI.".to_string(),
+            "Provider candidate; process provider binding exists for command-not-found, while WASM providers still require a separate ABI.".to_string(),
         ),
         "shell_effect_candidate" => notes.push(
             "Shell-effect pack remains host-owned until env/cwd/history effects are explicit and permissioned.".to_string(),
@@ -2104,6 +2268,7 @@ fn validate_bundle_inventory_for_update(
         match pack.kind {
             PluginKind::Builtin => {}
             PluginKind::Source => validate_source_pack_contract(pack, root)?,
+            PluginKind::Bridge => validate_bridge_pack_contract(pack)?,
             PluginKind::Process => validate_process_pack_contract(pack)?,
             PluginKind::Wasm => validate_wasm_pack_contract(pack, root)?,
         }
@@ -2171,7 +2336,13 @@ fn validate_bundle_index_for_update(
         expected_checksum,
         actual_checksum,
     )?;
-    validate_bundle_index_packs(&index.packs, &inventory.packs)?;
+    let bundle_path = root.join("bundle.toml");
+    let bundle_text = fs::read_to_string(&bundle_path)
+        .with_context(|| format!("failed to read {}", bundle_path.display()))?;
+    let bundle: BundleToml = toml::from_str(&bundle_text)
+        .with_context(|| format!("failed to parse {}", bundle_path.display()))?;
+    let legacy_packs = load_legacy_bundle_pack_records(root, &bundle)?;
+    validate_bundle_index_packs(&index.packs, &legacy_packs)?;
     Ok(())
 }
 fn validate_bundle_index_release(
@@ -2306,6 +2477,16 @@ fn validate_provider_exports_contract(pack: &PluginPackRecord) -> anyhow::Result
             }
         }
         PluginKind::Process => {}
+        PluginKind::Bridge => {
+            if pack.name != COMMAND_NOT_FOUND_PROVIDER {
+                anyhow::bail!(
+                    "bridge pack '{}' must not export provider '{}'; that provider is reserved for '{}'",
+                    pack.name,
+                    COMMAND_NOT_FOUND_PROVIDER,
+                    COMMAND_NOT_FOUND_PROVIDER
+                );
+            }
+        }
         PluginKind::Source => {
             anyhow::bail!(
                 "source pack '{}' must not export providers until sourced provider hooks are implemented",
@@ -2376,6 +2557,21 @@ fn validate_source_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow
                 hook
             );
         }
+    }
+    Ok(())
+}
+fn validate_bridge_pack_contract(pack: &PluginPackRecord) -> anyhow::Result<()> {
+    if pack.source.is_some() || pack.process.is_some() || pack.wasm.is_some() {
+        anyhow::bail!(
+            "bridge pack '{}' must not declare source, process, or wasm runtime blocks",
+            pack.name
+        );
+    }
+    if !pack.exports.hooks.is_empty() || !pack.exports.commands.is_empty() {
+        anyhow::bail!(
+            "bridge pack '{}' must not export shell hooks or commands",
+            pack.name
+        );
     }
     Ok(())
 }
@@ -2492,6 +2688,7 @@ fn validate_wasm_module_artifact(
 pub struct SourcePluginScript {
     pub pack: String,
     pub path: PathBuf,
+    pub bundle_root: PathBuf,
 }
 pub fn source_plugin_scripts(state: &PluginRuntimeState) -> Vec<SourcePluginScript> {
     source_plugin_scripts_for_hook(state, "startup")
@@ -2519,6 +2716,7 @@ pub fn source_plugin_scripts_for_hook(
             path.is_file().then_some(SourcePluginScript {
                 pack: pack.name,
                 path,
+                bundle_root: root.clone(),
             })
         })
         .collect()
@@ -2532,15 +2730,17 @@ fn source_plugin_exports_hook(hooks: &[String], hook_name: &str) -> bool {
 pub fn plugin_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
     let inventory = active_plugin_inventory();
     if let Some(root) = &inventory.path {
-        if let Some(pack) = inventory
+        let pack = inventory
             .packs
             .iter()
-            .find(|pack| pack.name == pack_name && pack.exports.aliases)
-        {
+            .find(|pack| pack.name == pack_name && pack.exports.aliases)?;
+        if inventory.bundle == OFFICIAL_BUNDLE_NAME {
             if let Some(aliases) = load_bundle_aliases_from_path(root, pack) {
                 return Some(aliases);
             }
+            return compiled_plugin_aliases(pack_name);
         }
+        return load_bundle_aliases_from_path(root, pack);
     }
     compiled_plugin_aliases(pack_name)
 }
@@ -2582,20 +2782,43 @@ fn load_bundle_aliases_from_path(
     let parsed: BundleAliasesToml = toml::from_str(&text).ok()?;
     Some(parsed.aliases.into_iter().collect())
 }
-pub fn plugin_completion_defs() -> Vec<CommandDef> {
+pub fn plugin_completion_defs(state: &PluginRuntimeState) -> Vec<CommandDef> {
     let inventory = active_plugin_inventory();
     let mut defs = Vec::new();
+    let mut requested = BTreeSet::new();
+    let mut loaded = BTreeSet::new();
     if let Some(root) = &inventory.path {
-        for pack in &inventory.packs {
+        for pack in inventory
+            .packs
+            .iter()
+            .filter(|pack| state.is_enabled(&pack.name))
+        {
             for name in &pack.exports.completions {
+                requested.insert(name.clone());
                 if let Some(def) = load_bundle_completion_def_from_path(root, name) {
                     defs.push(def);
+                    loaded.insert(name.clone());
                 }
             }
         }
+    } else {
+        for pack in inventory
+            .packs
+            .iter()
+            .filter(|pack| state.is_enabled(&pack.name))
+        {
+            requested.extend(pack.exports.completions.iter().cloned());
+        }
     }
-    if defs.is_empty() {
-        defs.extend(compiled_completion_defs());
+    if inventory.bundle == OFFICIAL_BUNDLE_NAME {
+        for name in requested {
+            if loaded.contains(&name) {
+                continue;
+            }
+            if let Some(def) = compiled_completion_def(&name) {
+                defs.push(def);
+            }
+        }
     }
     defs
 }
@@ -2604,13 +2827,14 @@ fn load_bundle_completion_def_from_path(root: &Path, name: &str) -> Option<Comma
     let text = fs::read_to_string(path).ok()?;
     toml::from_str(&text).ok()
 }
-fn compiled_completion_defs() -> Vec<CommandDef> {
-    vec![
-        git_completion_def(),
-        simple_command_def("docker", "Docker command"),
-        simple_command_def("kubectl", "Kubernetes CLI"),
-        simple_command_def("npm", "Node package manager"),
-    ]
+fn compiled_completion_def(name: &str) -> Option<CommandDef> {
+    match name {
+        "git" => Some(git_completion_def()),
+        "docker" => Some(simple_command_def("docker", "Docker command")),
+        "kubectl" => Some(simple_command_def("kubectl", "Kubernetes CLI")),
+        "npm" => Some(simple_command_def("npm", "Node package manager")),
+        _ => None,
+    }
 }
 
 fn git_completion_def() -> CommandDef {
@@ -2702,111 +2926,6 @@ pub fn plugin_prompt_preset(name: &str) -> Option<PromptPresetAsset> {
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(_, preset)| resolve_prompt_segment_refs(preset, &parsed.segments))
 }
-pub fn plugin_prompt_catalog_json() -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&plugin_prompt_catalog())?)
-}
-pub fn plugin_prompt_catalog_text() -> String {
-    let mut out = String::new();
-    out.push_str("Winuxsh prompt presets\n");
-    out.push_str("Sources: built-in presets and active bundle assets\n");
-    for entry in plugin_prompt_catalog() {
-        out.push_str(&format!(
-            "- {} source={} owner={}",
-            entry.name, entry.source, entry.owner
-        ));
-        if let Some(bundle) = entry.bundle {
-            out.push_str(&format!(" bundle={bundle}"));
-        }
-        if let Some(pack) = entry.pack {
-            out.push_str(&format!(" pack={pack}"));
-        }
-        out.push_str(&format!(" trust_source={}", entry.trust_source));
-        out.push_str(&format!(
-            " left={} right={} separator={:?}",
-            list_or_none(&entry.preset.left_elements),
-            list_or_none(&entry.preset.right_elements),
-            entry.preset.separator
-        ));
-        if let Some(git_format) = entry.preset.git_prompt_format {
-            out.push_str(&format!(" git_prompt_format={git_format:?}"));
-        }
-        out.push('\n');
-    }
-    out
-}
-pub fn plugin_prompt_catalog() -> Vec<PluginPromptCatalogEntry> {
-    let mut entries = SegmentPreset::names()
-        .iter()
-        .filter_map(|name| builtin_prompt_preset_catalog_entry(name))
-        .collect::<Vec<_>>();
-    let inventory = active_plugin_inventory();
-    let Some(root) = &inventory.path else {
-        return entries;
-    };
-    let Some(parsed) = load_bundle_prompt_segments_from_path(root) else {
-        return entries;
-    };
-    let pack_name = inventory
-        .packs
-        .iter()
-        .find(|pack| !pack.exports.prompt_segments.is_empty() && pack.name == "prompts")
-        .or_else(|| {
-            inventory
-                .packs
-                .iter()
-                .find(|pack| !pack.exports.prompt_segments.is_empty())
-        })
-        .map(|pack| pack.name.clone());
-    for (name, preset) in parsed.presets {
-        entries.push(PluginPromptCatalogEntry {
-            name,
-            source: "bundle".to_string(),
-            trust_source: inventory.trust_source.clone(),
-            owner: format!("{}@{}", inventory.bundle, inventory.version),
-            bundle: Some(inventory.bundle.clone()),
-            pack: pack_name.clone(),
-            preset: resolve_prompt_segment_refs(preset, &parsed.segments),
-        });
-    }
-    entries
-}
-fn builtin_prompt_preset_catalog_entry(name: &str) -> Option<PluginPromptCatalogEntry> {
-    let preset = SegmentPreset::from_name(name)?;
-    let config = SegmentPromptConfig::from_preset(preset, "%", GitPromptSymbols::default());
-    Some(PluginPromptCatalogEntry {
-        name: name.to_string(),
-        source: "builtin".to_string(),
-        trust_source: "builtin".to_string(),
-        owner: "winuxsh".to_string(),
-        bundle: None,
-        pack: None,
-        preset: PromptPresetAsset {
-            left_elements: segment_names(&config.left_elements),
-            right_elements: segment_names(&config.right_elements),
-            separator: config.separator,
-            git_prompt_format: config.git_prompt_format,
-        },
-    })
-}
-fn segment_names(segments: &[SegmentId]) -> Vec<String> {
-    segments.iter().map(segment_name).collect()
-}
-fn segment_name(segment: &SegmentId) -> String {
-    match segment {
-        SegmentId::Dir => "dir",
-        SegmentId::Vcs => "vcs",
-        SegmentId::Status => "status",
-        SegmentId::Time => "time",
-        SegmentId::PromptChar => "prompt_char",
-        SegmentId::OsIcon => "os_icon",
-        SegmentId::Context => "context",
-        SegmentId::BackgroundJobs => "background_jobs",
-        SegmentId::CommandExecutionTime => "command_execution_time",
-        SegmentId::Newline => "newline",
-        SegmentId::Custom(name) => name,
-    }
-    .to_string()
-}
 fn load_bundle_prompt_segments_from_path(root: &Path) -> Option<BundlePromptSegmentsToml> {
     let path = bundle_asset_path(root, "prompts", "segments", "toml")?;
     let text = fs::read_to_string(path).ok()?;
@@ -2839,7 +2958,7 @@ pub fn plugin_theme_catalog_json() -> anyhow::Result<String> {
 pub fn plugin_theme_catalog_text() -> String {
     let mut out = String::new();
     out.push_str("Winuxsh themes\n");
-    out.push_str("Sources: built-in themes, user themes, and active bundle assets\n");
+    out.push_str("Resolution order: user > active bundle\n");
     for entry in plugin_theme_catalog() {
         out.push_str(&format!(
             "- {} source={} owner={}",
@@ -2860,20 +2979,12 @@ pub fn plugin_theme_catalog_text() -> String {
     out
 }
 pub fn plugin_theme_catalog() -> Vec<PluginThemeCatalogEntry> {
-    let mut entries = crate::theme::list_names()
-        .iter()
-        .map(|name| PluginThemeCatalogEntry {
-            name: (*name).to_string(),
-            source: "builtin".to_string(),
-            trust_source: "builtin".to_string(),
-            owner: "winuxsh".to_string(),
-            bundle: None,
-            pack: None,
-            path: None,
-        })
-        .collect::<Vec<_>>();
-    entries.extend(crate::theme::user_theme_entries().into_iter().map(|entry| {
-        PluginThemeCatalogEntry {
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for entry in crate::theme::user_theme_entries() {
+        seen.insert(entry.name.to_ascii_lowercase());
+        entries.push(PluginThemeCatalogEntry {
             name: entry.name,
             source: "user".to_string(),
             trust_source: "user_theme".to_string(),
@@ -2881,8 +2992,9 @@ pub fn plugin_theme_catalog() -> Vec<PluginThemeCatalogEntry> {
             bundle: None,
             pack: None,
             path: Some(entry.path),
-        }
-    }));
+        });
+    }
+
     let inventory = active_plugin_inventory();
     if let Some(root) = &inventory.path {
         for pack in &inventory.packs {
@@ -2893,6 +3005,7 @@ pub fn plugin_theme_catalog() -> Vec<PluginThemeCatalogEntry> {
                 if crate::theme::load_theme_from_file(theme_name, &path).is_none() {
                     continue;
                 }
+                seen.insert(theme_name.to_ascii_lowercase());
                 entries.push(PluginThemeCatalogEntry {
                     name: theme_name.clone(),
                     source: "bundle".to_string(),
@@ -2933,109 +3046,6 @@ fn load_bundle_theme_from_path(root: &Path, name: &str) -> Option<Theme> {
     let path = bundle_asset_path(root, "themes", name, "toml")?;
     crate::theme::load_theme_from_file(name, &path)
 }
-pub fn plugin_keybinding_catalog_json() -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&plugin_keybinding_catalog())?)
-}
-pub fn plugin_keybinding_catalog_text() -> String {
-    let mut out = String::new();
-    out.push_str("Winuxsh keybindings\n");
-    out.push_str("Sources: Reedline defaults plus active bundle keybinding assets\n");
-    for entry in plugin_keybinding_catalog() {
-        out.push_str(&format!(
-            "- {} keymap={} source={} owner={} bindings={}",
-            entry.name,
-            entry.keymap,
-            entry.source,
-            entry.owner,
-            entry.bindings.len()
-        ));
-        if let Some(bundle) = &entry.bundle {
-            out.push_str(&format!(" bundle={bundle}"));
-        }
-        if let Some(pack) = &entry.pack {
-            out.push_str(&format!(" pack={pack}"));
-        }
-        if let Some(path) = &entry.path {
-            out.push_str(&format!(" path={}", path.display()));
-        }
-        out.push_str(&format!(" trust_source={}", entry.trust_source));
-        out.push_str(&format!(" summary={:?}\n", entry.summary));
-        for binding in &entry.bindings {
-            out.push_str(&format!("  {} -> {}", binding.key, binding.action));
-            if let Some(description) = &binding.description {
-                out.push_str(&format!(" ({description})"));
-            }
-            out.push('\n');
-        }
-    }
-    out
-}
-pub fn plugin_keybinding_catalog() -> Vec<PluginKeybindingCatalogEntry> {
-    let inventory = active_plugin_inventory();
-    let Some(root) = &inventory.path else {
-        return Vec::new();
-    };
-    let mut entries = Vec::new();
-    for pack in &inventory.packs {
-        for name in &pack.exports.keybindings {
-            let Some((metadata, path)) = load_bundle_keybindings_with_path(root, name) else {
-                continue;
-            };
-            entries.push(PluginKeybindingCatalogEntry {
-                name: metadata.name,
-                source: "bundle".to_string(),
-                trust_source: inventory.trust_source.clone(),
-                owner: format!("{}@{}", inventory.bundle, inventory.version),
-                keymap: metadata.keymap,
-                summary: metadata.summary,
-                bindings: metadata
-                    .bindings
-                    .into_iter()
-                    .map(|binding| PluginKeybindingCatalogBinding {
-                        key: binding.key,
-                        action: binding.action,
-                        description: binding.description,
-                    })
-                    .collect(),
-                bundle: Some(inventory.bundle.clone()),
-                pack: Some(pack.name.clone()),
-                path: Some(path),
-            });
-        }
-    }
-    entries
-}
-pub fn plugin_keybinding_suggestions() -> Vec<NativeWidgetSuggestion> {
-    plugin_keybinding_catalog()
-        .into_iter()
-        .flat_map(|entry| {
-            let keymap = plugin_keymap_to_native_keymap(&entry.keymap);
-            let origin = format!("plugin:{}", entry.name);
-            let source_file = entry.path.clone();
-            entry
-                .bindings
-                .into_iter()
-                .map(move |binding| NativeWidgetSuggestion {
-                    widget: binding.action,
-                    function: None,
-                    key: Some(binding.key),
-                    keymap: keymap.clone(),
-                    source_file: source_file.clone(),
-                    line: None,
-                    origin: origin.clone(),
-                })
-        })
-        .collect()
-}
-fn plugin_keymap_to_native_keymap(keymap: &str) -> Option<String> {
-    match keymap.to_ascii_lowercase().as_str() {
-        "all" | "main" => Some("main".to_string()),
-        "emacs" => Some("emacs".to_string()),
-        "vi" | "vi-normal" | "vi_normal" | "vicmd" => Some("vicmd".to_string()),
-        "vi-insert" | "vi_insert" | "viins" => Some("viins".to_string()),
-        _ => None,
-    }
-}
 fn plugin_keybinding_metadata_lines(
     inventory: &PluginInventory,
     pack: &PluginPackRecord,
@@ -3059,16 +3069,9 @@ fn plugin_keybinding_metadata_lines(
         .collect()
 }
 fn load_bundle_keybindings_from_path(root: &Path, name: &str) -> Option<BundleKeybindingsToml> {
-    load_bundle_keybindings_with_path(root, name).map(|(metadata, _)| metadata)
-}
-fn load_bundle_keybindings_with_path(
-    root: &Path,
-    name: &str,
-) -> Option<(BundleKeybindingsToml, PathBuf)> {
     let path = bundle_asset_path(root, "keybindings", name, "toml")?;
-    let text = fs::read_to_string(&path).ok()?;
-    let metadata = toml::from_str(&text).ok()?;
-    Some((metadata, path))
+    let text = fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
 }
 fn bundle_asset_path(
     root: &Path,
@@ -3146,17 +3149,17 @@ fn resolve_binary(binary: &str) -> Option<PathBuf> {
 }
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
-        .map(PathBuf::from)
+        .map(|value| PathBuf::from(shell_path_to_host_path(value.to_string_lossy().as_ref())))
         .filter(|path| !path.as_os_str().is_empty())
 }
 fn official_bundle_root() -> PathBuf {
     env_path("WINUXSH_PLUGIN_BUNDLE_ROOT")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".winuxsh").join("bundles")))
+        .or_else(|| shell_home_dir().map(|home| home.join(".winuxsh").join("bundles")))
         .unwrap_or_else(|| PathBuf::from(".winuxsh-bundles"))
 }
 fn plugin_lock_path() -> PathBuf {
     env_path("WINUXSH_PLUGIN_LOCK")
-        .or_else(|| dirs::home_dir().map(|home| home.join(".winuxsh").join("plugin-lock.toml")))
+        .or_else(|| shell_home_dir().map(|home| home.join(".winuxsh").join("plugin-lock.toml")))
         .unwrap_or_else(|| PathBuf::from("plugin-lock.toml"))
 }
 fn app_bundled_bundle_candidates() -> Vec<PathBuf> {

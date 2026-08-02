@@ -1,11 +1,11 @@
 [package]
 name = "winuxsh"
-version = "0.9.4"
+version = "0.10.1"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
 authors = ["unixwin team <arookieofc@gmail.com>"]
-description = "A bash-compatible shell for Windows, built on rubash + winuxcmd"
+description = "AI-native bash-compatible shell for Windows, built on rubash + winuxcmd"
 readme = "README.md"
 homepage = "https://github.com/unixwin/winuxsh"
 repository = "https://github.com/unixwin/winuxsh"

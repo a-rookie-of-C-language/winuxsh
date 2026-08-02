@@ -1,302 +1,125 @@
 # Winuxsh
 
-[中文](README-zh.md) · English
+> **Bash, native on Windows.** No WSL. No VM. No `/mnt/c`. No cmdlet dialect.
+> Just the shell your fingers already know — and the one your AI agent actually speaks.
 
-> **bash for Windows — no WSL, no MSYS2, no PowerShell surprises.**
-> Built for humans and coding agents, tested against the bash spec.
+[English](README.md) · [中文](README-zh.md)
 
-```text
-me@DESKTOP C:\Users\me\repo\winuxsh  master ●2 ✚1 ?3
-❯
-```
+[![Winuxsh CI](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml)
+[![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/unixwin/winuxsh)](https://github.com/unixwin/winuxsh/stargazers)
 
-Branch name, dirty state, staged/untracked counts — all built into the prompt
-the moment you `cd` into a git repo.  No plugins to install.  No config to
-tweak.  Just `❯` and go.
+One native Windows binary. Bash syntax. Windows paths. Real Windows programs.
+Unix commands included. No emulation layer between your command and your
+tools — and nothing for your AI agent to trip over.
 
-## Why
+<img src="assets/demo.gif" alt="Winuxsh interactive session: git prompt, grep, sed in-place editing, awk pipelines, tree" width="760"/>
 
-You know how PowerShell does `ls` and gives you a table of objects?  Or how
-`test -f Cargo.toml` doesn't exist in pwsh?  Or how your coding agent keeps
-failing because the shell it expected isn't there?
+That's it. That's the whole pitch.
 
-Winuxsh fixes that.  It is the terminal that feels like bash, lives on
-Windows like PowerShell, and speaks Windows-native paths (`C:\Users`, not
-`/mnt/c/Users`).
+## The pitch
 
-```bash
-# That works — immediately, from the first keystroke
-cd C:\Users\me\Documents
-ls -la
-git status
-if [ -d repo ]; then echo "found it"; fi
-```
+**You don't need WSL. You need Winuxsh.**
 
-## Quick start
+Every Windows shell asks you to give something up. CMD is frozen in 1987.
+PowerShell isn't Bash — your `for` loops and quoting instincts die on
+arrival. WSL is a whole Linux distro you adopt just to print a directory.
+Git Bash emulates Unix and *guesses* at your paths, and Windows-native tools
+refuse to speak its dialect.
 
-```pwsh
-cargo build --release
-target\release\winuxsh.exe
-```
+Winuxsh gives it all back:
 
-The first time you start it, you get a setup wizard (think `oh-my-zsh` install):
+- **Bash, for real** — `if`, `for`, `case`, `$(...)`, pipes, heredocs, functions, arrays. The engine is [rubash](https://github.com/unixwin/rubash), which passes GNU Bash's own test suite: **86/86**.
+- **Windows paths, native** — `C:\...` and `C:/...` work as-is, `/c/...` input is understood, and output is always native. Native tools get native paths, zero guessing.
+- **Unix commands included** — `ls`, `cat`, `grep`, `find`, `test`, `printf`, ... via WinuxCmd. Nothing to install.
+- **Real Windows programs, direct** — `git.exe`, `node.exe`, `python.exe`, `cargo.exe`. Your PATH is your PATH.
+- **A prompt you'll enjoy** — 27 themes (agnoster, spaceship, tokyonight, p10 family...), a git prompt that grows teeth, syntax highlighting, autosuggestions, vi/emacs modes.
+- **Plugins with a permission model** — 40+ packs (`git`, `docker`, `kubectl`, `npm`, `zoxide`, `fzf`, `thefuck`, ...); third parties run sandboxed in WASM.
 
-```text
-🎉  Welcome to Winuxsh 0.6.0!
-✨  A bash-compatible shell for Windows — no WSL, no MSYS2 required.
+## AI-native
 
-  Let's get you set up.  (Press Enter to accept defaults.)
-
-📝  Editing mode
-  │  emacs = standard keybindings (Ctrl+A/E/K, Tab, Ctrl+R)
-  │  vi    = vim-style insert/normal modes
-  │  Enter choice [emacs/vi]:
-
-🎨  Colour theme
-  │  Enter choice [default/dark/light/colorful]:
-
-🎵  Prompt symbol
-  │  ❯ heavy right-pointing angle (powerlevel10k style)
-  │  λ lambda (functional/minimal)
-  │  $ dollar sign (classic bash)
-  │  % percent sign (classic fish)
-  │  Enter choice [❯/λ/$/%]:
-
-⏱️  Right-side info
-  │  off  = no right prompt
-  │  time = show current time (HH:MM)
-  │  full = time + git branch
-  │  Enter choice [off/time/full]:
-
-🔄  Show git branch/status in the prompt [Y/n]:
-```
-
-That is it.  One round of questions, `~/.winshrc.toml` is written, and
-every launch after that is instant.
-
-## What makes it different
-
-| You want this                  | PowerShell gives you       | Winuxsh gives you          |
-|--------------------------------|----------------------------|----------------------------|
-| `ls` / `grep` / `find` / `cp`  | Aliases + cmdlets          | Real `winuxcmd` coreutils |
-| `if [ -f file ]; then`         | `if (Test-Path file) {`    | Real bash `if`            |
-| `for i in a b c; do ... done`  | `foreach ($i in ...) {`    | Real bash `for`           |
-| `git:(master) ●2 ✚1` in prompt | Have to install oh-my-posh | Built in, works on `cd`   |
-| `gst` / `gco` / `gp` (git)     | Custom aliases             | Pre-installed git aliases |
-| `$(command)`                   | `$(command)` but different | Same as bash              |
-| `exit 127`                     | `$LASTEXITCODE`            | Same as bash              |
-| `C:\Users` paths               | Works natively             | Also works natively       |
-| `Ctrl+R` history search        | Yes (but different)        | Yes (reedline, standard)  |
-| `cd .. && pwd`                 | Yes                        | Yes                       |
-| Setup wizard                   | No                         | Yes, oh-my-zsh style      |
-| Coding agent friendly          | Not really                 | `-c` / `script.sh` quiet  |
-| Reads your `.zshrc`            | No                         | `--zsh-compat-report`     |
-
-## Screenshots
-
-**A real terminal session** — `cd`, `ls`, `git status`, block completion:
+Every AI coding agent speaks Bash. On Windows, most are stuck with PowerShell
+— the shell that famously *eats arguments*:
 
 ```text
-me@DESKTOP C:\Users\me\repo\winuxsh
-❯ ls
-Cargo.toml  src/  crates/  DOCS/  tests/  README.md
+# PowerShell 5.1                                # Winuxsh
+> node -e "console.log(JSON.stringify(          ❯ node -e "console.log(JSON.stringify(
+    process.argv.slice(1)))" "a b" "" "c\"d"      process.argv.slice(1)))" "a b" "" "c\"d"
+    "e\f" "---"                                   "e\f" "---"
 
-me@DESKTOP C:\Users\me\repo\winuxsh  master ●2 ✚1
-❯ git status
-Changes to be committed:
-  modified:   src/shell.rs
-
-me@DESKTOP C:\Users\me\repo\winuxsh  master ●2
-❯ if [ -f Cargo.toml ]; then
-  echo "yes, it is a rust project"
-fi
-yes, it is a rust project
+ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 ```
 
-**Autosuggestions** — ghost text after the cursor, accept with `Ctrl+Space`:
+Five arguments in. PowerShell throws a parse error; Winuxsh delivers all five
+byte-for-byte. Even [Codex is locked to PowerShell on Windows](https://github.com/openai/codex/issues/31548) — users are literally voting to escape.
+[Why Winuxsh](docs/src/why-winuxsh.md) has the full receipts.
 
-```text
-me@DESKTOP C:\Users\me\repo\winuxsh  master
-❯ cd rep○  ← "cd repo/" shows as hint
-```
+This is what that feels like from the other side of the keyboard:
 
-**Syntax highlighting** — commands in green, flags in cyan, errors in red.
+<img src="assets/demo-drama.gif" alt="Animated story: a developer chats with codex, PowerShell eats the arguments, the user loses it, then winuxsh saves the day" width="520"/>
 
-**Right prompt** — time, git branch, or both:
-
-```text
-me@DESKTOP C:\Users\me\repo\winuxsh     09:47
-❯
-```
-
-## What it runs
-
-```
-winuxsh = rubash (shell engine) + winuxcmd.exe (coreutils) + reedline (REPL)
-```
-
-| Component | Job |
-|-----------|-----|
-| `rubash`  | bash-compatible parser, executor, builtins, functions, heredocs |
-| `winuxcmd`| Unix coreutils (`ls`, `cat`, `grep`, `find`, `cp`, `mv`, `rm`, ...) |
-| `reedline`| Interactive editing, history, Tab completion, autosuggestions |
-| `~/.winshrc.toml` | Structured settings — prompt, theme, editor, completion, plugins |
-| `~/.winshrc` | REPL startup script — `export`, `alias`, functions, shell code |
-| `.zshrc` scan | `--zsh-compat-report` reads your zsh intent → native TOML |
-
-## For zsh / Oh My Zsh users
-
-You don't need to migrate manually.  Winuxsh can inspect your existing setup
-and propose a safe import:
-
-```pwsh
-winuxsh --zsh-compat-report         # see what is importable
-winuxsh --zsh-compat-import-plan    # preview the TOML it would write
-winuxsh --zsh-compat-import-apply   # write it (with backup)
-winuxsh --zsh-compat-doctor         # overall health check
-```
-
-Things that get imported from `.zshrc`:
-- `PATH` / `ENV` exports (safe subset — no expansion or backtick)
-- `alias` declarations
-- `PROMPT` / `RPROMPT` (translated to native TOML template)
-- Oh My Zsh plugin intent (e.g. `git` → suggested Winuxsh `git` plugin)
-
-What stays in `.zshrc` and continues working there:
-- Complex `compdef` / `_arguments` (native completion reads the same files)
-- Custom functions (winuxsh reads the same function source via rubash)
-- Theme expressions that can't be translated (`%F{...}` parsing)
-
-## Official Winuxsh plugins
-
-Winuxsh includes a built-in plugin system. `oh-my-winuxsh` is the official
-bundled plugin distribution for first-party packs. It is not an Oh My Zsh fork
-and not zsh plugin support.
-
-Release packages include a baseline copy at `bundles/oh-my-winuxsh` next to
-`winuxsh.exe`; user-installed bundle updates in `%LOCALAPPDATA%` or the plugin
-lock file override that baseline.
-
-Useful entry points:
+`winuxsh -c` is a contract, not an afterthought: **no banners, stable
+stdout/stderr, exact exit-code propagation.** What the agent writes is what
+the process receives.
 
 ```sh
-winuxsh plugin list
-winuxsh plugin search git
-winuxsh plugin themes
-winuxsh plugin review git
-winuxsh plugin install git
-winuxsh plugin uninstall git
+winuxsh -c 'test -f Cargo.toml && echo build' && echo "exit=$?"
+winuxsh deploy.sh
 ```
 
-The first bundled packs cover:
+## Install
 
-- daily dev tools: `git`, `docker`, `kubectl`, `npm`;
-- navigation and workflow: `zoxide`, `direnv`, `dotenv`, `fzf`;
-- prompt and keybinding presets;
-- command hints such as `command-not-found`.
+Grab `winuxsh-v*-win-*-setup.exe` from [Releases](https://github.com/unixwin/winuxsh/releases) and run it — no admin rights; it wires up your PATH and a Windows Terminal profile. Or take the portable zip (first launch self-activates the Unix commands). From source:
 
-Plugin state belongs in `~/.winshrc.toml`; user shell code belongs in
-`~/.winshrc`. Current zsh compatibility commands remain migration tools, and
-legacy `--zsh-native-packs` inventory remains migration-only.
-
-## Git daily use
-
-The official `git` plugin is on by default and makes Git feel first-class:
-
-```text
-gst  => git status        gco  => git checkout      gp   => git push
-gl   => git pull          gd   => git diff          ga   => git add
-gc   => git commit -v     gb   => git branch        gr   => git remote
-gsta => git stash push    gstp => git stash pop     glg  => git log --stat
+```sh
+git clone https://github.com/unixwin/winuxsh.git && cd winuxsh
+cargo build --release && target\release\winuxsh.exe
 ```
 
-Completion is subcommand and flag aware:
+Keep it current: `winuxsh --self-update`.
 
-```bash
-git <Tab>                # add, commit, push, pull, checkout, ...
-git a<Tab>               # add
-git commit --<Tab>       # --message, --amend, --no-verify, ...
-git push --force<Tab>    # --force / --force-with-lease
+## Moved from zsh?
+
+Winuxsh scans your `.zshrc`, shows you a plan, and applies it with a backup:
+
+```sh
+winuxsh --zsh-compat-report
+winuxsh --zsh-compat-import-apply
 ```
 
-Prompt templates can include `{git_prompt}` for branch, dirty state, staged,
-untracked, ahead/behind, stash, and conflict counts. Put personal aliases in
-`~/.winshrc` with normal shell syntax; user aliases override plugin aliases.
+## Terminal toys
 
-## Configuration reference
+Winuxsh's terminal isn't just for commands — it prints pictures. The
+[terminal-flags](https://github.com/caomengxuan666/terminal-flags) project
+turns any image or GIF into a standalone ANSI printer script:
 
-Minimal `~/.winshrc.toml`:
-
-```toml
-[shell]
-prompt_format = "{user}@{host} {cwd} {git_prompt}{symbol}"
-prompt_symbol = "❯"
-right_prompt_format = "{time} "
-
-[editor]
-edit_mode = "emacs"           # emacs | vi
-
-[theme]
-current_theme = "default"     # default | dark | light | colorful | ocean | forest | cyberpunk | minimal | custom
-
-[completions]
-matching = "prefix"           # prefix | substring
-case_sensitive = false
+```sh
+winuxsh flags/taffy.sh         # photos, right in the terminal
+winuxsh flags/qiu-dance.sh     # animated GIFs, frame timing preserved
 ```
 
-Interactive shell customizations go in `~/.winshrc`:
+Truecolor half-block pixels, no Python or Pillow needed at runtime:
 
-```bash
-export EDITOR=vim
-alias ll='ls -la'
-alias gst='git status'
-
-hello() {
-  echo "hello from winuxsh"
-}
-```
-
-Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.md).
-
-## Project status
-
-| Layer    | Status |
-|----------|--------|
-| rubash   | ✔ bash parser/executor — tracked by [Rubash Bash Compatibility Matrix](DOCS/rubash-bash-compat-matrix.md) and local upstream gate |
-| winuxcmd | ✔ Unix coreutils via PATH injection, no FFI |
-| REPL     | ✔ reedline: history, Tab, autosuggest, syntax highlight |
-| Completion | ✔ Built-in (ls, grep, find, git…), TOML, bash import, cache |
-| Git prompt | ✔ Non-blocking async refresh, configurable symbols |
-| Setup wizard | ✔ First-run guided config |
-| Zsh migration | ✔ Scanner and import plan; not a zsh plugin runtime |
-| Plugin roadmap | ✔ Built-in Winuxsh registry plus bundled `oh-my-winuxsh` |
-| User themes  | ✔ `~/.winuxsh/themes/<name>.toml`; official bundle themes include `ocean`, `forest`, `cyberpunk`, `minimal` |
-| Vi mode      | ✔ reedline native |
-| Ctrl+R       | ✔ reedline native |
-| v3 roadmap   | Plugin framework, Oh-My-Winuxsh, job control |
-
-## How to help
-
-- Report a bug?  Open an issue.
-- Want a feature?  Check [the roadmap](DOCS/winuxsh-roadmap.md).
-- Build from source: `cargo build --release`.
-- Installer releases add Winuxsh to the user PATH and add/update a Windows Terminal profile.
-- Portable release zips remain available and include `winuxsh.exe`, `winuxcmd/winuxcmd.exe`, icon assets, `winuxcmd/activate-winuxcmd.sh`, and the bundled `oh-my-winuxsh` baseline.
-- On first start, winuxsh runs the activation script once if command links are missing.
-- Self-update: run `self-update` inside the REPL, or `winuxsh --self-update` outside it, to download and launch the latest installer via native WinHTTP.
-- Run the tests: `cargo test`.
+<img src="assets/demo-qiu-dance.gif" alt="An animated Qiubiaoqing sticker playing inside a Winuxsh terminal, printed from a generated shell script" width="560"/>
 
 ## Documentation
 
-- [Getting Started](DOCS/getting-started.md) — full config reference
-- [Installer and Self-Update](DOCS/installer.md)
-- [Plugin System Direction](DOCS/plugin-system-direction.md)
-- [Plugin System Roadmap](DOCS/plugin-system-roadmap.md)
-- [Oh My Winuxsh Bundle Plan](DOCS/oh-my-winuxsh-bundle-plan.md)
-- [Zsh Migration Guide](DOCS/zsh-migration-guide.md)
-- [Roadmap](DOCS/winuxsh-roadmap.md)
-- [Architecture](DOCS/architecture.md)
+Full docs site: **[docs](https://unixwin.github.io/winuxsh/)** · [Getting started](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [Advanced usage](docs/src/advanced-usage.md) · [Zsh migration](docs/src/zsh-migration-guide.md) · [Architecture](docs/src/architecture.md)
+
+Under the hood: [rubash](https://github.com/unixwin/rubash) (Bash engine) · WinuxCmd (Unix commands) · [reedline](https://github.com/nushell/reedline) (line editor)
+
+## FAQ
+
+- **Another Git Bash?** No — Git Bash emulates Unix on top of Windows. Winuxsh is a native Windows process: native paths, direct Windows binary execution, Bash compatibility in the language engine, not a fake filesystem.
+- **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains. For the other 95% of your day: you don't need WSL. You need Winuxsh.
+- **Where's my config?** `~/.winuxshrc` — plain Bash. Structured plugin state lives in `~/.winshrc.toml`.
+
+---
+
+If Winuxsh just saved you from booting a Linux VM to run `grep`,
+[star the repo](https://github.com/unixwin/winuxsh) and tell a Windows
+developer. ★
 
 ## License
 
-GPL-3.0-or-later.  See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE).

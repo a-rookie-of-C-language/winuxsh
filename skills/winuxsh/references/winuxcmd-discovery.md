@@ -21,8 +21,8 @@ Winuxsh's search order for WinuxCmd is:
 4. `utils/winuxcmd/winuxcmd.exe` beside the active `winuxsh.exe`.
 5. `winuxcmd.exe` found through Windows PATH.
 
-`~/.winshrc.toml` can also set `[winuxcmd].path`; read `config.md` before
-changing user config.
+Managed `~/.winshrc.toml` can also set `[winuxcmd].path`; read `config.md`
+before changing user config.
 
 ## Identify The Active Utility
 

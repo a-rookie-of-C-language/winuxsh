@@ -1,45 +1,94 @@
 # Winuxsh Configuration
 
 Use this reference when configuring Winuxsh, isolating tests, or explaining the
-two config surfaces. Keep user-facing edits small, reversible, and native to
-Winuxsh.
+startup/config surfaces. Keep user-facing edits small, reversible, and native
+to Winuxsh.
 
-Winuxsh uses two user files:
+Winuxsh uses three user-facing files:
 
-- `~/.winshrc.toml`: structured control plane for prompt, editor, history,
-  completion, WinuxCmd, hooks, plugins, bundles, package/update metadata, and
-  managed migration state.
-- `~/.winshrc`: interactive REPL shell script for `export`, `alias`, functions,
-  and shell code. It is sourced only for the interactive REPL, not for
-  `winuxsh -c`, script files, stdin script execution, agent tests, or CI.
+- `~/.winuxshrc`: primary interactive startup file. Put theme selection,
+  `WINUXSH_PLUGINS`, `WINUXSH_THEME_PLUGIN`, aliases, functions, exports, and
+  framework sourcing here.
+- `~/.winshrc`: legacy interactive fallback. It is sourced only when
+  `~/.winuxshrc` is absent.
+- `~/.winshrc.toml`: legacy/managed structured state for plugin CLI metadata,
+  migration blocks, tests, package/update metadata, and advanced
+  machine-editable overrides. Do not make it the normal human-authored startup
+  file.
 
-## Minimal TOML
+`winuxsh -c`, script files, stdin script execution, agent tests, and CI must
+stay independent from all interactive rc files. Use `-C` / `--repl-command`
+when a one-shot probe specifically needs REPL startup and lifecycle hooks.
+
+## Minimal ~/.winuxshrc
+
+```bash
+WINUXSH_THEME=p10-classic
+WINUXSH_THEME_PLUGIN=theme-p10-classic
+WINUXSH_PROMPT_SYMBOL=">"
+export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
+
+WINUXSH_PLUGINS=(prompt-core git)
+
+if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
+  HOME="$USERPROFILE"
+  export HOME
+fi
+
+if [ -z "${WINUXSH:-}" ]; then
+  for __winuxsh_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.winuxsh/oh-my-winuxsh" "$HOME/.winuxsh/bundles/oh-my-winuxsh"/*; do
+    if [ -f "$__winuxsh_bundle/oh-my-winuxsh.winux" ]; then
+      WINUXSH="$__winuxsh_bundle"
+      export WINUXSH
+      break
+    fi
+  done
+fi
+
+[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
+winuxsh_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{status}{time} " 2>/dev/null || true
+```
+
+Common changes:
+
+- Change `WINUXSH_THEME_PLUGIN` to select an official theme plugin.
+- Change `WINUXSH_PLUGINS=(...)` to enable bundled source plugins.
+- Put user aliases, functions, and environment exports in `~/.winuxshrc`.
+- Keep source plugins in bundles such as `~/.oh-my-winuxsh`; do not paste
+  plugin framework internals into the user's rc.
+
+Prompt, theme, git prompt, aliases, completions, and shell helper behavior
+should be modeled as official or third-party plugins. Winuxsh core should
+provide lifecycle APIs, native host integration, and safety boundaries only.
+Missing official bundles or theme plugins should be diagnosed rather than
+silently replaced with a different built-in theme.
+
+## Home And Path Resolution
+
+Treat `HOME` and `USERPROFILE` as Windows-host paths that may arrive in either
+native form (`C:/Users/me`, `C:\Users\me`) or compatibility slash-drive form
+(`/c/Users/me`). Prompt display, setup writes, plugin bundle paths, completion
+caches, and tilde expansion should normalize those forms before comparing or
+writing files. By default, prompt cwd display should render the home directory
+as `~` and descendants as `~/path`; use `WINUXSH_PROMPT_CWD_STYLE=full` or
+`basename` only when the user asks for that style.
+
+## Managed TOML
+
+Use `~/.winshrc.toml` only when the feature is deliberately structured or
+machine-managed:
 
 ```toml
-[shell]
-prompt_format = "{user}@{host} {cwd} {git_prompt}{symbol}"
-prompt_symbol = ">"
-right_prompt_format = "{time} "
-
 [editor]
 edit_mode = "emacs"
 
-[completions]
-matching = "prefix"
-case_sensitive = false
+[history]
+max_size = 10000
 
 [plugins]
 enabled = true
 bundles = ["oh-my-winuxsh"]
 ```
-
-Common changes:
-
-- Set `edit_mode = "vi"` for vi-style editing.
-- Set `matching = "substring"` for looser completions.
-- Set `right_prompt_format = ""` to disable the right prompt.
-- Put user aliases and functions in `~/.winshrc` unless the feature has a
-  structured TOML field.
 
 ## WinuxCmd Override
 
@@ -62,7 +111,7 @@ links are expected to provide coreutils.
 
 ## Interactive Shell Code
 
-`~/.winshrc` uses Bash syntax:
+`~/.winuxshrc` and legacy `~/.winshrc` use Bash syntax:
 
 ```bash
 export EDITOR=vim
@@ -70,8 +119,9 @@ alias gs='git status'
 mkcd() { mkdir -p "$1" && cd "$1"; }
 ```
 
-Do not rely on this file for `winuxsh -c` or CI. If command-mode behavior
-depends on an env var, pass it explicitly in the command or test environment.
+Do not rely on either file for `winuxsh -c` or CI. If command-mode behavior
+depends on an environment variable, pass it explicitly in the command or test
+environment.
 
 ## Test Isolation
 
@@ -96,5 +146,5 @@ Treat these as developer/test overrides, not normal user setup.
 Legacy shell importers are for migration/onboarding only. They are not the
 current configuration model, not the plugin system, and not runtime startup.
 Do not source arbitrary legacy startup files, plugin scripts, editor widgets,
-or completion internals. Translate safe intent into native TOML, `~/.winshrc`,
-or Winuxsh plugin suggestions.
+or completion internals. Translate safe intent into `~/.winuxshrc`, managed
+TOML only when appropriate, or Winuxsh plugin suggestions.

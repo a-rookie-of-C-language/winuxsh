@@ -16,8 +16,8 @@ winuxsh.exe
 │   ├── rubash::Executor         ← shell 语言引擎 (lexer/parser/execution/builtins)
 │   ├── reedline REPL            ← 行编辑、历史、补全
 │   ├── completion/              ← TOML + bash 自动导入 + 三级缓存
-│   ├── theme/                   ← 主题与 prompt 模板
-│   ├── config                   ← .winshrc.toml 解析
+│   ├── theme/                   ← 主题 API / schema / bundle loader
+│   ├── config                   ← legacy/managed .winshrc.toml 解析
 │   ├── plugins                  ← Winuxsh 官方插件 registry / bundle 控制面
 │   └── ctrl_c                   ← Win32 Ctrl+C 处理
 ├── rubash lib (Rust)
@@ -52,18 +52,23 @@ rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 
 补全系统（TOML 定义 + bash 脚本自动导入 + `cmd -h` 描述抓取 + 三级缓存）在 winuxsh 侧实现，不依赖 rubash。这是 winuxsh 的核心差异化能力。
 
-### 4. 配置驱动
+### 4. 配置与启动入口
 
-- 启动时读取 `~/.winshrc.toml`
-- 通过 `[aliases]` 写入 rubash 的 alias 表
-- 通过 `[completions.completion_dirs]` 配置补全定义目录
-- 通过 `[theme]` 配置主题
-- 通过 `[winuxcmd]` 配置 winuxcmd 路径
-- 通过 `[plugins]` 管理官方插件 bundle、权限、启用状态和版本锁
+- `~/.winuxshrc` 是主要交互式入口，用普通 winuxsh/bash 语法声明插件列表、
+  主题、prompt 模板、`export`、`alias`、函数和本地启动逻辑。
+- `~/.winshrc` 是兼容 fallback；只有 `~/.winuxshrc` 不存在时才作为旧用户
+  rc 启动文件读取。
+- `~/.winshrc.toml` 继续作为 legacy/managed 结构化状态读取，用于 plugin CLI
+  enable/disable 记录、权限、bundle 版本、zsh migration blocks、测试隔离、补全
+  目录、WinuxCmd override 等机器可编辑状态。
+- 当 `~/.winuxshrc` 存在时，它是 source plugin/framework 的入口；host 不再
+  同时从 TOML 默认插件状态偷偷 source 一遍官方 source plugins，避免双入口和
+  prompt/Git 状态重复刷新。
+- 普通 `winuxsh -c`、脚本文件和 stdin 脚本仍保持安静确定，不加载交互式 rc 或
+  source plugins。
 
-`~/.winshrc.toml` 是结构化控制面；`~/.winshrc` 是用户 shell 脚本面。
-插件加载、权限和 bundle 更新不依赖执行 rc。rc 继续用于 `export`、`alias`、
-函数和其他交互式 shell 初始化逻辑。
+设计原则是减少人类可见入口：用户日常只改 `~/.winuxshrc`；TOML 留给兼容、
+迁移、CLI 管理和可审计机器状态。
 
 ### 5. 插件系统
 
@@ -90,7 +95,9 @@ winuxsh/
 ├── Cargo.toml
 ├── LICENSE                   # GPL-3.0-or-later
 ├── README.md / README-zh.md
-├── .winshrc.toml
+├── .winuxshrc                 # primary interactive user entry
+├── .winshrc                   # legacy fallback rc
+├── .winshrc.toml              # legacy/managed structured state
 ├── crates/
 │   └── winuxsh-runtime/
 │       ├── Cargo.toml
@@ -106,9 +113,10 @@ winuxsh/
 │           └── completion/   # 补全系统
 ├── src/
 │   └── main.rs               # 入口
-└── DOCS/
-    ├── architecture.md
-    └── completion.md
+└── docs/
+    ├── src/
+    │   └── (this documentation book)
+    └── planning/
 ```
 
 ## 数据流

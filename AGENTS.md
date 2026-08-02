@@ -18,7 +18,8 @@
 - WinuxCmd stays integrated through PATH injection and command links. Do not reintroduce FFI/DLL command routing.
 - Zsh compatibility is now a migration and onboarding layer, not the plugin system identity. Keep the scanner/importer safe, but do not expand toward a zsh interpreter, zsh plugin runtime, or ZLE runtime.
 - The plugin system is Winuxsh-native and built into winuxsh. `oh-my-winuxsh` is the official bundled plugin distribution, not an Oh My Zsh fork.
-- Use `~/.winshrc.toml` as the plugin control plane for enablement, permissions, bundle versions, and managed updates. Keep `~/.winshrc` as the user shell script plane.
+- Use `~/.winuxshrc` as the primary interactive user entry point for plugin lists, theme selection, exports, aliases, functions, and shell startup logic. Keep `~/.winshrc` only as a compatibility fallback when `~/.winuxshrc` is absent.
+- Keep `~/.winshrc.toml` as legacy/managed structured state for plugin CLI enablement, permissions, bundle versions, migration blocks, tests, and advanced machine-editable overrides. Do not make it the default user-authored shell configuration surface.
 - Use the manifest-backed registry as the control plane for every runtime. Use `source` packs with bundle-local `.winux` scripts for Oh My-style shell helpers, keep `builtin` for host-owned native behavior and fallback, use WASM/WASI as the long-term sandbox/provider runtime, and keep process plugins as an adapter/debug bridge rather than the main ecosystem.
 
 ## Development Rules
@@ -36,4 +37,4 @@
 - Zsh/import maintenance: `winuxsh -c 'cargo test -p winuxsh-runtime --test zsh_compat --locked'`
 - Host contract requiring winuxcmd command links: ensure command links are in the Windows process `PATH`, then run `winuxsh -c 'PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test host_contract --locked -- --ignored'`
 - Compat suite: ensure command links are in the Windows process `PATH`, then run `winuxsh -c 'PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test compat --locked -- --ignored'`
-- Local GNU Bash upstream gate: `winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'` must report `86` total, `86` passed, `0` failed for the Winuxsh binary under test. Keep this local-only; do not add it to normal CI, and do not vendor Bash upstream tests into this repo. See `DOCS/bash-upstream-local.md`.
+- Local GNU Bash upstream gate: `winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'` must report `86` total, `86` passed, `0` failed for the Winuxsh binary under test. If `bash` is not in Winuxsh's `PATH`, run the same gate with an explicit Git Bash path such as `C:/Progra~1/Git/bin/bash.exe`. Keep this local-only; do not add it to normal CI, and do not vendor Bash upstream tests into this repo. See `docs/planning/bash-upstream-local.md`.

@@ -1,0 +1,12 @@
+[book]
+title = "Winuxsh"
+description = "Bash, native on Windows. Documentation for the Winuxsh shell, its plugins, and its agent contract."
+authors = ["Winuxsh Team"]
+language = "en"
+
+[build]
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/unixwin/winuxsh"
+edit-url-template = "https://github.com/unixwin/winuxsh/edit/master/docs/src/{path}"

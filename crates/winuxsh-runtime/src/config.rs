@@ -1,4 +1,4 @@
-//! Configuration loading from `.winshrc.toml`
+//! Legacy/managed TOML configuration loading from `.winshrc.toml`
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::completion::{CompletionBehavior, CompletionMatchMode};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::plugins::OFFICIAL_BUNDLE_NAME;
 use crate::prompt::PromptIndicators;
 
-/// Shell configuration, loaded from `~/.winshrc.toml`.
+/// Shell configuration, loaded from legacy/managed TOML when present.
 #[derive(Debug, Clone, Default)]
 pub struct ShellConfig {
     /// Prompt indicator symbol (e.g. "%", "\$", "\u276f", "\u3bb")
@@ -672,7 +673,7 @@ impl Default for FullConfig {
     }
 }
 
-/// Load config from `~/.winshrc.toml`. Returns defaults if the file
+/// Load legacy/managed config from `WINUXSH_CONFIG` or `~/.winshrc.toml`. Returns defaults if the file
 /// does not exist or cannot be parsed (logs warning).
 #[derive(Debug, Deserialize)]
 struct GitPromptToml {
@@ -713,7 +714,7 @@ pub fn default_config_path() -> PathBuf {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".winshrc.toml")
 }
 
@@ -861,7 +862,7 @@ fn build_menu_config(parsed: MenusToml) -> MenuConfig {
 }
 
 fn expand_tilde_path(value: &str) -> PathBuf {
-    let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = || shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
     if value == "~" {
         return home();
     }
@@ -869,7 +870,7 @@ fn expand_tilde_path(value: &str) -> PathBuf {
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        return home().join(rest);
+        return home().join(shell_path_to_host_path(rest));
     }
     PathBuf::from(value)
 }
@@ -1073,7 +1074,7 @@ max_size = 1234
 ignore_space_prefixed = true
 "#,
         );
-        let expected_path = dirs::home_dir()
+        let expected_path = shell_home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".custom_winuxsh_history");
         assert_eq!(config.history.path, Some(expected_path));
@@ -1486,3 +1487,4 @@ presets = ["direnv"]
         assert!(!config.main_highlighter_enabled());
     }
 }
+

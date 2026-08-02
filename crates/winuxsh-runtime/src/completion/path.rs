@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::completion::{CompletionBehavior, CompletionContext, CompletionResult};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use anyhow::Result;
 
 /// Path completer
@@ -221,21 +222,14 @@ fn resolve_base_dir(current_dir: &Path, dir_part: &str) -> PathBuf {
     }
 }
 
-fn completion_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
-}
 fn expand_tilde_path(value: &str) -> Option<PathBuf> {
     if value == "~" {
-        return completion_home_dir();
+        return shell_home_dir();
     }
     value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
-        .and_then(|rest| completion_home_dir().map(|home| home.join(rest)))
+        .and_then(|rest| shell_home_dir().map(|home| home.join(shell_path_to_host_path(rest))))
 }
 
 fn shell_escape_path(value: &str) -> String {

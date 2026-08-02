@@ -104,24 +104,11 @@ fn plugin_list_json_lists_machine_readable_packs() {
         "{stdout}"
     );
     assert!(
-        stdout.contains(r#""target_runtime": "declarative_asset_plus_native_reedline_actions""#),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(r#""target_runtime": "declarative_asset_plus_native_theme_renderer""#),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(r#""target_runtime": "host_builtin_and_process_provider""#),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(r#""missing_host_api_or_decision": "wasm_provider_abi""#),
+        stdout.contains(r#""target_runtime": "asset_only_declarative_schema_tbd""#),
         "{stdout}"
     );
     assert!(stdout.contains(r#""shell_mutating": true"#), "{stdout}");
     assert!(stdout.contains(r#""fallback_needed": true"#), "{stdout}");
-    assert!(stdout.contains(r#""fallback_needed": false"#), "{stdout}");
     assert!(stdout.contains(r#""name": "thefuck""#), "{stdout}");
 }
 #[test]
@@ -235,7 +222,7 @@ fn plugin_search_json_reports_matched_fields() {
     );
 }
 #[test]
-fn plugin_themes_lists_builtin_and_bundle_sources() {
+fn plugin_themes_lists_user_and_bundle_sources_only() {
     let temp = temp_dir("plugin-themes-catalog");
     let bundle = temp.join("bundle");
     write_theme_test_bundle(&bundle, "9.9.10");
@@ -244,10 +231,7 @@ fn plugin_themes_lists_builtin_and_bundle_sources() {
     assert_success(&text, "plugin themes text");
     let stdout = stdout_text(&text);
     assert!(stdout.contains("Winuxsh themes"), "{stdout}");
-    assert!(
-        stdout.contains("- default source=builtin owner=winuxsh"),
-        "{stdout}"
-    );
+    assert!(!stdout.contains("builtin_fallback"), "{stdout}");
     assert!(
         stdout.contains(
             "- testmarket source=bundle owner=oh-my-winuxsh@9.9.10 bundle=oh-my-winuxsh pack=themes"
@@ -287,62 +271,6 @@ fn plugin_themes_marks_external_bundle_trust_source() {
     );
     assert!(
         stdout.contains(r#""trust_source": "external_bundle""#),
-        "{stdout}"
-    );
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn plugin_prompts_lists_builtin_and_bundle_presets() {
-    let temp = temp_dir("plugin-prompts-catalog");
-    let bundle = temp.join("bundle");
-    write_minimal_test_bundle(&bundle, "9.9.11", "Prompt catalog fixture.");
-    let envs = [("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)];
-    let text = run_winuxsh_with_env(&["plugin", "prompts"], &envs);
-    assert_success(&text, "plugin prompts text");
-    let stdout = stdout_text(&text);
-    assert!(stdout.contains("Winuxsh prompt presets"), "{stdout}");
-    assert!(
-        stdout.contains("- classic source=builtin owner=winuxsh"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains(
-            "- classic source=bundle owner=oh-my-winuxsh@9.9.11 bundle=oh-my-winuxsh pack=git"
-        ),
-        "{stdout}"
-    );
-    assert!(stdout.contains("separator=\"|\""), "{stdout}");
-    let json = run_winuxsh_with_env(&["plugin", "prompts", "--json"], &envs);
-    assert_success(&json, "plugin prompts json");
-    let stdout = stdout_text(&json);
-    assert!(stdout.contains(r#""source": "bundle""#), "{stdout}");
-    assert!(
-        stdout.contains(r#""git_prompt_format": "bundle:{git_branch}""#),
-        "{stdout}"
-    );
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn plugin_keybindings_lists_bundle_assets() {
-    let temp = temp_dir("plugin-keybindings-catalog");
-    let bundle = temp.join("bundle");
-    write_keybindings_test_bundle(&bundle, "9.9.6");
-    let envs = [("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)];
-    let text = run_winuxsh_with_env(&["plugin", "keybindings"], &envs);
-    assert_success(&text, "plugin keybindings text");
-    let stdout = stdout_text(&text);
-    assert!(stdout.contains("Winuxsh keybindings"), "{stdout}");
-    assert!(
-        stdout.contains("- common keymap=all source=bundle owner=oh-my-winuxsh@9.9.6 bindings=2"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("Tab -> complete-word"), "{stdout}");
-    let json = run_winuxsh_with_env(&["plugin", "keybindings", "--json"], &envs);
-    assert_success(&json, "plugin keybindings json");
-    let stdout = stdout_text(&json);
-    assert!(stdout.contains(r#""keymap": "emacs""#), "{stdout}");
-    assert!(
-        stdout.contains(r#""action": "beginning-of-line""#),
         "{stdout}"
     );
     let _ = fs::remove_dir_all(temp);
@@ -404,11 +332,11 @@ fn plugin_info_marks_command_not_found_provider_candidate() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Target runtime: host_builtin_and_process_provider"),
+        stdout.contains("Target runtime: process_provider_available_builtin_until_migration"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("Missing host API/decision: wasm_provider_abi"),
+        stdout.contains("Missing host API/decision: bundle_migration_decision,wasm_provider_abi"),
         "{stdout}"
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
@@ -435,18 +363,16 @@ fn plugin_review_marks_command_not_found_process_provider_readiness() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Target runtime: host_builtin_and_process_provider"),
+        stdout.contains("Target runtime: process_provider_available_builtin_until_migration"),
         "{stdout}"
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
     assert!(
-        stdout.contains(
-            "command-not-found is wired to the host call-site and process-provider bridge"
-        ),
+        stdout.contains("process provider binding exists for command-not-found"),
         "{stdout}"
     );
     assert!(
-        stdout.contains("WASM providers still need a separate ABI"),
+        stdout.contains("WASM providers still require a separate ABI"),
         "{stdout}"
     );
 }
@@ -788,6 +714,50 @@ fn plugin_info_reads_installed_source_pack_contract() {
         stdout.contains("  entry: packs/source-test/init.winux"),
         "{stdout}"
     );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
+fn plugin_inventory_reads_framework_plugin_directories() {
+    let temp = temp_dir("plugin-framework-directories");
+    let bundle = temp.join("bundle");
+    write_framework_directory_test_bundle(&bundle, "9.9.11");
+
+    let list = run_winuxsh_with_env(
+        &["plugin", "list", "--json"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
+    );
+    assert_success(&list, "plugin list framework directories json");
+    let stdout = stdout_text(&list);
+    assert!(stdout.contains(r#""name": "prompt-core""#), "{stdout}");
+    assert!(stdout.contains(r#""name": "theme-minimal""#), "{stdout}");
+    assert!(stdout.contains(r#""name": "keybindings""#), "{stdout}");
+    assert!(stdout.contains(r#""kind": "bridge""#), "{stdout}");
+    assert!(
+        !stdout.contains("Legacy Git aliases"),
+        "framework git plugin should replace legacy pack\n{stdout}"
+    );
+
+    let git = run_winuxsh_with_env(
+        &["plugin", "info", "git"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
+    );
+    assert_success(&git, "plugin info framework git");
+    let stdout = stdout_text(&git);
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(stdout.contains("Summary: Framework Git plugin"), "{stdout}");
+    assert!(
+        stdout.contains("  entry: plugins/git/git.plugin.winux"),
+        "{stdout}"
+    );
+
+    let keybindings = run_winuxsh_with_env(
+        &["plugin", "info", "keybindings"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)],
+    );
+    assert_success(&keybindings, "plugin info framework keybindings bridge");
+    let stdout = stdout_text(&keybindings);
+    assert!(stdout.contains("Kind: bridge"), "{stdout}");
+    assert!(stdout.contains("Execution model: host_bridge"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
@@ -2473,6 +2443,132 @@ keybindings = []
         &["cwd:read", "process:run:git"],
         &["git"],
     );
+}
+fn write_framework_directory_test_bundle(path: &Path, version: &str) {
+    write_minimal_test_bundle(path, version, "Legacy Git aliases");
+    fs::create_dir_all(path.join("plugins").join("prompt-core")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("git")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("theme-minimal")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("keybindings")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("command-not-found")).unwrap();
+    fs::create_dir_all(path.join("themes")).unwrap();
+
+    fs::write(
+        path.join("plugins").join("prompt-core").join("plugin.toml"),
+        format!(
+            r#"name = "prompt-core"
+version = {version:?}
+kind = "source"
+entry = "prompt-core.plugin.winux"
+summary = "Framework prompt core"
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+prompt_segments = ["cwd", "git", "prompt_char"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("prompt-core")
+            .join("prompt-core.plugin.winux"),
+        "export FRAMEWORK_PROMPT_CORE=loaded\n",
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins").join("git").join("plugin.toml"),
+        format!(
+            r#"name = "git"
+version = {version:?}
+kind = "source"
+entry = "git.plugin.winux"
+summary = "Framework Git plugin"
+permissions = ["shell:source", "cwd:read", "process:run:git"]
+required_binaries = ["git"]
+[exports]
+aliases = true
+completions = ["git"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins").join("git").join("git.plugin.winux"),
+        "alias gst='git status --framework'\n",
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins")
+            .join("theme-minimal")
+            .join("plugin.toml"),
+        format!(
+            r#"name = "theme-minimal"
+version = {version:?}
+kind = "source"
+entry = "theme-minimal.plugin.winux"
+summary = "Framework minimal theme"
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+themes = ["minimal"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("theme-minimal")
+            .join("theme-minimal.plugin.winux"),
+        "export FRAMEWORK_THEME=minimal\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("themes").join("minimal.toml"),
+        r#"[prompt_symbol]
+fg = "light magenta"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins").join("keybindings").join("plugin.toml"),
+        format!(
+            r#"name = "keybindings"
+version = {version:?}
+kind = "bridge"
+entry = "keybindings.plugin.winux"
+summary = "Framework keybinding bridge"
+permissions = []
+required_binaries = []
+[exports]
+keybindings = ["common"]
+host_bridge = "reedline-keybindings"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("command-not-found")
+            .join("plugin.toml"),
+        format!(
+            r#"name = "command-not-found"
+version = {version:?}
+kind = "bridge"
+entry = "command-not-found.plugin.winux"
+summary = "Framework command-not-found bridge"
+permissions = ["command:diagnose"]
+required_binaries = []
+[exports]
+providers = ["command-not-found"]
+host_bridge = "command-not-found-provider"
+"#
+        ),
+    )
+    .unwrap();
 }
 fn write_theme_test_bundle(path: &Path, version: &str) {
     fs::create_dir_all(path.join("packs").join("themes")).unwrap();

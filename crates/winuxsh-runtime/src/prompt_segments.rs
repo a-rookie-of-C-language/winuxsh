@@ -15,6 +15,7 @@ use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 
 use crate::git_status::{collect_for_prompt, GitPromptSymbols, GitRepoStatus};
+use crate::path_utils::shell_home_dir;
 use crate::prompt::{format_local_time, PromptIndicators};
 
 // ---- Segment identifiers ----
@@ -243,7 +244,7 @@ fn render_content(
 
 /// Shorten a directory path by replacing `$HOME` with `~`.
 fn short_dir(path: &Path) -> String {
-    let home = dirs::home_dir();
+    let home = shell_home_dir();
     let path_str = path.to_string_lossy();
     if let Some(home) = home {
         let home_str = home.to_string_lossy();
@@ -584,7 +585,9 @@ impl Prompt for SegmentPromptAdapter {
 mod tests {
     use super::*;
     use crate::git_status::GitPromptSymbols;
+    use crate::test_support::PROCESS_STATE_LOCK;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static STATUS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -621,9 +624,14 @@ mod tests {
 
     #[test]
     fn short_dir_replaces_home_with_tilde() {
-        let home = dirs::home_dir().unwrap();
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let home = unique_temp_dir("winuxsh-segment-prompt-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = EnvGuard::set("HOME", &home.to_string_lossy());
+        let home = shell_home_dir().unwrap();
         let s = short_dir(&home);
         assert_eq!(s, "~");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
@@ -766,5 +774,36 @@ mod tests {
             git_prompt_format: None,
             preset: Some(SegmentPreset::Lean),
         }
+    }
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.name, previous);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
     }
 }
