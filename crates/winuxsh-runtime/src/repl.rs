@@ -20,6 +20,29 @@ use crate::zsh_compat::NativeWidgetSuggestion;
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
 
+/// Extract the arguments of a `self-update` / `update-winuxsh` REPL command,
+/// or `None` when the line is not one.
+pub fn self_update_command_args(line: &str) -> Option<Vec<String>> {
+    let mut parts = line.trim().split_whitespace();
+    match parts.next()? {
+        "self-update" | "update-winuxsh" => Some(parts.map(str::to_string).collect()),
+        _ => None,
+    }
+}
+
+/// Hand `self-update` off to a child process of the current executable with
+/// `--self-update`, then exit this shell so the installer can replace the
+/// binary. Returns `None` when spawning is not possible; otherwise the child
+/// exit code.
+pub fn spawn_self_update(args: &[String]) -> Option<i32> {
+    let exe = std::env::current_exe().ok()?;
+    let mut command = std::process::Command::new(exe);
+    command.arg("--self-update").args(args);
+    let mut child = command.spawn().ok()?;
+    let status = child.wait().ok()?;
+    Some(status.code().unwrap_or(0))
+}
+
 /// Build a `Reedline` instance for the shell.
 pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
     let history = FileBackedHistory::with_file(shell.history_max_size, shell.history_path.clone())
@@ -762,6 +785,13 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                 }
                 if pending.is_empty() && matches!(line.trim(), "exit" | "logout") {
                     break;
+                }
+                if pending.is_empty() {
+                    if let Some(args) = self_update_command_args(line) {
+                        if let Some(code) = spawn_self_update(&args) {
+                            std::process::exit(code);
+                        }
+                    }
                 }
 
                 pending.push(line);

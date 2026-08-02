@@ -209,6 +209,11 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
     if args.len() < 3 {
         anyhow::bail!("{} requires an argument", args[1]);
     }
+    if let Some(self_update_args) = winuxsh_runtime::repl::self_update_command_args(&args[2]) {
+        if let Some(code) = winuxsh_runtime::repl::spawn_self_update(&self_update_args) {
+            std::process::exit(code);
+        }
+    }
     let mut shell = winuxsh_runtime::Shell::new()?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
