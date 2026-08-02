@@ -311,6 +311,36 @@ fn repl_command_file_command_prefers_path_over_winuxsh_native_helpers() {
 }
 
 #[test]
+fn command_mode_sets_shell_to_current_exe_when_missing() {
+    let temp = unique_temp_dir("winuxsh-command-mode-shell-env");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+
+    let bin = winuxsh_binary();
+    let output = Command::new(&bin)
+        .args(["-c", "printf '<%s>\\n' \"$SHELL\""])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
+        .env_remove("SHELL")
+        .env_remove("BASH")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run winuxsh shell env test: {err}"));
+
+    assert_success(&output, "command mode default SHELL");
+    assert_eq!(
+        stdout_text(&output).trim(),
+        format!("<{}>", display_path(&bin))
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
     let temp = unique_temp_dir("winuxsh-gitstatus-daemon");
     let repo = temp.join("repo");
@@ -418,6 +448,10 @@ fn stdout_text(output: &Output) -> String {
 
 fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n")
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
