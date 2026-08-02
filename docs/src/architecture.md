@@ -113,9 +113,10 @@ winuxsh/
 │           └── completion/   # 补全系统
 ├── src/
 │   └── main.rs               # 入口
-└── DOCS/
-    ├── architecture.md
-    └── completion.md
+└── docs/
+    ├── src/
+    │   └── (this documentation book)
+    └── planning/
 ```
 
 ## 数据流

@@ -85,7 +85,7 @@ status: active
   - prompt/theme model
   - config/profile model
 - [x] Decide what maps cleanly to winuxsh and what is explicitly out of scope.
-- Audit note: `DOCS/nushell-reference-audit.md`
+- Audit note: `nushell-reference-audit.md`
 
 ### Phase 1 - Completion Test Baseline
 
@@ -138,6 +138,6 @@ status: active
 - Maintain `winuxsh/` folder in the vault as the active project memory area.
 - Before feature implementation, update the relevant Markdown plan/checklist.
 - After each phase, sync:
-  - `DOCS/winuxsh-roadmap.md`
-  - `DOCS/winuxsh-v2.2-reference-plan.md`
+  - `../src/winuxsh-roadmap.md`
+  - `winuxsh-v2.2-reference-plan.md`
   - Obsidian `winuxsh/` copies

@@ -179,8 +179,8 @@ Verification:
 - Provide a Windows Terminal profile recommendation.
 - Provide a minimal default `.winshrc.toml` optimized for users and agents.
 - Add the official Winuxsh plugin bundle plan:
-  `DOCS/plugin-system-direction.md` and
-  `DOCS/oh-my-winuxsh-bundle-plan.md`.
+  `plugin-system-direction.md` and
+  `oh-my-winuxsh-bundle-plan.md`.
 - Keep config backward compatible.
 - Keep zsh migration as an onboarding adapter before designing any online
   plugin registry:

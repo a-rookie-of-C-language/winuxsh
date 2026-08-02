@@ -59,12 +59,12 @@ status: active
 - [x] 先做 Nushell / 现代 Windows shell reference audit，仅参考设计，不引入 Nushell 依赖，不 vendor 外部源码
 - [ ] 每个功能阶段先更新 Markdown 计划，再小步实现、测试、提交（v2.2 实施中）
 - [x] Obsidian vault 中维护 `winuxsh/` 文件夹作为项目长期记忆
-- [x] Nushell reference audit 落盘: `DOCS/nushell-reference-audit.md`
-- [x] zsh / Oh My Zsh / zsh 插件 reference audit 落盘: `DOCS/zsh-reference-audit.md`
-- [x] zsh-first 功能定位与现代 shell reference map 落盘: `DOCS/winuxsh-positioning-and-feature-map.md`
-- [x] Windows 原生 agent/user terminal 下一步计划落盘: `DOCS/winuxsh-next-development-plan.md`
-- [x] zsh 配置与插件兼容计划落盘: `DOCS/zsh-compatibility-plan.md`
-- [x] zsh 兼容接口可行性审计落盘: `DOCS/zsh-compatibility-interface-audit.md`
+- [x] Nushell reference audit 落盘: `docs/planning/nushell-reference-audit.md`
+- [x] zsh / Oh My Zsh / zsh 插件 reference audit 落盘: `docs/planning/zsh-reference-audit.md`
+- [x] zsh-first 功能定位与现代 shell reference map 落盘: `docs/planning/winuxsh-positioning-and-feature-map.md`
+- [x] Windows 原生 agent/user terminal 下一步计划落盘: `docs/planning/winuxsh-next-development-plan.md`
+- [x] zsh 配置与插件兼容计划落盘: `docs/planning/zsh-compatibility-plan.md`
+- [x] zsh 兼容接口可行性审计落盘: `docs/planning/zsh-compatibility-interface-audit.md`
 - [x] Phase 0 hygiene: 清理误建的空 `--help` 目录，保留 `.tmp/` 未跟踪
 
 ### 补全系统增强
@@ -184,20 +184,20 @@ status: active
 - [x] Phase 33 Git daily-use polish: `git <Tab>` / 子命令 / flag 补全已接入并测试，README 补齐 alias、completion、prompt 文档，让 git 插件成为第一等 daily shell 能力
 - [x] Phase 33a oh-my-zsh-style git prompt status: 新增 `crates/winuxsh-runtime/src/git_status.rs` 通过 `git status --porcelain -b` / rev-list / stash list 收集 branch/dirty/staged/unstaged/untracked/deleted/ahead/behind/stashes/conflicts；prompt 模板新增 `{git_dirty}` / `{git_staged}` / `{git_unstaged}` / `{git_untracked}` / `{git_deleted}` / `{git_ahead}` / `{git_behind}` / `{git_stashes}` / `{git_conflicts}` / `{git_status}` 紧凑串；theme 新增 `git_clean` / `git_dirty` / `git_status_detail` 着色；`{git_prompt}` 默认形如 `git:(main) ●2 ↑1 ↓1 ?3`，clean=green / dirty=yellow；`completions/defaults/git.toml` 内置 add/commit/push/pull/checkout/switch/branch/merge/rebase/reset/restore/stash/status/log/diff/init/clone 子命令补全
 - [x] Phase 34 p10k-style segment-based prompt engine: new prompt_segments.rs module with 5 presets (lean/classic/rainbow/pure/robbyrussell), powerline separators, multiline prefixes
-- [x] README / tutorial documentation baseline: README.md / README-zh.md 重写为用户入口，新增 `DOCS/zsh-migration-guide.md` 迁移教程
-- [x] Plugin system direction refresh: `DOCS/plugin-system-direction.md` 改为 Winuxsh-native plugin system + bundled `oh-my-winuxsh`
-- [x] Oh My Winuxsh bundle plan: `DOCS/oh-my-winuxsh-bundle-plan.md` 定义重建、bundle、更新、lockfile 和迁移策略
+- [x] README / tutorial documentation baseline: README.md / README-zh.md 重写为用户入口，新增 `docs/src/zsh-migration-guide.md` 迁移教程
+- [x] Plugin system direction refresh: `docs/planning/plugin-system-direction.md` 改为 Winuxsh-native plugin system + bundled `oh-my-winuxsh`
+- [x] Oh My Winuxsh bundle plan: `docs/planning/oh-my-winuxsh-bundle-plan.md` 定义重建、bundle、更新、lockfile 和迁移策略
 - [ ] Plugin registry implementation: builtin packs first, then process bridge, then WASM/WASI
 - [ ] zsh/Oh My Zsh 兼容导入层维护：只修 bug、保安全导入，不继续扩大为 zsh runtime 或 zsh plugin support
 
 ### Rubash 能力验证
-- [x] Rubash/bash 能力矩阵：新增 `DOCS/rubash-bash-compat-matrix.md`，按 compat fixtures、host contract、本地 GNU Bash upstream gate 分层记录已验证能力和缺口
+- [x] Rubash/bash 能力矩阵：新增 `docs/src/rubash-bash-compat-matrix.md`，按 compat fixtures、host contract、本地 GNU Bash upstream gate 分层记录已验证能力和缺口
 - [x] Winuxsh host GNU Bash upstream gate (2026-07-28): 新增
       `scripts/run-bash-upstream-with-winuxsh.sh`，shell under test 指向
       `winuxsh/target/debug/winuxsh.exe`，结果 86 total / 86 pass / 0 fail，
       summary 位于
       `target/bash-upstream-tests/summary.md`；
-      本地执行说明见 `DOCS/bash-upstream-local.md`，不纳入默认 CI，也不 vendor
+      本地执行说明见 `docs/planning/bash-upstream-local.md`，不纳入默认 CI，也不 vendor
       Bash upstream tests
 - [x] Phase 17 host contract matrix: 为 winuxsh host 层补充 PATH/env/cwd/home/stdout/stderr/exit-code 二进制级集成测试
 - [x] Phase 18 completion probe tests: 通过 `winuxsh --completion-probe` 验证真实 Shell 初始化后的 REPL 补全候选

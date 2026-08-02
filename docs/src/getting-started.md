@@ -239,8 +239,8 @@ permission checks; legacy `--zsh-native-packs` remains migration-only.
 ## What next
 
 - [Zsh Migration Guide](zsh-migration-guide.md) for detailed `.zshrc` import
-- [Plugin System Direction](plugin-system-direction.md) for the v3 plugin model
-- [Plugin System Roadmap](plugin-system-roadmap.md) for the execution sequence
-- [Oh My Winuxsh Bundle Plan](oh-my-winuxsh-bundle-plan.md) for the official bundle
+- [Plugin System Direction](../planning/plugin-system-direction.md) for the v3 plugin model
+- [Plugin System Roadmap](../planning/plugin-system-roadmap.md) for the execution sequence
+- [Oh My Winuxsh Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle
 - [Roadmap](winuxsh-roadmap.md) to see what is planned
 - Source at [github.com/unixwin/winuxsh](https://github.com/unixwin/winuxsh)

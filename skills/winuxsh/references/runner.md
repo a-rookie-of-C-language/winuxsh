@@ -71,6 +71,13 @@ Use pwsh double quotes only for trivial commands or when host interpolation is
 intentional and audited. If a program needs nested single quotes, move the
 logic to a script file or feed a script on stdin rather than piling on escaping.
 
+pwsh has a long history of mangling arguments passed to native executables:
+empty strings eaten, embedded quotes flattened, adjacent arguments fused, and
+Bash-style escapes rejected as parse errors. If an inline `-c` program arrives
+trimmed, split, or fails to parse, stop escaping harder and move it to a
+`.sh` script file (`winuxsh script.sh`) or stdin. That is the reliable path,
+and the first thing to check before blaming Winuxsh.
+
 ## Command Mode Vs One-Shot REPL
 
 Use `-c` for deterministic script/CI/agent command mode. It executes through

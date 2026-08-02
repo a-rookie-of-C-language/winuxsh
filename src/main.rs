@@ -345,7 +345,7 @@ fn print_usage() {
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
-    println!("Configuration: ~/.winshrc.toml for settings, ~/.winshrc for REPL shell code");
+    println!("Configuration: ~/.winuxshrc for interactive startup; ~/.winshrc and ~/.winshrc.toml remain legacy/managed fallbacks");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
