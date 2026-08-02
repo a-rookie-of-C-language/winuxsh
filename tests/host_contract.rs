@@ -1069,7 +1069,20 @@ fn comparable_path(value: &str) -> String {
         let drive = value[0..1].to_ascii_uppercase();
         value.replace_range(0..1, &drive);
     }
-    value.trim_end_matches('/').to_string()
+    let normalized = value.trim_end_matches('/').to_string();
+    // cmd.exe may report 8.3 short-name paths (e.g. RUNNER~1); expand them
+    // through the filesystem so both sides compare as long names.
+    if cfg!(windows) {
+        if let Ok(expanded) = std::fs::canonicalize(normalized.replace('/', "\\")) {
+            let mut expanded = expanded.to_string_lossy().replace('\\', "/");
+            if expanded.len() >= 2 && expanded.as_bytes()[1] == b':' {
+                let drive = expanded[0..1].to_ascii_uppercase();
+                expanded.replace_range(0..1, &drive);
+            }
+            return expanded.trim_end_matches('/').to_string();
+        }
+    }
+    normalized
 }
 
 fn shell_path(path: &Path) -> String {
