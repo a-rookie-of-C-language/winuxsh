@@ -1,35 +1,48 @@
 //! First-run setup wizard (Oh-My-Zsh style).
 //!
-//! Guides the user through initial configuration when `~/.winshrc.toml`
-//! does not exist, then writes the generated file.
+//! Guides the user through initial interactive configuration, then writes a
+//! normal shell rc file. Structured TOML remains a legacy/managed surface, not
+//! the default user entry point.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::path_utils::shell_home_dir;
 use crate::theme;
 
+const PRIMARY_RC_FILE: &str = ".winuxshrc";
+const LEGACY_RC_FILE: &str = ".winshrc";
+const SETUP_DONE_FILE: &str = ".setup-done";
+
 /// Returns `true` if the user has never run the setup wizard before
-/// (i.e. `~/.winshrc.toml` does not exist and `~/.winuxsh/.setup-done`
-/// does not exist).
+/// (i.e. no primary/legacy rc file and no setup marker). Legacy/managed TOML
+/// metadata no longer blocks first-run rc onboarding.
 pub fn is_first_run() -> bool {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let config = home.join(".winshrc.toml");
-    if config.is_file() {
-        return false;
+    let home = setup_home_dir();
+    for name in [PRIMARY_RC_FILE, LEGACY_RC_FILE] {
+        if home.join(name).is_file() {
+            return false;
+        }
     }
-    let flag = home.join(".winuxsh").join(".setup-done");
-    if flag.is_file() {
-        return false;
-    }
-    true
+    !home.join(".winuxsh").join(SETUP_DONE_FILE).is_file()
 }
 
 /// Run the interactive setup wizard.
 ///
 /// Prints a welcome banner, asks the user a few questions with defaults,
-/// writes `~/.winshrc.toml`, and creates the `.setup-done` marker.
+/// writes `~/.winuxshrc`, and creates the `.setup-done` marker.
 pub fn run_wizard() -> anyhow::Result<()> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    run_wizard_inner(false)
+}
+
+/// Re-run the setup wizard even if the user already has a startup rc.
+pub fn rerun_wizard() -> anyhow::Result<()> {
+    run_wizard_inner(true)
+}
+
+fn run_wizard_inner(reconfigure: bool) -> anyhow::Result<()> {
+    let home = setup_home_dir();
 
     println!();
     println!(
@@ -42,91 +55,125 @@ pub fn run_wizard() -> anyhow::Result<()> {
         "\u{2728}"
     );
     println!();
-    println!("  Let\u{2019}s get you set up.  (Press Enter to accept defaults.)");
+    if reconfigure {
+        println!("  Reconfigure your interactive prompt/plugins. Existing rc will be backed up.");
+    } else {
+        println!("  Let\u{2019}s get you set up.  (Press Enter to accept defaults.)");
+    }
     println!();
 
-    // --- Editor mode ---
-    let edit_mode = prompt_choice(
-        "  \u{1f4dd}  Editing mode",
-        "emacs",
-        &["emacs", "vi"],
-        "  \u{2502}  emacs = standard keybindings (Ctrl+A/E/K, Tab completion, Ctrl+R search)\n  \u{2502}  vi    = vim-style insert/normal modes",
+    let prompt_enabled = prompt_yn("  \u{1f3b5}  Enable bundled prompt/theme plugins", true);
+
+    let mut theme = String::new();
+    let mut prompt_style = "off".to_string();
+    let mut right_prompt = "off".to_string();
+    let mut symbol = ">".to_string();
+    let mut segment_preset: Option<String> = None;
+    let cwd_style = prompt_choice(
+        "  \u{1f4c1}  Prompt path display",
+        "home",
+        &["home", "full", "basename"],
+        "  \u{2502}  home     = ~ and ~/repo below your profile\n  \u{2502}  full     = C:/Users/name/repo\n  \u{2502}  basename = only the current directory name",
     );
 
-    // --- Theme ---
-    let theme_list = theme::list_available_names();
-    let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
-    let theme = prompt_choice("  \u{1f3a8}  Colour theme", "default", &theme_refs, "  \u{2502}  Choose the prompt colour scheme.  Try \u{2018}colorful\u{2019} for a vibrant prompt.");
+    if prompt_enabled {
+        // --- Theme ---
+        let theme_list = theme::list_available_names();
+        if theme_list.is_empty() {
+            anyhow::bail!(
+                "No Winuxsh themes found. The oh-my-winuxsh bundle is required and should be preinstalled."
+            );
+        }
+        let theme_refs: Vec<&str> = theme_list.iter().map(String::as_str).collect();
+        let default_theme = if theme_refs.contains(&"p10-classic") {
+            "p10-classic"
+        } else if theme_refs.contains(&"minimal") {
+            "minimal"
+        } else {
+            theme_refs.first().copied().unwrap_or("default")
+        };
+        print_theme_previews(&theme_refs, "\u{276f}");
+        theme = prompt_choice(
+            "  \u{1f3a8}  Colour theme",
+            default_theme,
+            &theme_refs,
+            "  \u{2502}  Choose the plugin-owned prompt colour scheme. Official themes come from oh-my-winuxsh.",
+        );
 
-    // --- Prompt symbol ---
-    let symbol = prompt_choice(
-        "  \u{1f3b5}  Prompt symbol",
-        "\u{276f}",
-        &["\u{276f}", "\u{3bb}", "\u{25b6}", "\u{24}", "%"],
-        "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
-    );
+        // --- Prompt symbol ---
+        symbol = prompt_choice(
+            "  \u{1f3b5}  Prompt symbol",
+            "\u{276f}",
+            &["\u{276f}", "\u{3bb}", "\u{25b6}", "\u{24}", "%"],
+            "  \u{2502}  Pick the character that ends your prompt line.\n  \u{2502}  \u{276f} heavy right-pointing angle (powerlevel10k style)\n  \u{2502}  \u{3bb} lambda (functional/minimal)\n  \u{2502}  \u{25b6} black right-pointing triangle\n  \u{2502}  $ dollar sign (classic bash)\n  \u{2502}  % percent sign (classic fish)",
+        );
 
-    // --- Prompt style ---
-    let prompt_style = prompt_choice(
-         "  \u{1f3b5}  Prompt style",
-         "minimal",
-        &["minimal", "classic", "powerline", "multiline", "segments"],
-        "  \u{2502}  minimal   = user@host cwd $\n  \u{2502}  classic   = user@host cwd git_branch git_status $\n  \u{2502}  powerline = unicode arrows with git status on the right\n  \u{2502}  multiline = first line: user@host, second line: cwd git_branch $\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt (experimental)",
-     );
+        // --- Prompt style ---
+        prompt_style = prompt_choice(
+             "  \u{1f3b5}  Prompt style",
+             "minimal",
+            &["minimal", "classic", "powerline", "multiline", "segments"],
+            "  \u{2502}  minimal   = cwd git prompt_char\n  \u{2502}  classic   = user@host cwd git prompt_char\n  \u{2502}  powerline = compact left prompt with right-side info\n  \u{2502}  multiline = first line context, second line cwd/git\n  \u{2502}  segments  = powerlevel10k-style segment-based prompt",
+         );
 
-    // --- Segment preset (only if prompt_style = "segments") ---
-    let segment_preset = if prompt_style == "segments" {
-        Some(prompt_choice(
-            "  \u{1f3a8}  Segment preset",
-            "classic",
-            &["classic", "lean", "rainbow", "pure", "robbyrussell"],
-            "  \u{2502}  classic       = blue dir + green git with powerline triangles, right-side time/status\n  \u{2502}  lean          = minimal no-background segments, single-line prompt\n  \u{2502}  rainbow       = like classic with rainbow text colours (no backgrounds)\n  \u{2502}  pure          = clean context+dir+git+exec_time, no icons\n  \u{2502}  robbyrussell  = oh-my-zsh default: green/cyan segments",
-        ))
-    } else {
-        None
-    };
+        // --- Segment preset (only if prompt_style = "segments") ---
+        segment_preset = if prompt_style == "segments" {
+            Some(prompt_choice(
+                "  \u{1f3a8}  Segment preset",
+                "classic",
+                &["classic", "lean", "rainbow", "pure", "robbyrussell"],
+                "  \u{2502}  classic       = P10K classic layout\n  \u{2502}  lean          = P10K lean layout\n  \u{2502}  rainbow       = P10K rainbow colours\n  \u{2502}  pure          = P10K pure layout\n  \u{2502}  robbyrussell  = Oh My Zsh default feel",
+            ))
+        } else {
+            None
+        };
 
-    // --- Right prompt ---
-    let right_prompt = prompt_choice(
-         "  \u{23f1}\u{fe0f}  Right-side info",
-        "time",
-        &["off", "time", "full"],
-        "  \u{2502}  off  = no right prompt\n  \u{2502}  time = show current time (HH:MM)\n  \u{2502}  full = time + git branch \u{2014} useful with powerline or minimal prompt",
-    );
+        // --- Right prompt ---
+        right_prompt = prompt_choice(
+             "  \u{23f1}\u{fe0f}  Right-side info",
+            "time",
+            &["off", "time", "full"],
+            "  \u{2502}  off  = no right prompt\n  \u{2502}  time = show current time (HH:MM)\n  \u{2502}  full = time + git branch",
+        );
+        print_theme_preview(&theme, &symbol);
+    }
 
     // --- Git prompt ---
-    let git_enabled = prompt_yn("  \u{1f500}  Show git branch/status in the prompt", true);
+    let git_enabled = if prompt_enabled {
+        prompt_yn("  \u{1f500}  Show git branch/status in the prompt", true)
+    } else {
+        prompt_yn("  \u{1f500}  Load Git helper aliases/functions", true)
+    };
 
-    // --- Generate config ---
-    let config_content = generate_config(
-        &edit_mode,
+    // --- Generate shell rc ---
+    let rc_content = generate_rc(
         &theme,
         &prompt_style,
         &right_prompt,
         &symbol,
+        &cwd_style,
+        prompt_enabled,
         git_enabled,
         segment_preset.as_deref(),
     );
 
-    // Write ~/.winshrc.toml
-    let config_path = home.join(".winshrc.toml");
-    {
-        let mut file = std::fs::File::create(&config_path)?;
-        file.write_all(config_content.as_bytes())?;
-    }
+    // Write ~/.winuxshrc
+    let rc_path = home.join(PRIMARY_RC_FILE);
+    let backup_path = write_primary_rc(&home, &rc_content)?;
 
     // Write .setup-done flag so subsequent starts skip the wizard
     let winuxsh_dir = home.join(".winuxsh");
     let _ = std::fs::create_dir_all(&winuxsh_dir);
-    let _ = std::fs::write(winuxsh_dir.join(".setup-done"), b"");
+    let _ = std::fs::write(winuxsh_dir.join(SETUP_DONE_FILE), b"");
 
     println!();
-    println!(
-        "  \u{2705}  Configuration written to {}",
-        config_path.display()
-    );
+    println!("  \u{2705}  Shell rc written to {}", rc_path.display());
+    if let Some(path) = backup_path {
+        println!("  \u{1f4e6}  Previous rc backed up to {}", path.display());
+    }
     println!();
     println!("  \u{1f680}  You can tweak these settings any time by editing that file.");
+    println!("  \u{1f501}  Run `winuxsh setup` any time to repeat this guide.");
     println!("  \u{1f4a1}  See DOCS/getting-started.md for the full configuration reference.");
     println!();
 
@@ -135,174 +182,279 @@ pub fn run_wizard() -> anyhow::Result<()> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn generate_config(
-    edit_mode: &str,
+fn setup_home_dir() -> PathBuf {
+    shell_home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn generate_rc(
     theme: &str,
     prompt_style: &str,
     right_prompt: &str,
     symbol: &str,
+    cwd_style: &str,
+    prompt_enabled: bool,
     git_enabled: bool,
     segment_preset: Option<&str>,
 ) -> String {
-    // Segment-based prompt: emit minimal config + the new segment fields.
-    if prompt_style == "segments" {
-        let preset_line = segment_preset
-            .map(|p| format!("segment_preset = {:?}\n", p))
-            .unwrap_or_default();
-        let indicator = format!("{} ", symbol);
-        return format!(
-            r#"# Winuxsh configuration — generated by the setup wizard.
-# Edit this file any time to customise your shell.
-# Segment-based prompt engine is enabled below.
-
-[shell]
-prompt_style = "segments"
-{}prompt_symbol = {:?}
-prompt_indicator = {:?}
-emacs_indicator = {:?}
-vi_insert_indicator = {:?}
-vi_normal_indicator = {:?}
-multiline_indicator = "> "
-
-[editor]
-edit_mode = {:?}
-
-[theme]
-current_theme = {:?}
-
-[history]
-max_size = 10000
-
-[menus]
-completion_page_size = 10
-history_page_size = 10
-max_entry_lines = 5
-
-[git_prompt]
-# Uncomment to show counts:
- # staged = "\u25cf{{n}}"
- # unstaged = "\u271a{{n}}"
-separator = " "
-"#,
-            preset_line, symbol, indicator, indicator, indicator, indicator, edit_mode, theme,
-        );
-    }
-
-    let (prompt_template, right_template) = match (prompt_style, right_prompt) {
-        ("powerline", "time") => ("{cwd} {git_prompt} ".to_string(), "{time} ".to_string()),
-        ("powerline", "full") => (
-            "{cwd} {git_prompt} ".to_string(),
-            "{time} {git_branch} ".to_string(),
-        ),
-        ("powerline", _) => ("{cwd} {git_prompt} ".to_string(), String::new()),
-        ("multiline", "time") => (
-            "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
-            String::new(),
-        ),
-        ("multiline", "full") => (
-            "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
-            "{git_branch} ".to_string(),
-        ),
-        ("multiline", _) => (
-            "{user}@{host}\n{cwd} {git_prompt} ".to_string(),
-            String::new(),
-        ),
-        ("classic", "time") => (
-            "{user}@{host} {cwd} {git_prompt} ".to_string(),
-            "{time} ".to_string(),
-        ),
-        ("classic", "full") => (
-            "{user}@{host} {cwd} {git_prompt} ".to_string(),
-            "{time} {git_branch} ".to_string(),
-        ),
-        ("classic", _) => (
-            "{user}@{host} {cwd} {git_prompt} ".to_string(),
-            String::new(),
-        ),
-        // minimal
-        ("minimal", "time") => ("{cwd} ".to_string(), "{time} ".to_string()),
-        ("minimal", "full") => ("{cwd} ".to_string(), "{time} {git_branch} ".to_string()),
-        _ => ("{cwd} ".to_string(), String::new()),
+    let theme = if prompt_enabled { theme } else { "" };
+    let symbol = if prompt_enabled { symbol } else { ">" };
+    let (prompt_template, right_template) = if prompt_style == "segments" {
+        match segment_preset.unwrap_or("classic") {
+            "pure" => (
+                "{cwd} {git_prompt} {command_execution_time}{newline}{prompt_char} ".to_string(),
+                String::new(),
+            ),
+            "robbyrussell" => (
+                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                String::new(),
+            ),
+            "lean" => (
+                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                String::new(),
+            ),
+            "rainbow" | "classic" => (
+                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{status}{time} ".to_string(),
+            ),
+            _ => (
+                "{cwd} {git_prompt}{newline}{prompt_char} ".to_string(),
+                "{status}{time} ".to_string(),
+            ),
+        }
+    } else {
+        match (prompt_style, right_prompt) {
+            ("powerline", "time") => ("{cwd} {git_prompt} ".to_string(), "{time} ".to_string()),
+            ("powerline", "full") => (
+                "{cwd} {git_prompt} ".to_string(),
+                "{time} {git_branch} ".to_string(),
+            ),
+            ("powerline", _) => ("{cwd} {git_prompt} ".to_string(), String::new()),
+            ("multiline", "time") => (
+                "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
+                String::new(),
+            ),
+            ("multiline", "full") => (
+                "{user}@{host} {time}\n{cwd} {git_prompt} ".to_string(),
+                "{git_branch} ".to_string(),
+            ),
+            ("multiline", _) => (
+                "{user}@{host}\n{cwd} {git_prompt} ".to_string(),
+                String::new(),
+            ),
+            ("classic", "time") => (
+                "{user}@{host} {cwd} {git_prompt} ".to_string(),
+                "{time} ".to_string(),
+            ),
+            ("classic", "full") => (
+                "{user}@{host} {cwd} {git_prompt} ".to_string(),
+                "{time} {git_branch} ".to_string(),
+            ),
+            ("classic", _) => (
+                "{user}@{host} {cwd} {git_prompt} ".to_string(),
+                String::new(),
+            ),
+            ("minimal", "time") => ("{cwd} ".to_string(), "{time} ".to_string()),
+            ("minimal", "full") => ("{cwd} ".to_string(), "{time} {git_branch} ".to_string()),
+            _ => ("{cwd} ".to_string(), String::new()),
+        }
     };
-
-    let git_section = if git_enabled {
-        // oh-my-zsh style: `git:(branch) status`. The classic / multiline /
-        // powerline templates all print `{git_prompt}` and rely on this
-        // wrapper to look like the reference screenshot. Users who prefer a
-        // bare branch name can delete this line.
-        let git_format = match prompt_style {
-            "minimal" => String::new(),
-            _ => "git:({git_branch})".to_string(),
-        };
-        let git_format_line = if git_format.is_empty() {
-            String::new()
-        } else {
-            format!("git_prompt_format = {:?}\n", git_format)
-        };
+    let prompt_template = if git_enabled {
+        prompt_template
+    } else {
+        strip_git_prompt_tokens(&prompt_template)
+    };
+    let right_template = if git_enabled {
+        right_template
+    } else {
+        strip_git_prompt_tokens(&right_template)
+    };
+    let theme_plugin = if prompt_enabled {
+        theme_plugin_name(theme)
+    } else {
+        String::new()
+    };
+    let plugins = plugin_load_shell_array(prompt_enabled, git_enabled);
+    let segment_note = segment_preset
+        .map(|preset| format!("# Segment preset selected during setup: {preset}\n"))
+        .unwrap_or_default();
+    let prompt_call = if prompt_enabled {
         format!(
-            "\n[git_prompt]\n{}# staged = \"\u{25cf}{{n}}\"   # uncomment to show counts\n# unstaged = \"\u{271a}{{n}}\"\n# separator = \" \"\n",
-            git_format_line
+            "winuxsh_prompt_use_template {} {} 2>/dev/null || true\n",
+            shell_quote(&prompt_template),
+            shell_quote(&right_template)
         )
     } else {
-        // Git explicitly disabled: blank all symbol formats so the segment
-        // stays silent even if the renderer tries to render it.
-        r#"
-[git_prompt]
-staged = ""
-unstaged = ""
-untracked = ""
-deleted = ""
-ahead = ""
-behind = ""
-stashes = ""
-conflicts = ""
-separator = " "
-"#
-        .to_string()
+        "# Prompt/theme plugins disabled by setup.\n".to_string()
+    };
+    format!(
+        r#"# Winuxsh interactive rc — generated by the setup wizard.
+# Edit this file with normal Winuxsh/bash syntax.
+# Legacy ~/.winshrc.toml is still read when present, but new interactive setup
+# should live here.
+
+WINUXSH_THEME={}
+WINUXSH_THEME_PLUGIN={}
+WINUXSH_PROMPT_SYMBOL={}
+WINUXSH_PROMPT_CWD_STYLE={}
+WINUXSH_DISABLE_DEFAULT_PLUGINS=1
+export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
+export WINUXSH_PROMPT_CWD_STYLE WINUXSH_DISABLE_DEFAULT_PLUGINS
+
+WINUXSH_PLUGINS={}
+{}
+if [ -z "${{HOME:-}}" ] && [ -n "${{USERPROFILE:-}}" ]; then
+  case "$USERPROFILE" in
+    /[A-Za-z]/*)
+      __winuxsh_home_drive="${{USERPROFILE#/}}"
+      __winuxsh_home_drive="${{__winuxsh_home_drive%%/*}}"
+      __winuxsh_home_rest="${{USERPROFILE#/$__winuxsh_home_drive/}}"
+      HOME="$__winuxsh_home_drive:/$__winuxsh_home_rest"
+      ;;
+    *)
+      HOME="${{USERPROFILE//\\//}}"
+      ;;
+  esac
+  export HOME
+fi
+
+if [ -z "${{WINUXSH:-}}" ]; then
+  for __winuxsh_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.winuxsh/oh-my-winuxsh" "$HOME/.winuxsh/bundles/oh-my-winuxsh"/*; do
+    if [ -f "$__winuxsh_bundle/oh-my-winuxsh.winux" ]; then
+      WINUXSH="$__winuxsh_bundle"
+      export WINUXSH
+      break
+    fi
+  done
+fi
+
+if [ -f "$WINUXSH/oh-my-winuxsh.winux" ]; then
+  . "$WINUXSH/oh-my-winuxsh.winux"
+fi
+
+{}
+unset __winuxsh_bundle __winuxsh_home_drive __winuxsh_home_rest
+"#,
+        shell_quote(theme),
+        shell_quote(&theme_plugin),
+        shell_quote(symbol),
+        shell_quote(cwd_style),
+        plugins,
+        segment_note,
+        prompt_call,
+    )
+}
+
+fn plugin_load_shell_array(prompt_enabled: bool, git_enabled: bool) -> String {
+    let mut plugins = Vec::new();
+    if prompt_enabled {
+        plugins.push("prompt-core".to_string());
+    }
+    if git_enabled {
+        plugins.push("git".to_string());
+    }
+    format!("({})", plugins.join(" "))
+}
+
+fn theme_plugin_name(theme: &str) -> String {
+    if theme.starts_with("theme-") {
+        theme.to_string()
+    } else {
+        format!("theme-{}", theme)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
+fn strip_git_prompt_tokens(value: &str) -> String {
+    value
+        .replace("{git_prompt}", "")
+        .replace("{git}", "")
+        .replace("{git_branch}", "")
+        .replace("{git_status}", "")
+        .replace("  ", " ")
+}
+
+fn write_primary_rc(home: &std::path::Path, rc_content: &str) -> anyhow::Result<Option<PathBuf>> {
+    let rc_path = home.join(PRIMARY_RC_FILE);
+    let winuxsh_dir = home.join(".winuxsh");
+    std::fs::create_dir_all(&winuxsh_dir)?;
+    let stamp = timestamp_id();
+    let tmp_path = winuxsh_dir.join(format!(".winuxshrc.tmp-{stamp}"));
+    std::fs::write(&tmp_path, rc_content)?;
+
+    let backup_path = if rc_path.is_file() {
+        let backup_dir = winuxsh_dir.join("backups");
+        std::fs::create_dir_all(&backup_dir)?;
+        let backup = backup_dir.join(format!(".winuxshrc.{stamp}.bak"));
+        std::fs::copy(&rc_path, &backup)?;
+        Some(backup)
+    } else {
+        None
     };
 
-    let indicator = format!("{} ", symbol);
-    format!(
-        r#"# Winuxsh configuration — generated by the setup wizard.
-# Edit this file any time to customise your shell.
+    if rc_path.exists() {
+        std::fs::remove_file(&rc_path)?;
+    }
+    match std::fs::rename(&tmp_path, &rc_path) {
+        Ok(()) => {}
+        Err(_) => {
+            std::fs::copy(&tmp_path, &rc_path)?;
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+    Ok(backup_path)
+}
 
-[shell]
-prompt_format = {:?}
-right_prompt_format = {:?}
-prompt_symbol = {:?}
-prompt_indicator = {:?}
-emacs_indicator = {:?}
-vi_insert_indicator = {:?}
-vi_normal_indicator = {:?}
-multiline_indicator = "> "
+fn timestamp_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{}", now.as_secs(), now.subsec_millis())
+}
 
-[editor]
-edit_mode = {:?}
+fn print_theme_previews(themes: &[&str], symbol: &str) {
+    println!("  \u{2502}  Theme previews:");
+    for theme_name in themes {
+        println!("  \u{2502}    {}", theme_preview_line(theme_name, symbol));
+    }
+}
 
-[theme]
-current_theme = {:?}
+fn print_theme_preview(theme_name: &str, symbol: &str) {
+    println!();
+    println!("  \u{2502}  Selected preview:");
+    println!("  \u{2502}    {}", theme_preview_line(theme_name, symbol));
+    println!();
+}
 
-[history]
-max_size = 10000
+fn theme_preview_line(theme_name: &str, symbol: &str) -> String {
+    let theme = theme::by_name(theme_name);
+    let dir = theme.prompt_dir.paint("~/repo/winuxsh").to_string();
+    let git = theme.git_dirty.paint("codex/theme-api ✚ ? *").to_string();
+    let prompt = theme.prompt_symbol.paint(symbol).to_string();
+    let note = if nerd_font_theme(theme_name) {
+        " [Nerd Font]"
+    } else {
+        ""
+    };
+    format!("{theme_name:<22} {dir} {git}\n  \u{2502}                           {prompt} {note}")
+}
 
-[menus]
-completion_page_size = 10
-history_page_size = 10
-max_entry_lines = 5
-{}
-"#,
-        prompt_template,
-        right_template,
-        symbol,
-        indicator,
-        indicator,
-        indicator,
-        indicator,
-        edit_mode,
-        theme,
-        git_section,
+fn nerd_font_theme(theme_name: &str) -> bool {
+    matches!(
+        theme_name,
+        "agnoster"
+            | "dracula"
+            | "catppuccin-mocha"
+            | "gruvbox"
+            | "spaceship"
+            | "tokyonight"
+            | "p10-classic"
+            | "p10-lean"
+            | "p10-rainbow"
+            | "p10-pure"
     )
-    .replace("{sym}", symbol)
 }
 
 fn prompt_choice(label: &str, default: &str, options: &[&str], help: &str) -> String {
@@ -359,5 +511,118 @@ fn prompt_yn(label: &str, default: bool) -> bool {
         "y" | "yes" | "true" => true,
         "n" | "no" | "false" => false,
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::PROCESS_STATE_LOCK;
+
+    #[test]
+    fn setup_home_dir_accepts_shell_style_home_env() {
+        let _process_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let home = unique_temp_dir("winuxsh-setup-home").join("home");
+        let _home = EnvGuard::set("HOME", &host_to_shell_style_path(&home));
+        let _userprofile = EnvGuard::unset("USERPROFILE");
+
+        let resolved = setup_home_dir();
+        if cfg!(windows) {
+            assert_eq!(display_path(&resolved), display_path(&home));
+        } else {
+            assert_eq!(display_path(&resolved), display_path(&home));
+        }
+    }
+
+    #[test]
+    fn generated_rc_uses_shell_entrypoint_not_toml_sections() {
+        let rc = generate_rc("minimal", "minimal", "time", ">", "home", true, true, None);
+
+        assert!(rc.contains("WINUXSH_THEME_PLUGIN='theme-minimal'"));
+        assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='home'"));
+        assert!(rc.contains("WINUXSH_DISABLE_DEFAULT_PLUGINS=1"));
+        assert!(rc.contains("WINUXSH_PLUGINS=(prompt-core git)"));
+        assert!(rc.contains(". \"$WINUXSH/oh-my-winuxsh.winux\""));
+        assert!(rc.contains("winuxsh_prompt_use_template '{cwd} ' '{time} '"));
+        assert!(!rc.contains("[plugins]"));
+        assert!(!rc.contains("[shell]"));
+        assert!(!rc.contains("prompt_format ="));
+    }
+
+    #[test]
+    fn generated_rc_can_disable_git_prompt_tokens() {
+        let rc = generate_rc("minimal", "classic", "full", "$", "full", true, false, None);
+
+        assert!(rc.contains("WINUXSH_THEME_PLUGIN='theme-minimal'"));
+        assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='full'"));
+        assert!(rc.contains("WINUXSH_PLUGINS=(prompt-core)"));
+        assert!(!rc.contains(" git "));
+        assert!(!rc.contains("{git_prompt}"));
+        assert!(!rc.contains("{git_branch}"));
+    }
+
+    #[test]
+    fn generated_rc_can_disable_prompt_theme_plugins() {
+        let rc = generate_rc("", "off", "off", ">", "basename", false, true, None);
+
+        assert!(rc.contains("WINUXSH_THEME=''"));
+        assert!(rc.contains("WINUXSH_THEME_PLUGIN=''"));
+        assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='basename'"));
+        assert!(rc.contains("WINUXSH_DISABLE_DEFAULT_PLUGINS=1"));
+        assert!(rc.contains("WINUXSH_PLUGINS=(git)"));
+        assert!(rc.contains("# Prompt/theme plugins disabled by setup."));
+        assert!(!rc.contains("winuxsh_prompt_use_template"));
+        assert!(!rc.contains("prompt_format ="));
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos))
+    }
+
+    fn host_to_shell_style_path(path: &std::path::Path) -> String {
+        let display = display_path(path);
+        if cfg!(windows) && display.len() >= 3 && display.as_bytes()[1] == b':' {
+            let drive = (display.as_bytes()[0] as char).to_ascii_lowercase();
+            format!("/{drive}/{}", &display[3..])
+        } else {
+            display
+        }
+    }
+
+    fn display_path(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    struct EnvGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.name, previous);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
     }
 }

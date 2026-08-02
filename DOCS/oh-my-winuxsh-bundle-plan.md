@@ -189,7 +189,7 @@ instructions explicit.
 
 ## Config Boundary
 
-Plugin state belongs in `~/.winshrc.toml`:
+Managed plugin CLI state can still be recorded in `~/.winshrc.toml`:
 
 ```toml
 [plugins]
@@ -202,21 +202,23 @@ enabled = true
 permissions = ["cwd:read", "process:run:git"]
 ```
 
-User shell code belongs in `~/.winshrc`:
+Normal user-authored plugin/theme selection and shell code belongs in
+`~/.winuxshrc`:
 
 ```sh
 alias ll='ls -la'
 export EDITOR=vim
 ```
 
-Do not collapse TOML into rc. RC is more flexible because it is code, but the
-plugin system needs deterministic, auditable, machine-editable configuration.
+Do not delete TOML support outright. RC is the human entry point, but the
+plugin system still needs deterministic, auditable, machine-editable state for
+CLI-managed permissions, bundle versions, migration blocks, tests, and rollback.
 
 ## Migration From Current Winuxsh
 
 1. Keep current behavior working.
 2. Add plugin registry entries for existing built-in packs.
-3. Add `[plugins]` config as the new canonical surface.
+3. Add `[plugins]` config as the managed machine-editable surface.
 4. Keep old `[zsh.native_plugins]` and `[zsh.native_widgets]` as compatibility
    reads only.
 5. Update docs and CLI help to say "official Winuxsh plugins".

@@ -10,8 +10,15 @@ review, and rollback. Keep the three update planes distinct.
   the latest installer through native Windows networking.
 - `wpm update winuxcmd`: update WinuxCmd packages and command links inside the
   selected WinuxCmd root.
-- `winuxsh plugin update oh-my-winuxsh ...`: update the official Winuxsh plugin
-  bundle independently from shell and command packages.
+- `winuxsh plugin update oh-my-winuxsh ...`: update the official bundled
+  Winuxsh plugin distribution independently from shell and command packages.
+
+Bundled official plugins are not shell-core builtins. Prompt templates, theme
+plugins, git prompt helpers, aliases, completions, and shell helper functions
+should live in source plugin packs under bundles such as `oh-my-winuxsh`.
+Winuxsh core should provide lifecycle hooks, host APIs, native helpers, and
+safety boundaries. Missing official bundles or theme plugins should fail
+visibly instead of silently selecting a hidden built-in substitute.
 
 ## Winuxsh Self-Update
 
@@ -51,9 +58,12 @@ winuxsh plugin plan disable git --json
 winuxsh plugin disable git
 ```
 
-Use `plan` before writing managed TOML. If the target build supports review or
+Use `plan` before writing managed state. If the target build supports review or
 doctor commands, use them before enabling plugins that execute external
-commands or require permissions.
+commands or require permissions. For interactive Oh My-style source plugins,
+prefer editing `WINUXSH_PLUGINS=(...)` and `WINUXSH_THEME_PLUGIN=...` in
+`~/.winuxshrc`; the CLI-managed TOML path is for structured metadata,
+migrations, tests, and advanced overrides.
 
 ## Bundle Updates
 
@@ -72,10 +82,33 @@ requires it.
 
 ## Config Model
 
-Canonical plugin state lives under `[plugins]` in `~/.winshrc.toml`.
-`winuxsh plugin enable` and `disable` write managed config and create backups
-when the target build supports it. Prefer the CLI over hand-editing user plugin
-state.
+Human-authored interactive plugin state lives in `~/.winuxshrc`:
+
+```bash
+WINUXSH_THEME_PLUGIN=theme-p10-classic
+WINUXSH_PLUGINS=(prompt-core git common-aliases)
+```
+
+Managed plugin state may still live under `[plugins]` in `~/.winshrc.toml`.
+`winuxsh plugin enable` and `disable` can write managed config and create
+backups when the target build supports it, but do not use TOML as the default
+Oh My-style startup surface.
+
+Prompt/theme ownership should flow through plugins:
+
+- `prompt-core` owns prompt lifecycle functions, prompt templates, and git
+  snapshot handoff variables such as `WINUXSH_PROMPT_GIT`.
+- `theme-*` packs own visual presets and color choices.
+- `git` owns aliases and lightweight Git helper functions, but live prompt
+  rendering should be coordinated through prompt/theme plugins to avoid late
+  redraw churn.
+
+Git prompt status should follow the Powerlevel10k/gitstatus shape: prompt
+rendering consumes the latest coherent host snapshot, while Winuxsh keeps a
+persistent `--gitstatus-daemon` helper and cache warm in the background. Late
+Git work must warm a later prompt, not repaint the active input line. Dirty
+compact markers should use the active theme's dirty style, not generic
+white/gray detail text.
 
 Developer/test overrides:
 

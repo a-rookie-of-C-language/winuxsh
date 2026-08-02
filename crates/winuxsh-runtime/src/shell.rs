@@ -25,8 +25,10 @@ use crate::config::{
     load as load_config, AutosuggestConfig, EditorMode, HookConfig, MenuConfig, NativePluginConfig,
     NativeWidgetConfig, SyntaxHighlightConfig,
 };
+use crate::git_status::GitPromptSymbols;
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec};
-use crate::prompt::{PromptBackend, WinuxshPrompt};
+use crate::prompt::{GitPromptDecor, PromptBackend, PromptIndicators, WinuxshPrompt};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
 };
@@ -47,7 +49,8 @@ const COMMAND_NOT_FOUND_PROVIDER_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 const COMMAND_NOT_FOUND_PROVIDER_MAX_LINES: usize = 32;
 #[allow(dead_code)]
 const COMMAND_NOT_FOUND_PROVIDER_MAX_LINE_BYTES: usize = 512;
-const WINUXSH_RC_FILE: &str = ".winshrc";
+const WINUXSH_RC_FILE: &str = ".winuxshrc";
+const WINUXSH_LEGACY_RC_FILE: &str = ".winshrc";
 
 /// Top-level shell state.
 pub struct Shell {
@@ -75,7 +78,32 @@ pub struct Shell {
     pub last_interactive_command: Option<String>,
     pub last_interactive_exit_code: Option<i32>,
     pub line_editor: Option<Reedline>,
+    plugin_prompt_sync: PluginPromptSyncConfig,
     process_stdin_pipeline_bridge: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PluginPromptSyncConfig {
+    enabled: bool,
+    indicators: PromptIndicators,
+    theme_name: String,
+    prompt_symbol: String,
+    git_prompt_symbols: GitPromptSymbols,
+    git_prompt_format: Option<String>,
+}
+
+impl PluginPromptSyncConfig {
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            indicators: PromptIndicators::default(),
+            theme_name: "default".to_string(),
+            prompt_symbol: "%".to_string(),
+            git_prompt_symbols: GitPromptSymbols::default(),
+            git_prompt_format: None,
+        }
+    }
 }
 
 impl Shell {
@@ -91,7 +119,7 @@ impl Shell {
     }
 
     fn new_with_script_name(script_name: Option<&str>) -> anyhow::Result<Self> {
-        // 1. Load config from ~/.winshrc.toml.
+        // 1. Load legacy/managed TOML config if present.
         let config = load_config();
 
         // 2. Apply opt-in, known-safe zsh profile env/PATH records before
@@ -125,6 +153,7 @@ impl Shell {
         if let Some(script_name) = script_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
         }
+        executor.set_env("WINUXSH_PROMPT_SYMBOL", &config.shell.prompt_symbol);
         sync_executor_path_from_process_path(&mut executor);
         let plugin_state = crate::plugins::effective_plugin_state(&config.plugins, &config.zsh);
         let host_plugin_state = plugin_state.clone();
@@ -132,8 +161,8 @@ impl Shell {
             execute_winuxsh_host_external_command(words, env, &host_plugin_state)
         });
 
-        // 5. Apply imported aliases first, then native config aliases so
-        // ~/.winshrc.toml remains authoritative when names collide.
+        // 5. Apply imported aliases first, then legacy/managed TOML aliases so
+        // explicit structured config remains authoritative when names collide.
         let mut aliases = HashMap::new();
         if let Some(report) = &zsh_report {
             let mut aliases_applied = 0usize;
@@ -182,14 +211,34 @@ impl Shell {
         } else {
             config.shell.prompt_style.as_deref().unwrap_or("template")
         };
-        let git_prompt_symbols = crate::git_status::GitPromptSymbols::from(&config.git_prompt);
+        let git_prompt_symbols = GitPromptSymbols::from(&config.git_prompt);
+        let template_git_prompt_format = config
+            .shell
+            .git_prompt_format
+            .clone()
+            .or_else(|| zsh_report.as_ref().and_then(git_prompt_format_from_report));
+        let native_prompt_configured = config.shell.prompt_format.is_some()
+            || config.shell.right_prompt_format.is_some()
+            || config.shell.git_prompt_format.is_some()
+            || config.shell.prompt_style.is_some()
+            || config.shell.segment_preset.is_some()
+            || config.shell.left_prompt_elements.is_some()
+            || config.shell.right_prompt_elements.is_some();
+        let plugin_prompt_sync = PluginPromptSyncConfig {
+            enabled: plugin_state.is_enabled("prompt-core") && !native_prompt_configured,
+            indicators: config.shell.prompt_indicators.clone(),
+            theme_name: config.theme_name.clone(),
+            prompt_symbol: config.shell.prompt_symbol.clone(),
+            git_prompt_symbols: git_prompt_symbols.clone(),
+            git_prompt_format: template_git_prompt_format.clone(),
+        };
         let prompt: PromptBackend = if prompt_style == "segments" {
             let preset_name = config.shell.segment_preset.as_deref().unwrap_or("classic");
             let preset = SegmentPreset::from_name(preset_name).unwrap_or(SegmentPreset::Classic);
             let mut seg_config = SegmentPromptConfig::from_preset(
                 preset,
                 &config.shell.prompt_symbol,
-                git_prompt_symbols,
+                git_prompt_symbols.clone(),
             );
             if let Some(bundle_preset) = crate::plugins::plugin_prompt_preset(preset_name) {
                 let left_elements: Vec<SegmentId> = bundle_preset
@@ -241,15 +290,10 @@ impl Shell {
                         .and_then(|prompt| prompt.translated_format.clone())
                 })
             });
-            let git_prompt_format = config
-                .shell
-                .git_prompt_format
-                .clone()
-                .or_else(|| zsh_report.as_ref().and_then(git_prompt_format_from_report));
             let template_prompt = WinuxshPrompt::new_with_symbol(
                 prompt_format,
                 right_prompt_format,
-                git_prompt_format,
+                template_git_prompt_format.clone(),
                 config.shell.prompt_indicators.clone(),
                 &config.theme_name,
                 git_prompt_symbols,
@@ -260,6 +304,7 @@ impl Shell {
 
         // 7. User-local state files.
         let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
+        normalize_executor_home_env(&mut executor, &home_dir);
         let history_path = config
             .history
             .path
@@ -285,7 +330,7 @@ impl Shell {
                 report, &options,
             ));
         }
-        let bundle_completion_defs = crate::plugins::plugin_completion_defs();
+        let bundle_completion_defs = crate::plugins::plugin_completion_defs(&plugin_state);
 
         // 9. Load completion dirs from config (inline, not in thread).
         {
@@ -361,6 +406,7 @@ impl Shell {
             last_interactive_command: None,
             last_interactive_exit_code: None,
             line_editor: None,
+            plugin_prompt_sync,
             process_stdin_pipeline_bridge: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
@@ -394,13 +440,9 @@ impl Shell {
         }
         rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
-        // If the user just ran a `git ...` command, invalidate the prompt's
-        // cached git status so the next prompt re-reads the live state.
-        if let Some(first) = tokens.first() {
-            if first.value.trim().eq_ignore_ascii_case("git") {
-                crate::git_status::clear_cache();
-            }
-        }
+        let git_command = tokens
+            .first()
+            .is_some_and(|first| first.value.trim().eq_ignore_ascii_case("git"));
 
         // parse() returns Ast directly (not Result) in rubash.
         let mut ast = parse(&tokens);
@@ -498,6 +540,9 @@ impl Shell {
         }
 
         self.sync_process_cwd_from_executor_pwd();
+        if git_command {
+            self.mark_gitstatus_dirty_current_dir();
+        }
         self.sync_process_path_from_executor_path();
         self.sync_zsh_options_from_executor();
         self.sync_alias_mirror_from_executor();
@@ -567,11 +612,27 @@ impl Shell {
     }
 
     /// Source the user's REPL startup file once before the first prompt.
+    ///
+    /// `~/.winuxshrc` is the primary interactive entry point. If it exists,
+    /// source plugins are expected to be loaded from that file through the
+    /// framework entry point. `~/.winshrc` remains a compatibility fallback.
     pub fn run_startup_rc(&mut self) {
-        self.run_source_plugin_startup_scripts();
+        normalize_executor_home_env(&mut self.executor, &self.home_dir);
+        self.sync_gitstatus_prompt_env();
+        let rc_path = self.startup_rc_path();
+        let primary_rc = rc_path.as_ref().is_some_and(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some(WINUXSH_RC_FILE)
+        });
+        if !primary_rc {
+            self.run_source_plugin_startup_scripts();
+        }
         self.run_process_plugin_hooks("startup", &[]);
-        let path = self.home_dir.join(WINUXSH_RC_FILE);
+        let Some(path) = rc_path else {
+            self.sync_prompt_from_plugin_env();
+            return;
+        };
         let Ok(script) = std::fs::read_to_string(&path) else {
+            self.sync_prompt_from_plugin_env();
             return;
         };
 
@@ -587,6 +648,147 @@ impl Shell {
         }
         let _ = self.execute_script("unset WINUXSH_REPL_STARTUP");
         self.update_completion_state();
+        self.sync_prompt_from_plugin_env();
+    }
+
+    fn startup_rc_path(&self) -> Option<PathBuf> {
+        let primary = self.home_dir.join(WINUXSH_RC_FILE);
+        if primary.is_file() {
+            return Some(primary);
+        }
+        let legacy = self.home_dir.join(WINUXSH_LEGACY_RC_FILE);
+        legacy.is_file().then_some(legacy)
+    }
+
+    fn uses_primary_startup_rc(&self) -> bool {
+        self.startup_rc_path().as_ref().is_some_and(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some(WINUXSH_RC_FILE)
+        })
+    }
+
+    fn run_framework_hook_runner(&mut self, runner: &str, context: &[(&str, String)]) {
+        for (name, value) in context {
+            self.executor.set_env(name, value);
+        }
+        let _ = self.execute_script(&format!("{runner} 2>/dev/null || true"));
+        if !context.is_empty() {
+            let names = context
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = self.execute_script(&format!("unset {names}"));
+        }
+    }
+
+    fn sync_prompt_from_plugin_env(&mut self) {
+        if !self.plugin_prompt_sync.enabled {
+            return;
+        }
+
+        let left_template = self
+            .executor
+            .get_env("WINUXSH_PROMPT_LEFT")
+            .map(str::to_owned);
+        let right_template = self
+            .executor
+            .get_env("WINUXSH_PROMPT_RIGHT")
+            .map(str::to_owned);
+        if left_template.is_none() && right_template.is_none() {
+            self.clear_gitstatus_prompt_env("none");
+            return;
+        }
+
+        let theme_name = self
+            .executor
+            .get_env("WINUXSH_ACTIVE_THEME")
+            .or_else(|| self.executor.get_env("WINUXSH_THEME"))
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.plugin_prompt_sync.theme_name);
+        let prompt_symbol = self
+            .executor
+            .get_env("WINUXSH_PROMPT_SYMBOL")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.plugin_prompt_sync.prompt_symbol);
+        let git_prompt_snapshot = self
+            .executor
+            .get_env("WINUXSH_PROMPT_GIT")
+            .map(str::to_owned);
+        let git_status_snapshot = self.git_status_from_prompt_env();
+        let git_prompt_decor = self.git_prompt_decor_from_env();
+
+        let mut prompt = WinuxshPrompt::new_with_symbol(
+            left_template,
+            right_template,
+            self.plugin_prompt_sync.git_prompt_format.clone(),
+            self.plugin_prompt_sync.indicators.clone(),
+            theme_name,
+            self.plugin_prompt_sync.git_prompt_symbols.clone(),
+            prompt_symbol.to_string(),
+        );
+        prompt.set_git_prompt_snapshot(git_prompt_snapshot);
+        prompt.set_git_status_snapshot(git_status_snapshot);
+        prompt.set_git_prompt_decor(git_prompt_decor);
+        self.prompt = PromptBackend::Template(prompt);
+    }
+
+    fn git_status_from_prompt_env(&self) -> Option<crate::git_status::GitRepoStatus> {
+        if self.executor.get_env("WINUXSH_PROMPT_GIT_SOURCE") != Some("native") {
+            return None;
+        }
+        let branch = self
+            .executor
+            .get_env("WINUXSH_GITSTATUS_BRANCH")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)?;
+        let status = crate::git_status::GitRepoStatus {
+            branch: Some(branch),
+            dirty: self.executor.get_env("WINUXSH_GITSTATUS_DIRTY") == Some("1"),
+            staged: self.parse_gitstatus_count("WINUXSH_GITSTATUS_STAGED"),
+            unstaged: self.parse_gitstatus_count("WINUXSH_GITSTATUS_UNSTAGED"),
+            untracked: self.parse_gitstatus_count("WINUXSH_GITSTATUS_UNTRACKED"),
+            deleted: self.parse_gitstatus_count("WINUXSH_GITSTATUS_DELETED"),
+            ahead: self.parse_gitstatus_count("WINUXSH_GITSTATUS_AHEAD"),
+            behind: self.parse_gitstatus_count("WINUXSH_GITSTATUS_BEHIND"),
+            stashes: self.parse_gitstatus_count("WINUXSH_GITSTATUS_STASHES"),
+            conflicts: self.parse_gitstatus_count("WINUXSH_GITSTATUS_CONFLICTS"),
+        };
+        if self.executor.get_env("WINUXSH_PROMPT_GIT") != Some(self.render_git_prompt_snapshot(&status).as_str()) {
+            return None;
+        }
+        Some(status)
+    }
+
+    fn parse_gitstatus_count(&self, name: &str) -> usize {
+        self.executor
+            .get_env(name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
+    fn git_prompt_decor_from_env(&self) -> GitPromptDecor {
+        GitPromptDecor {
+            prefix: self
+                .executor
+                .get_env("WINUXSH_THEME_GIT_PROMPT_PREFIX")
+                .unwrap_or("git:(")
+                .to_string(),
+            suffix: self
+                .executor
+                .get_env("WINUXSH_THEME_GIT_PROMPT_SUFFIX")
+                .unwrap_or(")")
+                .to_string(),
+            dirty_suffix: self
+                .executor
+                .get_env("WINUXSH_THEME_GIT_PROMPT_DIRTY")
+                .unwrap_or(" *")
+                .to_string(),
+            clean_suffix: self
+                .executor
+                .get_env("WINUXSH_THEME_GIT_PROMPT_CLEAN")
+                .unwrap_or("")
+                .to_string(),
+        }
     }
 
     fn run_source_plugin_startup_scripts(&mut self) {
@@ -612,15 +814,19 @@ impl Shell {
             let plugin_dir = source
                 .path
                 .parent()
-                .map(|path| path.display().to_string())
+                .map(|path| host_path_to_shell_path(&path.to_string_lossy()))
                 .unwrap_or_default();
+            let bundle_root = host_path_to_shell_path(&source.bundle_root.to_string_lossy());
+            let plugin_source = host_path_to_shell_path(&source.path.to_string_lossy());
             for (name, value) in context {
                 self.executor.set_env(name, value);
             }
+            self.executor.set_env("WINUXSH", &bundle_root);
+            self.executor
+                .set_env("WINUXSH_PLUGIN_BUNDLE_DIR", &bundle_root);
             self.executor.set_env("WINUXSH_PLUGIN_NAME", &source.pack);
             self.executor.set_env("WINUXSH_PLUGIN_DIR", &plugin_dir);
-            self.executor
-                .set_env("WINUXSH_PLUGIN_SOURCE", &source.path.display().to_string());
+            self.executor.set_env("WINUXSH_PLUGIN_SOURCE", &plugin_source);
             self.executor.set_env("WINUXSH_PLUGIN_HOOK", hook_name);
             match self.source_file_into_current_shell(&source.path) {
                 Ok(code) => {
@@ -662,14 +868,20 @@ impl Shell {
     /// Run native hooks before rendering the next prompt.
     pub fn run_precmd_hooks(&mut self) {
         self.run_native_precmd_plugins();
+        self.sync_gitstatus_prompt_env();
         let hooks = self.hooks.precmd.clone();
         let last_exit_code = self.executor.last_exit_code().to_string();
         // Set in process env so segment prompt can read it via std::env::var.
         std::env::set_var("WINUXSH_LAST_EXIT_CODE", &last_exit_code);
         let context = [("WINUXSH_LAST_EXIT_CODE", last_exit_code)];
-        self.run_source_plugin_scripts_for_hook("precmd", &context);
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("winuxsh_run_precmd_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("precmd", &context);
+        }
         self.run_process_plugin_hooks("precmd", &context);
         self.run_hook_scripts(&hooks, &context);
+        self.sync_prompt_from_plugin_env();
     }
 
     /// Run native hooks immediately before the user's interactive command.
@@ -681,7 +893,11 @@ impl Shell {
         self.run_native_preexec_plugins(command);
         let hooks = self.hooks.preexec.clone();
         let context = [("WINUXSH_PREEXEC_COMMAND", command.to_string())];
-        self.run_source_plugin_scripts_for_hook("preexec", &context);
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("winuxsh_run_preexec_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("preexec", &context);
+        }
         self.run_process_plugin_hooks("preexec", &context);
         self.run_hook_scripts(&hooks, &context);
     }
@@ -691,13 +907,20 @@ impl Shell {
         if same_shell_dir(old_pwd, new_pwd) {
             return;
         }
+        if let Some(cwd) = shell_pwd_to_existing_host_dir(new_pwd) {
+            crate::git_status::request_refresh(&cwd);
+        }
         self.run_native_chpwd_plugins();
         let hooks = self.hooks.chpwd.clone();
         let context = [
             ("WINUXSH_OLDPWD", old_pwd.to_string()),
             ("WINUXSH_PWD", new_pwd.to_string()),
         ];
-        self.run_source_plugin_scripts_for_hook("chpwd", &context);
+        if self.uses_primary_startup_rc() {
+            self.run_framework_hook_runner("winuxsh_run_chpwd_hooks", &context);
+        } else {
+            self.run_source_plugin_scripts_for_hook("chpwd", &context);
+        }
         self.run_process_plugin_hooks("chpwd", &context);
         self.run_hook_scripts(&hooks, &context);
     }
@@ -734,6 +957,112 @@ impl Shell {
         }
         if self.native_plugin_enabled("last-working-dir") {
             self.save_last_working_dir_current_dir();
+        }
+    }
+
+    fn sync_gitstatus_prompt_env(&mut self) {
+        let Some(cwd) = self
+            .executor_pwd_host_path()
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            self.clear_gitstatus_prompt_env("none");
+            return;
+        };
+        let snapshot = crate::git_status::snapshot_for_prompt(&cwd);
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_STATE", snapshot.state().as_str());
+        let Some(status) = snapshot.status().cloned() else {
+            self.clear_gitstatus_prompt_env(snapshot.state().as_str());
+            return;
+        };
+
+        self.executor.set_env(
+            "WINUXSH_GITSTATUS_BRANCH",
+            status.branch.as_deref().unwrap_or_default(),
+        );
+        self.executor.set_env(
+            "WINUXSH_GITSTATUS_DIRTY",
+            if status.dirty { "1" } else { "0" },
+        );
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_STAGED", &status.staged.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_UNSTAGED", &status.unstaged.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_UNTRACKED", &status.untracked.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_DELETED", &status.deleted.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_AHEAD", &status.ahead.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_BEHIND", &status.behind.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_STASHES", &status.stashes.to_string());
+        self.executor
+            .set_env("WINUXSH_GITSTATUS_CONFLICTS", &status.conflicts.to_string());
+        self.executor
+            .set_env("WINUXSH_PROMPT_GIT", &self.render_git_prompt_snapshot(&status));
+        self.executor.set_env("WINUXSH_PROMPT_GIT_SOURCE", "native");
+        self.executor.set_env("WINUXSH_PROMPT_GIT_DIRTY", "0");
+    }
+
+    fn clear_gitstatus_prompt_env(&mut self, state: &str) {
+        self.executor.set_env("WINUXSH_GITSTATUS_STATE", state);
+        for name in [
+            "WINUXSH_GITSTATUS_BRANCH",
+            "WINUXSH_GITSTATUS_DIRTY",
+            "WINUXSH_GITSTATUS_STAGED",
+            "WINUXSH_GITSTATUS_UNSTAGED",
+            "WINUXSH_GITSTATUS_UNTRACKED",
+            "WINUXSH_GITSTATUS_DELETED",
+            "WINUXSH_GITSTATUS_AHEAD",
+            "WINUXSH_GITSTATUS_BEHIND",
+            "WINUXSH_GITSTATUS_STASHES",
+            "WINUXSH_GITSTATUS_CONFLICTS",
+            "WINUXSH_PROMPT_GIT",
+            "WINUXSH_PROMPT_GIT_SOURCE",
+        ] {
+            self.executor.unset_env(name);
+        }
+        self.executor.set_env("WINUXSH_PROMPT_GIT_DIRTY", "0");
+    }
+
+    fn render_git_prompt_snapshot(&self, status: &crate::git_status::GitRepoStatus) -> String {
+        let Some(branch) = status.branch.as_deref().filter(|branch| !branch.is_empty()) else {
+            return String::new();
+        };
+        let prefix = self
+            .executor
+            .get_env("WINUXSH_THEME_GIT_PROMPT_PREFIX")
+            .unwrap_or("git:(");
+        let suffix = self
+            .executor
+            .get_env("WINUXSH_THEME_GIT_PROMPT_SUFFIX")
+            .unwrap_or(")");
+        let dirty = self
+            .executor
+            .get_env("WINUXSH_THEME_GIT_PROMPT_DIRTY")
+            .unwrap_or(" *");
+        let clean = self
+            .executor
+            .get_env("WINUXSH_THEME_GIT_PROMPT_CLEAN")
+            .unwrap_or("");
+        let compact = status.compact_status_with(&self.plugin_prompt_sync.git_prompt_symbols);
+        let mut body = branch.to_string();
+        if !compact.is_empty() {
+            body.push(' ');
+            body.push_str(&compact);
+        }
+        body.push_str(if status.dirty { dirty } else { clean });
+        format!("{prefix}{body}{suffix}")
+    }
+
+    fn mark_gitstatus_dirty_current_dir(&self) {
+        if let Some(cwd) = self
+            .executor_pwd_host_path()
+            .or_else(|| std::env::current_dir().ok())
+        {
+            crate::git_status::mark_dirty(&cwd);
         }
     }
 
@@ -3105,13 +3434,31 @@ fn is_forbidden_dotenv_key(key: &str) -> bool {
     )
 }
 
-fn shell_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
+    let home = host_path_to_shell_path(&home_dir.to_string_lossy());
+    let current = executor.get_env("HOME").unwrap_or_default();
+    let should_update = current.trim().is_empty()
+        || current.contains('\\')
+        || (cfg!(windows) && is_slash_drive_path(current));
+    if should_update && !home.is_empty() {
+        executor.set_env("HOME", &home);
+    }
 }
+
+fn shell_pwd_to_existing_host_dir(pwd: &str) -> Option<PathBuf> {
+    let host = shell_path_to_host_path(pwd);
+    let path = PathBuf::from(host);
+    path.is_dir().then_some(path)
+}
+
+fn is_slash_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && (bytes.len() == 2 || bytes.get(2) == Some(&b'/'))
+}
+
 fn default_last_working_dir_cache_path(home_dir: &Path) -> PathBuf {
     let mut file_name = "last-working-dir".to_string();
     if let Ok(ssh_user) = std::env::var("SSH_USER") {
@@ -3815,26 +4162,6 @@ fn resolve_native_command_path_with_path(
     None
 }
 
-fn shell_path_to_host_path(value: &str) -> String {
-    let normalized = value.replace('\\', "/");
-    if cfg!(windows) {
-        let bytes = normalized.as_bytes();
-        if bytes.len() == 2 && bytes[0] == b'/' && (bytes[1] as char).is_ascii_alphabetic() {
-            let drive = (bytes[1] as char).to_ascii_uppercase();
-            return format!("{}:/", drive);
-        }
-        if bytes.len() >= 3
-            && bytes[0] == b'/'
-            && (bytes[1] as char).is_ascii_alphabetic()
-            && bytes[2] == b'/'
-        {
-            let drive = (bytes[1] as char).to_ascii_uppercase();
-            return format!("{}:{}", drive, &normalized[2..]);
-        }
-    }
-    value.to_string()
-}
-
 fn sync_executor_path_from_process_path(executor: &mut Executor) {
     if let Ok(path) = std::env::var("PATH") {
         executor.set_env("PATH", &path);
@@ -4002,7 +4329,7 @@ load = ["process-hook"]
     }
 
     #[test]
-    fn source_plugin_scripts_load_before_user_startup_rc() {
+    fn source_plugin_scripts_load_before_legacy_user_startup_rc() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("winuxsh-source-plugin-startup");
@@ -4023,7 +4350,7 @@ load = ["source-test"]
         )
         .unwrap();
         std::fs::write(
-            home.join(WINUXSH_RC_FILE),
+            home.join(WINUXSH_LEGACY_RC_FILE),
             "export SOURCE_PLUGIN_USER_RC_SEES=\"$SOURCE_PLUGIN_VALUE\"\nalias source_alias='echo user-override'\n",
         )
         .unwrap();
@@ -4054,6 +4381,183 @@ load = ["source-test"]
             .get_env("WINUXSH_REPL_PLUGIN_STARTUP")
             .is_none());
         assert!(shell.executor.get_env("WINUXSH_PLUGIN_NAME").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn framework_source_plugin_receives_bundle_root() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-framework-source-plugin-root");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.12");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        let expected_root = host_path_to_shell_path(&bundle.to_string_lossy());
+        assert_eq!(
+            shell.executor.get_env("FRAMEWORK_ROOT_VALUE"),
+            Some("from-bundle-lib")
+        );
+        assert_eq!(
+            shell.executor.get_env("FRAMEWORK_WINUXSH"),
+            Some(expected_root.as_str())
+        );
+        assert_eq!(
+            shell.executor.get_env("FRAMEWORK_BUNDLE_DIR"),
+            Some(expected_root.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn prompt_core_theme_templates_drive_default_host_prompt() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-sync");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.14");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_PROMPT_LEFT"),
+            Some("PLUGIN:{git}{prompt_char} ")
+        );
+        assert!(rendered.contains("PLUGIN:"), "{rendered:?}");
+        assert!(rendered.contains("SNAPSHOT:startup"), "{rendered:?}");
+        assert!(rendered.contains('%'), "{rendered:?}");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn prompt_core_precmd_git_snapshot_updates_next_host_prompt() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-snapshot");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.16");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.execute_script("false").unwrap();
+        shell.run_precmd_hooks();
+
+        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_PROMPT_GIT"),
+            Some("SNAPSHOT:precmd:1 ")
+        );
+        assert!(rendered.contains("SNAPSHOT:precmd:1"), "{rendered:?}");
+        assert!(!rendered.contains("SNAPSHOT:startup"), "{rendered:?}");
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn explicit_toml_prompt_stays_authoritative_over_plugin_template() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-framework-plugin-prompt-native");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.15");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[shell]
+prompt_format = "USER:{prompt_char} "
+prompt_symbol = "$"
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        let rendered = reedline::Prompt::render_prompt_left(&shell.prompt).into_owned();
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_PROMPT_LEFT"),
+            Some("PLUGIN:{git}{prompt_char} ")
+        );
+        assert!(rendered.contains("USER:"), "{rendered:?}");
+        assert!(rendered.contains('$'), "{rendered:?}");
+        assert!(!rendered.contains("PLUGIN:"), "{rendered:?}");
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -4130,7 +4634,7 @@ load = ["source-test"]
     }
 
     #[test]
-    fn winshrc_runs_once_for_repl_startup_shell_customization() {
+    fn winuxshrc_runs_once_for_repl_startup_shell_customization() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("winuxsh-winshrc-startup");
@@ -4139,7 +4643,7 @@ load = ["source-test"]
         std::fs::write(
             home.join(WINUXSH_RC_FILE),
             r#"
-export WINSHRC_VALUE=from-rc
+export WINUXSHRC_VALUE=from-rc
 alias hello='echo from-alias'
 "#,
         )
@@ -4149,12 +4653,147 @@ alias hello='echo from-alias'
         shell.home_dir = home;
         shell.run_startup_rc();
 
-        assert_eq!(shell.executor.get_env("WINSHRC_VALUE"), Some("from-rc"));
+        assert_eq!(shell.executor.get_env("WINUXSHRC_VALUE"), Some("from-rc"));
         assert_eq!(
             shell.aliases.get("hello").map(String::as_str),
             Some("echo from-alias")
         );
         assert!(shell.executor.get_env("WINUXSH_REPL_STARTUP").is_none());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn winuxshrc_takes_precedence_over_legacy_winshrc() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-primary-rc-startup");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(WINUXSH_LEGACY_RC_FILE),
+            "export WINUXSH_RC_SOURCE=legacy\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            "export WINUXSH_RC_SOURCE=primary\n",
+        )
+        .unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        assert_eq!(shell.executor.get_env("WINUXSH_RC_SOURCE"), Some("primary"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn winuxshrc_is_the_source_plugin_entrypoint_when_present() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-primary-rc-plugin-entrypoint");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.17");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            "export WINUXSH_RC_ENTRYPOINT=primary\n",
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_RC_ENTRYPOINT"),
+            Some("primary")
+        );
+        assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
+        assert_eq!(shell.executor.get_env("WINUXSH_PROMPT_LEFT"), None);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn winuxshrc_framework_hooks_replace_host_source_lifecycle_hooks() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-primary-rc-framework-hooks");
+        let bundle = temp.join("bundle");
+        let home = temp.join("home");
+        let config_path = temp.join(".winshrc.toml");
+        std::fs::create_dir_all(&home).unwrap();
+        write_framework_source_plugin_test_bundle(&bundle, "9.9.18");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            r#"
+winuxsh_run_precmd_hooks() {
+  export WINUXSH_FRAMEWORK_PRECMD="$WINUXSH_LAST_EXIT_CODE"
+}
+winuxsh_run_preexec_hooks() {
+  export WINUXSH_FRAMEWORK_PREEXEC="$WINUXSH_PREEXEC_COMMAND"
+}
+winuxsh_run_chpwd_hooks() {
+  export WINUXSH_FRAMEWORK_CHPWD="$WINUXSH_OLDPWD->$WINUXSH_PWD"
+}
+"#,
+        )
+        .unwrap();
+
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let mut shell = Shell::new().unwrap();
+        shell.home_dir = home;
+        shell.run_startup_rc();
+        shell.run_precmd_hooks();
+        shell.run_preexec_hooks("echo hello");
+        shell.run_chpwd_hooks_if_changed("C:/old", "C:/new");
+
+        assert_eq!(shell.executor.get_env("WINUXSH_FRAMEWORK_PRECMD"), Some("0"));
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_FRAMEWORK_PREEXEC"),
+            Some("echo hello")
+        );
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_FRAMEWORK_CHPWD"),
+            Some("C:/old->C:/new")
+        );
+        assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
+        assert_eq!(shell.executor.get_env("WINUXSH_PROMPT_GIT"), None);
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -4438,6 +5077,60 @@ export AFTER_SETOPT=ok
             host_display_path(&resolve_shell_path_argument("C:/work", "~other/file.txt")),
             host_display_path(&PathBuf::from("C:/work").join("~other").join("file.txt"))
         );
+    }
+
+    #[test]
+    fn shell_home_dir_accepts_shell_style_userprofile() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _home_guard = EnvVarGuard::set_value("HOME", "");
+        let _userprofile_guard = EnvVarGuard::set_value("USERPROFILE", "/c/Users/example");
+
+        let home = shell_home_dir().unwrap();
+        if cfg!(windows) {
+            assert_eq!(host_display_path(&home), "C:/Users/example");
+        } else {
+            assert_eq!(host_display_path(&home), "/c/Users/example");
+        }
+    }
+
+    #[test]
+    fn startup_rc_uses_shell_style_userprofile_when_home_is_empty() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let temp = unique_temp_dir("winuxsh-shell-style-home-startup");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(WINUXSH_RC_FILE),
+            "export WINUXSH_RC_SOURCE=primary\n",
+        )
+        .unwrap();
+        let host_home = host_display_path(&home);
+        let shell_style_home = if cfg!(windows)
+            && host_home.len() >= 2
+            && host_home.as_bytes()[1] == b':'
+        {
+            let drive = (host_home.as_bytes()[0] as char).to_ascii_lowercase();
+            format!("/{drive}{}", &host_home[2..])
+        } else {
+            host_home
+        };
+        let _home_guard = EnvVarGuard::set_value("HOME", "");
+        let _userprofile_guard = EnvVarGuard::set_value("USERPROFILE", &shell_style_home);
+
+        let mut shell = Shell::new().unwrap();
+        shell.run_startup_rc();
+
+        assert_eq!(shell.executor.get_env("WINUXSH_RC_SOURCE"), Some("primary"));
+        if cfg!(windows) {
+            assert!(
+                shell
+                    .executor
+                    .get_env("HOME")
+                    .is_some_and(|home| is_windows_drive_path(home)),
+                "HOME should be Windows-native for external tools, got {:?}",
+                shell.executor.get_env("HOME")
+            );
+        }
     }
 
     #[test]
@@ -5462,6 +6155,38 @@ load = ["docker"]
     }
 
     #[test]
+    fn external_bundle_alias_pack_does_not_use_official_fallback_aliases() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("winuxsh-external-git-alias-fallback");
+        let bundle = temp.join("bundle");
+        let config_path = temp.join(".winshrc.toml");
+        write_external_aliasless_git_bundle(&bundle, "9.9.13");
+        std::fs::write(
+            &config_path,
+            r#"[winuxcmd]
+enabled = false
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+"#,
+        )
+        .unwrap();
+        let _config_guard = EnvVarGuard::set("WINUXSH_CONFIG", &config_path);
+        let _bundle_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle);
+        let _root_guard = EnvVarGuard::set("WINUXSH_PLUGIN_BUNDLE_ROOT", &temp.join("root"));
+        let _lock_guard = EnvVarGuard::set("WINUXSH_PLUGIN_LOCK", &temp.join("plugin-lock.toml"));
+
+        let shell = Shell::new().unwrap();
+
+        assert!(shell.plugins.is_enabled("git"));
+        assert!(!shell.aliases.contains_key("gst"));
+        assert!(!shell.aliases.contains_key("gco"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
     fn explicit_keybindings_disable_blocks_legacy_native_widgets() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
@@ -5837,6 +6562,159 @@ esac
         .unwrap();
     }
 
+    fn write_external_aliasless_git_bundle(path: &std::path::Path, version: &str) {
+        std::fs::create_dir_all(path.join("packs").join("git")).unwrap();
+        std::fs::write(
+            path.join("bundle.toml"),
+            format!(
+                r#"name = "community-tools"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = ["git"]
+available = ["git"]
+[layout]
+packs_dir = "packs"
+aliases_dir = "aliases"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("packs").join("git").join("plugin.toml"),
+            format!(
+                r#"name = "git"
+bundle = "community-tools"
+version = {version:?}
+kind = "builtin"
+api = "winuxsh:plugin@0.1.0"
+category = "devtools"
+summary = "External git alias marker without bundle alias asset."
+default = true
+permissions = ["cwd:read"]
+required_binaries = []
+[exports]
+aliases = true
+completions = []
+prompt_segments = []
+hooks = []
+commands = []
+keybindings = []
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_framework_source_plugin_test_bundle(path: &std::path::Path, version: &str) {
+        std::fs::create_dir_all(path.join("plugins").join("prompt-core")).unwrap();
+        std::fs::create_dir_all(path.join("plugins").join("theme-minimal")).unwrap();
+        std::fs::create_dir_all(path.join("lib")).unwrap();
+        std::fs::write(
+            path.join("bundle.toml"),
+            format!(
+                r#"name = "oh-my-winuxsh"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = []
+available = []
+[layout]
+packs_dir = "packs"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("plugins")
+                .join("prompt-core")
+                .join("plugin.toml"),
+            format!(
+                r#"name = "prompt-core"
+version = {version:?}
+kind = "source"
+entry = "prompt-core.plugin.winux"
+summary = "Framework prompt core fixture."
+default = true
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+hooks = ["startup", "precmd"]
+prompt_segments = ["cwd", "prompt_char"]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("lib").join("root.winux"),
+            "export FRAMEWORK_ROOT_VALUE=from-bundle-lib\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("lib").join("prompt.winux"),
+            r#"winuxsh_prompt_use_template() {
+  WINUXSH_PROMPT_LEFT="$1"
+  WINUXSH_PROMPT_RIGHT="${2:-}"
+  export WINUXSH_PROMPT_LEFT WINUXSH_PROMPT_RIGHT
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("plugins")
+                .join("prompt-core")
+                .join("prompt-core.plugin.winux"),
+            r#". "$WINUXSH/lib/root.winux"
+export FRAMEWORK_WINUXSH="$WINUXSH"
+export FRAMEWORK_BUNDLE_DIR="$WINUXSH_PLUGIN_BUNDLE_DIR"
+case "$WINUXSH_PLUGIN_HOOK" in
+  precmd)
+    WINUXSH_PROMPT_GIT="SNAPSHOT:precmd:$WINUXSH_LAST_EXIT_CODE "
+    ;;
+  *)
+    WINUXSH_PROMPT_GIT="SNAPSHOT:startup "
+    ;;
+esac
+export WINUXSH_PROMPT_GIT
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("plugins")
+                .join("theme-minimal")
+                .join("plugin.toml"),
+            format!(
+                r#"name = "theme-minimal"
+version = {version:?}
+kind = "source"
+entry = "theme-minimal.plugin.winux"
+summary = "Framework minimal theme fixture."
+default = true
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+prompt_segments = ["prompt_char"]
+themes = ["minimal"]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("plugins")
+                .join("theme-minimal")
+                .join("theme-minimal.plugin.winux"),
+            r#"[ -f "$WINUXSH/lib/prompt.winux" ] && . "$WINUXSH/lib/prompt.winux"
+WINUXSH_ACTIVE_THEME=minimal
+WINUXSH_PROMPT_SYMBOL="${WINUXSH_PROMPT_SYMBOL:-%}"
+export WINUXSH_ACTIVE_THEME WINUXSH_PROMPT_SYMBOL
+winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
+"#,
+        )
+        .unwrap();
+    }
+
     fn write_fake_process_hook(bin: &std::path::Path, exit_code: i32, sleep_before_exit: bool) {
         std::fs::create_dir_all(bin).unwrap();
         if cfg!(windows) {
@@ -5901,6 +6779,7 @@ esac
             last_interactive_command: None,
             last_interactive_exit_code: None,
             line_editor: None,
+            plugin_prompt_sync: PluginPromptSyncConfig::disabled(),
             process_stdin_pipeline_bridge: false,
         };
         shell.sync_executor_pwd_from_process_cwd();
@@ -5948,6 +6827,12 @@ esac
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn set_value(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
             Self { key, previous }

@@ -7,6 +7,7 @@
 //!   winuxsh script.sh        → execute a script file
 //!   winuxsh --help | -h      → usage
 //!   winuxsh --version        → version (winuxsh / rubash / winuxcmd)
+//!   winuxsh setup            → re-run the interactive prompt/plugin wizard
 //!   winuxsh --zsh-compat-report      → scan zsh config and print report
 //!   winuxsh --zsh-compat-report-json → scan zsh config and print JSON report
 //!   winuxsh --zsh-compat-import-plan → print a reviewable .winshrc.toml patch
@@ -17,7 +18,7 @@
 //!   winuxsh plugin list [--json] → list official Winuxsh plugins
 //!   winuxsh plugin info <name> [--json] → inspect one official plugin
 //!   winuxsh plugin search [query] [--json] → discover official plugins
-//!   winuxsh plugin themes [--json] → list built-in, user, and bundle themes
+//!   winuxsh plugin themes [--json] → list user and bundle themes
 //!   winuxsh plugin bundle status [--json] → inspect official bundle install state
 //!   winuxsh plugin doctor [--json] → diagnose plugin configuration health
 //!   winuxsh plugin review <name> [--json] → review plugin permissions
@@ -85,6 +86,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             print_version();
             Ok(())
         }
+        "--gitstatus-daemon" => winuxsh_runtime::git_status::run_daemon_stdio(),
         "--zsh-compat-report" => {
             print_zsh_compat_report(false)?;
             Ok(())
@@ -134,6 +136,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(&args[2..]),
+        "setup" | "configure" => winuxsh_runtime::setup_wizard::rerun_wizard(),
         "plugin" => run_plugin_command(args),
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
@@ -293,6 +296,7 @@ fn print_usage() {
     println!("Usage:  winuxsh [option]");
     println!("        winuxsh -c <cmd>         Run a command then exit");
     println!("        winuxsh -C <cmd>         Run one REPL-style command then exit");
+    println!("        winuxsh setup           Re-run prompt/plugin setup");
     println!("        winuxsh <script> [args]   Run a script file");
     println!();
     println!("Options:");
@@ -313,7 +317,7 @@ fn print_usage() {
     println!("  plugin list [--json]      List official Winuxsh plugins");
     println!("  plugin info <name> [--json]  Inspect one official Winuxsh plugin");
     println!("  plugin search [query] [--json]  Discover official plugins");
-    println!("  plugin themes [--json]    List built-in, user, and bundle themes");
+    println!("  plugin themes [--json]    List user and bundle themes");
     println!("  plugin bundle status [--json]  Inspect official bundle install state");
     println!("  plugin update oh-my-winuxsh --from <path>");
     println!("      [--checksum <sha>|--checksum-file <path>] [--json]");
@@ -862,7 +866,7 @@ fn print_plugin_usage() {
     println!("  list [--json]             List official Winuxsh plugins");
     println!("  info <name> [--json]      Inspect one official Winuxsh plugin");
     println!("  search [query] [--json]   Discover official plugins");
-    println!("  themes [--json]           List built-in, user, and bundle themes");
+    println!("  themes [--json]           List user and bundle themes");
     println!("  bundle status [--json]    Inspect official bundle install state");
     println!("  doctor [--json]           Diagnose plugin configuration health");
     println!("  review <name> [--json]    Review plugin permissions before enabling");

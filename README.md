@@ -10,9 +10,9 @@ me@DESKTOP C:\Users\me\repo\winuxsh  master ●2 ✚1 ?3
 ❯
 ```
 
-Branch name, dirty state, staged/untracked counts — all built into the prompt
-the moment you `cd` into a git repo.  No plugins to install.  No config to
-tweak.  Just `❯` and go.
+Branch name, dirty state, staged/untracked counts — available from the bundled
+official prompt plugins the moment you `cd` into a git repo.  No extra install
+required.  Just `❯` and go.
 
 ## Why
 
@@ -47,13 +47,8 @@ The first time you start it, you get a setup wizard (think `oh-my-zsh` install):
 
   Let's get you set up.  (Press Enter to accept defaults.)
 
-📝  Editing mode
-  │  emacs = standard keybindings (Ctrl+A/E/K, Tab, Ctrl+R)
-  │  vi    = vim-style insert/normal modes
-  │  Enter choice [emacs/vi]:
-
 🎨  Colour theme
-  │  Enter choice [default/dark/light/colorful]:
+  │  Enter choice [minimal/default/dark/light/colorful/...]:
 
 🎵  Prompt symbol
   │  ❯ heavy right-pointing angle (powerlevel10k style)
@@ -71,8 +66,8 @@ The first time you start it, you get a setup wizard (think `oh-my-zsh` install):
 🔄  Show git branch/status in the prompt [Y/n]:
 ```
 
-That is it.  One round of questions, `~/.winshrc.toml` is written, and
-every launch after that is instant.
+That is it.  One round of questions, `~/.winuxshrc` is written, and every
+interactive launch after that has a single shell-style entry point.
 
 ## What makes it different
 
@@ -81,8 +76,8 @@ every launch after that is instant.
 | `ls` / `grep` / `find` / `cp`  | Aliases + cmdlets          | Real `winuxcmd` coreutils |
 | `if [ -f file ]; then`         | `if (Test-Path file) {`    | Real bash `if`            |
 | `for i in a b c; do ... done`  | `foreach ($i in ...) {`    | Real bash `for`           |
-| `git:(master) ●2 ✚1` in prompt | Have to install oh-my-posh | Built in, works on `cd`   |
-| `gst` / `gco` / `gp` (git)     | Custom aliases             | Pre-installed git aliases |
+| `git:(master) ●2 ✚1` in prompt | Have to install oh-my-posh | Bundled prompt plugin    |
+| `gst` / `gco` / `gp` (git)     | Custom aliases             | Bundled official plugin  |
 | `$(command)`                   | `$(command)` but different | Same as bash              |
 | `exit 127`                     | `$LASTEXITCODE`            | Same as bash              |
 | `C:\Users` paths               | Works natively             | Also works natively       |
@@ -140,9 +135,10 @@ winuxsh = rubash (shell engine) + winuxcmd.exe (coreutils) + reedline (REPL)
 | `rubash`  | bash-compatible parser, executor, builtins, functions, heredocs |
 | `winuxcmd`| Unix coreutils (`ls`, `cat`, `grep`, `find`, `cp`, `mv`, `rm`, ...) |
 | `reedline`| Interactive editing, history, Tab completion, autosuggestions |
-| `~/.winshrc.toml` | Structured settings — prompt, theme, editor, completion, plugins |
-| `~/.winshrc` | REPL startup script — `export`, `alias`, functions, shell code |
-| `.zshrc` scan | `--zsh-compat-report` reads your zsh intent → native TOML |
+| `~/.winuxshrc` | Primary interactive startup script — plugins, theme, `export`, `alias`, functions |
+| `~/.winshrc` | Legacy compatibility startup script, used only if `~/.winuxshrc` is absent |
+| `~/.winshrc.toml` | Legacy/managed structured state — plugin CLI changes, migration blocks, tests, advanced overrides |
+| `.zshrc` scan | `--zsh-compat-report` reads your zsh intent → managed Winuxsh config suggestions |
 
 ## For zsh / Oh My Zsh users
 
@@ -195,9 +191,20 @@ The first bundled packs cover:
 - prompt and keybinding presets;
 - command hints such as `command-not-found`.
 
-Plugin state belongs in `~/.winshrc.toml`; user shell code belongs in
-`~/.winshrc`. Current zsh compatibility commands remain migration tools, and
-legacy `--zsh-native-packs` inventory remains migration-only.
+Normal interactive plugin and theme choices belong in `~/.winuxshrc`:
+
+```bash
+WINUXSH_THEME=minimal
+WINUXSH_THEME_PLUGIN=theme-minimal
+WINUXSH_PLUGINS=(prompt-core git)
+. "$WINUXSH/oh-my-winuxsh.winux"
+```
+
+`~/.winshrc` remains a compatibility fallback. `~/.winshrc.toml` is still read
+as a legacy/managed structured file for plugin CLI state, migration blocks,
+tests, and advanced machine-editable overrides. Current zsh compatibility
+commands remain migration tools, and legacy `--zsh-native-packs` inventory
+remains migration-only.
 
 ## Git daily use
 
@@ -219,34 +226,32 @@ git commit --<Tab>       # --message, --amend, --no-verify, ...
 git push --force<Tab>    # --force / --force-with-lease
 ```
 
-Prompt templates can include `{git_prompt}` for branch, dirty state, staged,
-untracked, ahead/behind, stash, and conflict counts. Put personal aliases in
-`~/.winshrc` with normal shell syntax; user aliases override plugin aliases.
+Prompt templates can include `{git}` / `{git_prompt}` for branch, dirty state,
+staged, untracked, ahead/behind, stash, and conflict counts. Put personal
+aliases in `~/.winuxshrc` with normal shell syntax; user aliases override
+plugin aliases.
 
 ## Configuration reference
 
-Minimal `~/.winshrc.toml`:
-
-```toml
-[shell]
-prompt_format = "{user}@{host} {cwd} {git_prompt}{symbol}"
-prompt_symbol = "❯"
-right_prompt_format = "{time} "
-
-[editor]
-edit_mode = "emacs"           # emacs | vi
-
-[theme]
-current_theme = "default"     # default | dark | light | colorful | ocean | forest | cyberpunk | minimal | custom
-
-[completions]
-matching = "prefix"           # prefix | substring
-case_sensitive = false
-```
-
-Interactive shell customizations go in `~/.winshrc`:
+Minimal `~/.winuxshrc`:
 
 ```bash
+WINUXSH_THEME=minimal
+WINUXSH_THEME_PLUGIN=theme-minimal
+WINUXSH_PROMPT_SYMBOL="❯"
+export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
+
+WINUXSH_PLUGINS=(prompt-core git)
+
+if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
+  HOME="$USERPROFILE"
+  export HOME
+fi
+
+[ -n "$WINUXSH" ] || WINUXSH="$HOME/.oh-my-winuxsh"
+[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
+winuxsh_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{time} " 2>/dev/null || true
+
 export EDITOR=vim
 alias ll='ls -la'
 alias gst='git status'
@@ -255,6 +260,11 @@ hello() {
   echo "hello from winuxsh"
 }
 ```
+
+`~/.winshrc.toml` remains supported for legacy and managed structured state, for
+example plugin CLI enable/disable records, zsh migration blocks, completion
+overrides, and test isolation. Prefer `~/.winuxshrc` for normal interactive
+customization.
 
 Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.md).
 
@@ -266,8 +276,8 @@ Full reference with all options: [DOCS/getting-started.md](DOCS/getting-started.
 | winuxcmd | ✔ Unix coreutils via PATH injection, no FFI |
 | REPL     | ✔ reedline: history, Tab, autosuggest, syntax highlight |
 | Completion | ✔ Built-in (ls, grep, find, git…), TOML, bash import, cache |
-| Git prompt | ✔ Non-blocking async refresh, configurable symbols |
-| Setup wizard | ✔ First-run guided config |
+| Git prompt | ✔ Plugin-owned prompt templates with stable startup/precmd snapshots |
+| Setup wizard | ✔ First-run guided `~/.winuxshrc` generation |
 | Zsh migration | ✔ Scanner and import plan; not a zsh plugin runtime |
 | Plugin roadmap | ✔ Built-in Winuxsh registry plus bundled `oh-my-winuxsh` |
 | User themes  | ✔ `~/.winuxsh/themes/<name>.toml`; official bundle themes include `ocean`, `forest`, `cyberpunk`, `minimal` |

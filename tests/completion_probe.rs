@@ -298,6 +298,30 @@ fn git_completion_suggests_daily_subcommands_and_flags() {
     assert_contains(&push_flags, "--force-with-lease");
 }
 
+#[test]
+fn disabling_git_plugin_removes_git_completion_definitions() {
+    let env = ProbeEnv::new("winuxsh-completion-git-disabled");
+    env.write_config(
+        r#"[winuxcmd]
+enabled = false
+
+[plugins]
+enabled = true
+bundles = ["oh-my-winuxsh"]
+load = []
+
+[plugins.git]
+enabled = false
+"#,
+    );
+
+    let flags = run_probe("git commit --", &env, &[]);
+
+    assert_not_contains(&flags, "--message");
+    assert_not_contains(&flags, "--amend");
+    assert_not_contains(&flags, "--no-verify");
+}
+
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
     let output = run_winuxsh_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);

@@ -1,6 +1,7 @@
 //! Binary-level tests for the non-interactive REPL command surface.
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn winuxsh_binary() -> PathBuf {
@@ -157,6 +158,105 @@ fn repl_command_cat_expands_tilde_paths_through_normal_command_resolution() {
 }
 
 #[test]
+fn repl_command_primary_rc_tilde_uses_windows_home_when_home_env_is_empty() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-repl-command-primary-tilde-empty-home");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(home.join(".winuxshrc"), "# primary marker\n").unwrap();
+    std::fs::write(
+        bin.join("cat.cmd"),
+        "@echo off\r\nset \"arg=%~1\"\r\necho arg=%arg%\r\nif \"%arg:~0,3%\"==\"/c/\" exit /b 12\r\nset \"fsarg=%arg:/=\\%\"\r\ntype \"%fsarg%\"\r\n",
+    )
+    .unwrap();
+
+    let old_path = std::env::var_os("PATH");
+    let mut paths = vec![bin.clone()];
+    if let Some(old_path) = old_path {
+        paths.extend(std::env::split_paths(&old_path));
+    }
+    let output = Command::new(winuxsh_binary())
+        .args(["-C", "cat ~/.winuxshrc"])
+        .current_dir(&start)
+        .env("HOME", "")
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run winuxsh primary tilde test: {err}"));
+
+    assert_success(&output, "repl command primary rc external cat tilde");
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("arg="), "stdout was {stdout:?}");
+    assert!(
+        !stdout.contains("arg=/c/"),
+        "external command received slash-drive path: {stdout:?}"
+    );
+    assert!(stdout.contains("# primary marker"), "stdout was {stdout:?}");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn command_mode_compound_commands_keep_home_paths_native() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-command-mode-native-home-paths");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(home.join(".winuxshrc"), "# primary marker\n").unwrap();
+    std::fs::write(
+        bin.join("cat.cmd"),
+        "@echo off\r\nset \"arg=%~1\"\r\necho arg=%arg%\r\nif \"%arg:~0,3%\"==\"/c/\" exit /b 12\r\nset \"fsarg=%arg:/=\\%\"\r\ntype \"%fsarg%\"\r\n",
+    )
+    .unwrap();
+
+    let old_path = std::env::var_os("PATH");
+    let mut paths = vec![bin.clone()];
+    if let Some(old_path) = old_path {
+        paths.extend(std::env::split_paths(&old_path));
+    }
+    let output = Command::new(winuxsh_binary())
+        .args([
+            "-c",
+            "cd ~; echo PWD=$PWD; pwd; cat ~/.winuxshrc >/dev/null && echo catrc:ok",
+        ])
+        .current_dir(&start)
+        .env("HOME", "")
+        .env("USERPROFILE", &home)
+        .env("ZDOTDIR", &home)
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run winuxsh command mode native home test: {err}"));
+
+    assert_success(&output, "command mode compound native home paths");
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains("catrc:ok"), "stdout was {stdout:?}");
+    assert!(
+        !stdout.contains("/c/"),
+        "command mode leaked slash-drive paths: {stdout:?}"
+    );
+    assert!(stdout.contains("PWD="), "stdout was {stdout:?}");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn repl_command_file_commands_expand_tilde_paths_through_normal_command_resolution() {
     let temp = unique_temp_dir("winuxsh-repl-command-file-builtins-tilde");
     let home = temp.join("home");
@@ -207,6 +307,53 @@ fn repl_command_file_command_prefers_path_over_winuxsh_native_helpers() {
         stdout_text(&output).trim(),
         "external-cat --definitely-external"
     );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn gitstatus_daemon_returns_repo_snapshot_over_persistent_stdio() {
+    let temp = unique_temp_dir("winuxsh-gitstatus-daemon");
+    let repo = temp.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@winuxsh"],
+        &["config", "user.name", "Winuxsh Test"],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    std::fs::write(repo.join("new.txt"), "daemon\n").unwrap();
+
+    let mut child = Command::new(winuxsh_binary())
+        .arg("--gitstatus-daemon")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(
+            stdin,
+            "{{\"id\":1,\"cwd\":{}}}",
+            serde_json::to_string(&repo.to_string_lossy()).unwrap()
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert_success(&output, "gitstatus daemon");
+    let stdout = stdout_text(&output);
+    assert!(stdout.contains(r#""id":1"#), "{stdout}");
+    assert!(stdout.contains(r#""untracked":1"#), "{stdout}");
+    assert!(stdout.contains(r#""dirty":true"#), "{stdout}");
     let _ = std::fs::remove_dir_all(temp);
 }
 

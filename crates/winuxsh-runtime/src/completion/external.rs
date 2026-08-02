@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::completion::command::CommandCompleter;
 use crate::completion::{CompletionContext, CompletionPlugin, CompletionResult};
+use crate::path_utils::shell_home_dir;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CommandCompletionPlugin
@@ -230,7 +231,7 @@ fn resolve_cache_dir() -> Option<PathBuf> {
         }
         return Some(p);
     }
-    let base = dirs::home_dir()?
+    let base = shell_home_dir()?
         .join(".winsh")
         .join("completions")
         .join("cache");
@@ -279,7 +280,6 @@ const DEFAULT_COMPLETION_DEFS: &[(&str, &str)] = &[
         "touch",
         include_str!("../../completions/defaults/touch.toml"),
     ),
-    ("git", include_str!("../../completions/defaults/git.toml")),
 ];
 
 /// Completion plugin that reads per-command completion definitions from a

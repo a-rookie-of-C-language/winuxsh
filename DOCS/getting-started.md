@@ -107,36 +107,30 @@ git branch -<Tab>           # shows -d, -D, -m, -v, -a, -r
 
 ## 6. Set up your config
 
-Create `~/.winshrc.toml` for structured settings:
-
-```toml
-[shell]
-prompt_format = "{user}@{host} {cwd} {git_prompt} {symbol}"
-
-[editor]
-edit_mode = "vi"
-
-[completions]
-matching = "prefix"
-
-[plugins]
-# Future plugin control plane. Plugin state, permissions, bundle versions, and
-# managed updates belong here; shell code belongs in ~/.winshrc.
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["git", "prompts", "keybindings"]
-
-[winuxcmd]
-# auto-detected from PATH; override only if needed
-# enabled = true
-# path = "D:/tools/winuxcmd/winuxcmd.exe"
-# Set enabled = false if you prefer uutils, GNU, BusyBox, or another
-# coreutils directory already on PATH.
-```
-
-Create `~/.winshrc` for interactive shell code:
+Create `~/.winuxshrc` for interactive shell code, plugin selection, and theme
+selection:
 
 ```bash
+WINUXSH_THEME=minimal
+WINUXSH_THEME_PLUGIN=theme-minimal
+WINUXSH_PROMPT_SYMBOL="❯"
+export WINUXSH_THEME WINUXSH_THEME_PLUGIN WINUXSH_PROMPT_SYMBOL
+
+WINUXSH_PLUGINS=(prompt-core git)
+
+if [ -z "${HOME:-}" ] && [ -n "${USERPROFILE:-}" ]; then
+  HOME="$USERPROFILE"
+  export HOME
+fi
+
+if [ -z "${WINUXSH:-}" ]; then
+  WINUXSH="$HOME/.oh-my-winuxsh"
+  export WINUXSH
+fi
+
+[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
+winuxsh_prompt_use_template "{cwd} {git_prompt}{prompt_char} " "{time} " 2>/dev/null || true
+
 export EDITOR=vim
 alias ll='ls -la'
 alias la='ls -a'
@@ -149,39 +143,44 @@ hello() {
 }
 ```
 
-`~/.winshrc` is sourced only for the interactive REPL. It does not run for
-`winuxsh -c ...`, script files, or stdin script execution, so agent and CI
-surfaces stay deterministic.
+`~/.winuxshrc` is sourced only for the interactive REPL and the `-C`
+one-shot REPL command path. It does not run for `winuxsh -c ...`, script files,
+or stdin script execution, so agent and CI surfaces stay deterministic.
 
-Use TOML for structured control-plane state such as plugins, permissions,
-prompt settings, history, menus, and bundle updates. Use rc for free-form
-rubash/bash-like shell code.
+`~/.winshrc` is a legacy compatibility fallback and is used only when
+`~/.winuxshrc` is absent. `~/.winshrc.toml` remains supported for legacy and
+managed structured state such as plugin CLI enable/disable records, migration
+blocks, completion overrides, test isolation, and advanced machine-editable
+settings. Prefer `~/.winuxshrc` for normal interactive customization.
 
-## 6b. Segment-based prompt (experimental)
+## 6b. Prompt and theme plugins
 
-Enable the p10k-style segment engine by adding to `~/.winshrc.toml`:
+Themes are official plugins. To use a Powerlevel-style theme, switch the theme
+plugin in `~/.winuxshrc`:
 
-```toml
-[shell]
-prompt_style = "segments"
-segment_preset = "classic"   # lean | classic | rainbow | pure | robbyrussell
+```bash
+WINUXSH_THEME=p10-lean
+WINUXSH_THEME_PLUGIN=theme-p10-lean
+WINUXSH_PLUGINS=(prompt-core git)
 ```
 
-The "classic" preset shows the directory in blue with a powerline triangle
-separator, git status in green, and time/status on the right side. Each preset
-has its own colour palette and element order.
+Useful bundled theme plugins include `theme-minimal`, `theme-classic`,
+`theme-pure`, `theme-robbyrussell`, `theme-p10-lean`, `theme-p10-classic`,
+`theme-p10-rainbow`, and `theme-p10-pure`. Theme TOML assets support named
+colours, 256-colour indexes, and true-colour `#RRGGBB` foreground/background
+values plus bold, italic, underline, and dimmed flags.
 
-Custom element order (overrides the preset):
+Prompt templates use the public prompt-core API:
 
-```toml
-left_prompt_elements = ["dir", "vcs", "newline", "prompt_char"]
-right_prompt_elements = ["time", "status"]
+```bash
+winuxsh_prompt_use_template "{cwd} {git}{prompt_char} " "{status}{time} "
 ```
 
-Available elements: `dir`, `vcs`, `status`, `time`, `prompt_char`, `os_icon`,
-`context` (user@host), `background_jobs`, `cmd_exec_time`, `newline`.
-
-Restart winuxsh to pick up the changes.
+Available template tokens include `{cwd}`, `{cwd_base}`, `{user_host}`,
+`{git}`, `{git_prompt}`, `{status}`, `{time}`, `{command_execution_time}`,
+`{newline}`, and `{prompt_char}`. The Git prompt snapshot is refreshed during
+startup/precmd so late Git work warms the next prompt instead of redrawing the
+line the user is typing on.
 
 ## 7. Import your .zshrc (optional)
 
@@ -207,7 +206,9 @@ support. It ships first-party packs such as `git`, `docker`, `kubectl`,
 `npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
 presets.
 
-The canonical TOML shape is:
+The normal interactive shape is the `~/.winuxshrc` plugin list shown above.
+When `winuxsh plugin enable/disable` or migration tooling needs structured
+state, it writes managed records to `~/.winshrc.toml`, for example:
 
 ```toml
 [plugins]
@@ -225,10 +226,12 @@ permissions = ["cwd:read", "process:run:zoxide"]
 ```
 
 Existing `[zsh.native_plugins]` and `[zsh.native_widgets]` config remains a
-legacy migration compatibility surface, but new config should use `[plugins]`.
+legacy migration compatibility surface. New machine-managed config should use
+`[plugins]`, while user-authored interactive startup should use `~/.winuxshrc`.
 Official shell helper packs can ship reviewed bundle-local `init.winux` source
-scripts. Those scripts load for interactive startup and `winuxsh -C`, before
-your `~/.winshrc`, so your personal rc aliases and functions still win.
+scripts. If `~/.winuxshrc` exists, it is the source-plugin entry point and
+loads the framework directly. Without `~/.winuxshrc`, the legacy managed
+startup path can still load enabled source packs before fallback `~/.winshrc`.
 Use `winuxsh plugin list`, `winuxsh plugin search`, `winuxsh plugin themes`,
 and `winuxsh plugin review` for current inventory, theme sources, and
 permission checks; legacy `--zsh-native-packs` remains migration-only.

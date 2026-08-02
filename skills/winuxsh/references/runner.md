@@ -74,8 +74,8 @@ logic to a script file or feed a script on stdin rather than piling on escaping.
 ## Command Mode Vs One-Shot REPL
 
 Use `-c` for deterministic script/CI/agent command mode. It executes through
-the script path and must not require `~/.winshrc`, prompt state, or interactive
-REPL hooks:
+the script path and must not require `~/.winuxshrc`, legacy `~/.winshrc`,
+prompt state, or interactive REPL hooks:
 
 ```powershell
 winuxsh -c 'printf "%s\n" "$PWD"'

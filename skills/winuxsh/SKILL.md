@@ -7,9 +7,9 @@ description: >-
   heredocs, functions, arrays, jobs, exit status, Windows-native paths such as
   C:/Users/me/project plus quoted drive-letter backslash paths, with /c
   compatibility inputs, WinuxCmd utility discovery, WPM package installs and
-  WinuxCmd updates, ~/.winshrc.toml and ~/.winshrc configuration,
-  winuxsh --self-update, plugin and bundle commands, or repository
-  verification for winuxsh itself.
+  WinuxCmd updates, ~/.winuxshrc primary startup, legacy ~/.winshrc fallback,
+  managed ~/.winshrc.toml state, winuxsh --self-update, plugin and bundle
+  commands, or repository verification for winuxsh itself.
 ---
 # Winuxsh
 Treat Winuxsh as a native Windows process that provides a GNU Bash-compatible
@@ -67,9 +67,18 @@ Prefer native Windows paths and verify the active binary when behavior matters.
   as a clearly labeled fallback.
 - Keep `winuxsh -c`, script files, and stdin execution quiet and deterministic:
   no banners, stable stdout/stderr, and exact exit-code propagation.
-- Treat `~/.winshrc.toml` as the structured control plane and `~/.winshrc` as
-  interactive REPL shell code. `~/.winshrc` must not be required for command
-  mode, scripts, stdin execution, agent tests, or CI.
+- Treat `~/.winuxshrc` as the primary interactive user entry point for theme
+  selection, plugin lists, aliases, functions, exports, and source-framework
+  startup. `~/.winshrc` is only a legacy fallback when `~/.winuxshrc` is absent.
+- Treat `~/.winshrc.toml` as legacy/managed structured state for plugin CLI
+  metadata, migrations, tests, and advanced machine-editable overrides, not as
+  the default user-authored startup file.
+- Keep `winuxsh -c`, scripts, stdin execution, agent tests, and CI independent
+  from any interactive rc file.
+- Keep prompt, theme, git prompt, aliases, completions, and shell helper logic
+  in bundled source plugins when possible. Winuxsh core should own host APIs,
+  lifecycle hooks, native helpers, and safety boundaries, not theme/plugin
+  behavior directly.
 - Use newer docs and source code over old roadmap notes. Zsh-related surfaces
   are legacy migration/importer material unless the user explicitly asks about
   that migration path.
@@ -82,8 +91,9 @@ Prefer native Windows paths and verify the active binary when behavior matters.
 - `references/winuxcmd-discovery.md`: WinuxCmd PATH integration, WPM search,
   install/update/link rebuild workflows, activation diagnostics, utility
   provider collisions, and help.
-- `references/config.md`: `~/.winshrc.toml`, `~/.winshrc`, prompt/completion,
-  WinuxCmd overrides, test isolation, and two config surfaces.
+- `references/config.md`: `~/.winuxshrc`, legacy `~/.winshrc`, managed
+  `~/.winshrc.toml`, prompt/theme/plugin startup, WinuxCmd overrides, and test
+  isolation.
 - `references/plugins.md`: `winuxsh --self-update`, WPM package updates,
   `winuxsh plugin ...`, `oh-my-winuxsh` bundle updates, rollback, and review.
 - `references/development.md`: repository ownership boundaries, command runner,

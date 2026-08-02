@@ -29,6 +29,17 @@ If the Bash runner is not named `bash` on your machine, set `BASH_RUNNER` in
 your local environment or replace it in your local command. Keep that path out
 of committed files.
 
+On a typical Windows machine with Git for Windows installed but `bash` missing
+from Winuxsh's `PATH`, call Git Bash explicitly:
+
+```sh
+winuxsh -c 'cd C:/path/to/winuxsh && C:/Progra~1/Git/bin/bash.exe scripts/run-bash-upstream-with-winuxsh.sh'
+```
+
+Replace `C:/path/to/winuxsh` and the Git Bash path for your machine. The short
+`C:/Progra~1/...` form avoids quoting the `Program Files` space through nested
+shells.
+
 To test a release build instead of the default debug build:
 
 ```sh
@@ -37,6 +48,12 @@ winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; WINUXSH_BASH_UPSTREAM_PROFILE=re
 
 To test an already-built binary, set `WINUXSH_BASH_UPSTREAM_SHELL_BIN` to that
 `winuxsh.exe`; the runner will skip its own `cargo build` step.
+
+For focused debugging, pass one upstream runner name after the script:
+
+```sh
+winuxsh -c 'cd C:/path/to/winuxsh && C:/Progra~1/Git/bin/bash.exe scripts/run-bash-upstream-with-winuxsh.sh run-alias'
+```
 
 The gate passes only when it reports:
 
@@ -51,6 +68,31 @@ Results are written under:
 ```text
 target/bash-upstream-tests
 ```
+
+Each run rewrites `target/bash-upstream-tests/results.tsv`, `summary.md`, and
+the per-runner logs. If a long run is interrupted, kill any remaining
+`bash.exe`/`winuxsh.exe` children before starting another full run, otherwise an
+old process can keep appending stale failures to the same result directory.
+
+## Troubleshooting
+
+If every upstream runner fails with exit `126`, open one log under
+`target/bash-upstream-tests/logs/`. A message like this means the harness
+safety guard rejected a path before Winuxsh actually ran the Bash test:
+
+```text
+Refusing rm outside Bash upstream work dir: /c/.../work/run-alias/tests
+Allowed: C:/.../work/run-alias
+```
+
+That is a path-format mismatch between Git Bash `/c/...` paths and Windows
+`C:/...` paths, not a shell compatibility failure. The runner intentionally
+keeps destructive-command guards for `rm`, `touch`, `mkdir`, `cp`, `mv`, and
+`ln`; do not remove or loosen those guards. Fix or preserve normalization so
+both `/c/...` and `C:/...` compare as the same path.
+
+If the command fails with `bash: command not found`, invoke Git Bash explicitly
+as shown above or set `BASH_RUNNER` to a real Bash executable.
 
 ## Performance guardrails
 

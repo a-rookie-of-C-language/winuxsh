@@ -642,9 +642,10 @@ Current branch progress:
   old zsh-native product surface.
 - README and getting started docs point users to `winuxsh plugin list/search`,
   `winuxsh plugin review`, `winuxsh plugin install`, and `winuxsh plugin uninstall`.
-- Getting started now describes `[plugins]` as the canonical TOML surface and
-  confines `[zsh.native_plugins]` / `[zsh.native_widgets]` to legacy migration
-  compatibility wording.
+- Getting started now describes `~/.winuxshrc` as the primary interactive
+  entry point and confines TOML `[plugins]` to managed/legacy machine-editable
+  state. `[zsh.native_plugins]` / `[zsh.native_widgets]` remain legacy
+  migration compatibility wording.
 - CLI help labels `--zsh-compat-doctor` as a legacy zsh migration health check.
 
 oh-my-winuxsh:
@@ -655,7 +656,8 @@ oh-my-winuxsh:
 
 Done when:
 
-- New docs and examples use only `winuxsh plugin ...` and `[plugins]`.
+- New docs and examples use `~/.winuxshrc` for interactive plugin/theme
+  selection, and `winuxsh plugin ...` plus `[plugins]` only for managed state.
 - zsh is mentioned only under migration.
 
 ## Phase 11 - Theme Pack Assets

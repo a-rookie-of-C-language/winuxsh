@@ -69,7 +69,8 @@ host-shell pain where a one-shot command needs the same REPL state as an
 interactive user without opening a real interactive session.
 
 Keep `-c` separate: it is the quiet script/CI path and must not require
-`~/.winshrc` or REPL lifecycle hooks. When this area changes, test both sides:
+`~/.winuxshrc`, legacy `~/.winshrc`, or REPL lifecycle hooks. When this area
+changes, test both sides:
 
 ```bash
 winuxsh -c 'cargo test --test repl_command --locked'
@@ -111,8 +112,8 @@ Choose tests by behavior:
 
 - CLI/help/version/plugin parsing: root binary tests in `tests/`.
 - One-shot REPL command behavior: `tests/repl_command.rs` for `-C` loading
-  `~/.winshrc`, running lifecycle hooks, staying banner-free, and preserving
-  `-c` script semantics.
+  primary `~/.winuxshrc` or legacy `~/.winshrc`, running lifecycle hooks,
+  staying banner-free, and preserving `-c` script semantics.
 - Runtime config, prompt, completion, shell host integration:
   `winuxsh-runtime` library tests.
 - Completion UX: `--completion-probe` and `tests/completion_probe.rs`.

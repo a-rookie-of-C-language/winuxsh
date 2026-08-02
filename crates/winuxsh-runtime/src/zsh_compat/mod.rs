@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::completion::external::{CommandDef, FlagDef, PathLiteral, ValuesSource};
 use crate::completion::runtime::RuntimeCompletionCommand;
 use crate::config::{EditorMode, ZshCompatLevel, ZshConfig};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 
 pub const ZSH_IMPORT_BLOCK_START: &str = "# >>> winuxsh zsh compat import >>>";
 pub const ZSH_IMPORT_BLOCK_END: &str = "# <<< winuxsh zsh compat import <<<";
@@ -2155,14 +2156,14 @@ fn dynamic_completion_temp_path(command: &str, stream: &str) -> PathBuf {
 
 fn default_zdotdir() -> PathBuf {
     std::env::var_os("ZDOTDIR")
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+        .map(|value| PathBuf::from(shell_path_to_host_path(value.to_string_lossy().as_ref())))
+        .or_else(shell_home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn base_env_map(options: &ZshImportOptions) -> HashMap<String, String> {
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = shell_home_dir() {
         env.entry("HOME".to_string())
             .or_insert_with(|| home.to_string_lossy().to_string());
     }
@@ -2376,7 +2377,7 @@ fn scan_content(
 }
 
 fn default_dynamic_completion_cache_dir() -> PathBuf {
-    dirs::home_dir()
+    shell_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".winuxsh")
         .join("cache")

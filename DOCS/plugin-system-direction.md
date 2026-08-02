@@ -16,10 +16,14 @@ registry and an official bundled distribution.
 - Build a built-in Winuxsh plugin system.
 - Ship `oh-my-winuxsh` as the official bundled plugin distribution, similar in
   spirit to how winuxcmd is bundled as the default coreutils layer.
-- Keep `~/.winshrc.toml` as the structured control plane for plugin enablement,
-  permissions, bundle versions, and managed updates.
-- Keep `~/.winshrc` as the user script plane for bash-like shell code:
-  `export`, `alias`, functions, and interactive startup logic.
+- Keep `~/.winuxshrc` as the primary interactive user entry point for plugin
+  lists, theme selection, prompt templates, `export`, `alias`, functions, and
+  startup logic.
+- Keep `~/.winshrc` as a compatibility fallback only when `~/.winuxshrc` is
+  absent.
+- Keep `~/.winshrc.toml` as legacy/managed structured state for plugin CLI
+  enablement, permissions, bundle versions, migration blocks, tests, and
+  advanced machine-editable overrides.
 - Keep zsh compatibility as a one-time migration/onboarding tool only. It may
   detect familiar `.zshrc` intent and suggest Winuxsh plugins, but it must not
   define the plugin system's identity.
@@ -59,12 +63,14 @@ external plugins
 
 The plugin model intentionally separates declaration from execution:
 
-- `~/.winshrc.toml` is the structured control plane. It records which bundles
-  and packs are enabled, what permissions are granted, and which bundle version
-  is active.
-- `~/.winshrc` is the user-owned trusted script plane. Users can write
-  bash-like shell code there: aliases, exports, functions, and local startup
+- `~/.winuxshrc` is the user-owned trusted script plane and the default
+  interactive entry point. Users can write bash-like shell code there: plugin
+  arrays, theme selection, aliases, exports, functions, and local startup
   behavior.
+- `~/.winshrc` remains a legacy compatibility fallback for older user setups.
+- `~/.winshrc.toml` is the legacy/managed structured file. It records plugin
+  CLI decisions, permissions, bundle versions, migration blocks, tests, and
+  advanced overrides when a machine-editable format is required.
 - `oh-my-winuxsh` is a distributable bundle. It can carry static assets
   directly, and it can carry code-bearing artifacts only through explicit
   runtime contracts: `.winux` source scripts, `process`, or `wasm`.
@@ -99,13 +105,14 @@ This means source, IPC/process, and WASM plugins are mutually exclusive at the
 single plugin instance level, but not at the architecture level. They are just
 runtime backends behind the same plugin contract.
 
-Source plugins run during interactive startup and the `-C` one-shot REPL path,
-before user `~/.winshrc`. Ordinary `winuxsh -c`, script files, and stdin script
-execution stay quiet and do not load source plugins. The user rc file remains
-last in the startup order so personal aliases, functions, and exports can
-override official pack defaults.
+Source plugins run during interactive startup and the `-C` one-shot REPL path.
+When `~/.winuxshrc` exists, it is the source-plugin/framework entry point and
+loads the framework directly. Without `~/.winuxshrc`, the legacy managed path
+can still load enabled source plugins before fallback `~/.winshrc`. Ordinary
+`winuxsh -c`, script files, and stdin script execution stay quiet and do not
+load source plugins.
 
-WASM does not replace source plugins or `~/.winshrc`. The rc file remains the
+WASM does not replace source plugins or `~/.winuxshrc`. The rc file remains the
 user's personal trusted script surface. Source plugins are the reviewed shell
 customization surface. WASM is for distributable plugin code that should run
 under a host contract with explicit permissions, resource limits, and a stable
@@ -127,8 +134,8 @@ another asset-only classification.
 
 ## Control Plane vs Script Plane
 
-TOML stays because plugins need declaration, auditability, rollback, and
-permission review:
+TOML stays because managed plugin operations need declaration, auditability,
+rollback, and permission review:
 
 ```toml
 [plugins]
@@ -150,7 +157,7 @@ its manifest permissions, runtime backend, required binaries, exported surfaces,
 trust source, and current enablement without running plugin code or writing
 config.
 
-`~/.winshrc` remains the free-form shell script:
+`~/.winuxshrc` is the normal free-form shell script:
 
 ```sh
 export EDITOR=vim
@@ -161,9 +168,11 @@ hello() {
 }
 ```
 
-The rule is simple: TOML declares trust and plugin state; rc contains user shell
-code. Plugin load, permission grants, bundle versions, and update locks should
-not depend on executing rc.
+The rule is simple: `~/.winuxshrc` is the human-authored interactive entry
+point; TOML is legacy/managed machine state. Plugin permission grants, bundle
+versions, and update locks should remain auditable without executing arbitrary
+user rc code, but normal users should not need to edit TOML just to choose a
+theme or load first-party plugins.
 
 ## oh-my-winuxsh Bundle
 
@@ -344,4 +353,4 @@ plan. The short version is:
   fragments as plugin code.
 - No plugin access to rubash parser/executor internals.
 - No DLL/FFI plugin ABI for community plugins.
-- No plugin behavior that depends on executing `~/.winshrc`.
+- No plugin behavior that depends on executing legacy fallback `~/.winshrc`.
