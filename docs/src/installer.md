@@ -66,6 +66,29 @@ The portable zip keeps the same first-start WinuxCmd activation flow: if command
 links are missing, Winuxsh runs `winuxcmd/activate-winuxcmd.sh` once from the
 bundle so `ls`, `cat`, `grep`, and friends resolve normally.
 
+## Updating WinuxCmd with WPM
+
+The Unix command set (`ls`, `cat`, `grep`, `sed`, ...) is delivered by
+WinuxCmd and managed separately from the Winuxsh binary. Winux Package
+Manager (`wpm`) handles it:
+
+```sh
+wpm update winuxcmd          # update WinuxCmd from the local index
+wpm index status             # inspect the local index state
+wpm list                     # indexed packages and install state
+```
+
+`wpm update winuxcmd` refreshes the command set in place; command links are
+rebuilt automatically. Run `wpm --help` for the full surface (`index`,
+`source`, `search`, `info`, `install`, `links`).
+
+So the update story has two parts:
+
+```sh
+winuxsh --self-update        # the shell itself
+wpm update winuxcmd          # the Unix commands it ships with
+```
+
 ## Bundled Plugin Baseline
 
 Release packages also stage the official `oh-my-winuxsh` bundle under:

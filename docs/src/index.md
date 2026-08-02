@@ -70,7 +70,8 @@ target\release\winuxsh.exe
 ```
 
 Keep it current with `winuxsh --self-update` (or `self-update` inside the
-shell). Questions and bug reports go to
+shell) and `wpm update winuxcmd` for the Unix command set. Questions and bug
+reports go to
 [github.com/unixwin/winuxsh/issues](https://github.com/unixwin/winuxsh/issues).
 
 Shell semantics live upstream in
