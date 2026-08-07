@@ -318,7 +318,7 @@ if [ -z "${{HOME:-}}" ] && [ -n "${{USERPROFILE:-}}" ]; then
 fi
 
 if [ -z "${{WINUXSH:-}}" ]; then
-  for __winuxsh_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.winuxsh/oh-my-winuxsh" "$HOME/.winuxsh/bundles/oh-my-winuxsh"/*; do
+  for __winuxsh_bundle in "$HOME/.oh-my-winuxsh" "$HOME/.winuxsh/oh-my-winuxsh" "$HOME/.winuxsh/bundles/oh-my-winuxsh"/* "$WINUXSH_APP_BUNDLE_PATH"; do
     if [ -f "$__winuxsh_bundle/oh-my-winuxsh.winux" ]; then
       WINUXSH="$__winuxsh_bundle"
       export WINUXSH
@@ -542,6 +542,7 @@ mod tests {
         assert!(rc.contains("WINUXSH_PROMPT_CWD_STYLE='home'"));
         assert!(rc.contains("WINUXSH_DISABLE_DEFAULT_PLUGINS=1"));
         assert!(rc.contains("WINUXSH_PLUGINS=(prompt-core git)"));
+        assert!(rc.contains("\"$WINUXSH_APP_BUNDLE_PATH\""));
         assert!(rc.contains(". \"$WINUXSH/oh-my-winuxsh.winux\""));
         assert!(rc.contains("winuxsh_prompt_use_template '{cwd} ' '{time} '"));
         assert!(!rc.contains("[plugins]"));

@@ -27,7 +27,9 @@ use crate::config::{
 };
 use crate::git_status::GitPromptSymbols;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
-use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec};
+use crate::plugins::{
+    PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec, OFFICIAL_BUNDLE_NAME,
+};
 use crate::prompt::{GitPromptDecor, PromptBackend, PromptIndicators, WinuxshPrompt};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
@@ -305,6 +307,7 @@ impl Shell {
         // 7. User-local state files.
         let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
         normalize_executor_home_env(&mut executor, &home_dir);
+        set_default_winuxsh_framework_env(&mut executor, &home_dir);
         let history_path = config
             .history
             .path
@@ -3445,6 +3448,64 @@ fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     }
 }
 
+fn set_default_winuxsh_framework_env(executor: &mut Executor, home_dir: &Path) {
+    let configured_app_bundle = executor
+        .get_env("WINUXSH_APP_BUNDLE_PATH")
+        .map(str::to_owned)
+        .map(|value| PathBuf::from(shell_path_to_host_path(&value)))
+        .filter(|path| is_winuxsh_framework_dir(path));
+    let discovered_app_bundle = app_bundled_winuxsh_framework_dir();
+    let app_bundle = configured_app_bundle.or(discovered_app_bundle.clone());
+
+    if executor.get_env("WINUXSH_APP_BUNDLE_PATH").is_none() {
+        if let Some(path) = discovered_app_bundle {
+            executor.set_env(
+                "WINUXSH_APP_BUNDLE_PATH",
+                &host_path_to_shell_path(&path.to_string_lossy()),
+            );
+        }
+    }
+
+    if executor.get_env("WINUXSH").is_none() {
+        if let Some(path) = first_valid_winuxsh_framework_dir(home_dir, app_bundle.as_deref()) {
+            executor.set_env("WINUXSH", &host_path_to_shell_path(&path.to_string_lossy()));
+        }
+    }
+}
+
+fn app_bundled_winuxsh_framework_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let path = exe.parent()?.join("bundles").join(OFFICIAL_BUNDLE_NAME);
+    is_winuxsh_framework_dir(&path).then_some(path)
+}
+
+fn first_valid_winuxsh_framework_dir(home_dir: &Path, app_bundle: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates = vec![
+        home_dir.join(".oh-my-winuxsh"),
+        home_dir.join(".winuxsh").join("oh-my-winuxsh"),
+    ];
+    let version_root = home_dir.join(".winuxsh").join("bundles").join(OFFICIAL_BUNDLE_NAME);
+    if let Ok(entries) = std::fs::read_dir(version_root) {
+        let mut versions = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        versions.sort();
+        candidates.extend(versions);
+    }
+    if let Some(path) = app_bundle {
+        candidates.push(path.to_path_buf());
+    }
+    candidates
+        .into_iter()
+        .find(|path| is_winuxsh_framework_dir(path))
+}
+
+fn is_winuxsh_framework_dir(path: &Path) -> bool {
+    path.join("oh-my-winuxsh.winux").is_file()
+}
+
 fn shell_pwd_to_existing_host_dir(pwd: &str) -> Option<PathBuf> {
     let host = shell_path_to_host_path(pwd);
     let path = PathBuf::from(host);
@@ -5051,6 +5112,47 @@ export AFTER_SETOPT=ok
                 "/home/me/project"
             );
         }
+    }
+
+    #[test]
+    fn winuxsh_framework_discovery_prefers_user_dirs_before_app_bundle() {
+        let temp = unique_temp_dir("winuxsh-framework-discovery");
+        let home = temp.join("home");
+        let home_dot = home.join(".oh-my-winuxsh");
+        let home_config = home.join(".winuxsh").join("oh-my-winuxsh");
+        let home_version = home
+            .join(".winuxsh")
+            .join("bundles")
+            .join(OFFICIAL_BUNDLE_NAME)
+            .join("1.0.0");
+        let app_bundle = temp.join("app").join("bundles").join(OFFICIAL_BUNDLE_NAME);
+
+        for path in [&home_dot, &home_config, &home_version, &app_bundle] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("oh-my-winuxsh.winux"), "").unwrap();
+        }
+
+        assert_eq!(
+            first_valid_winuxsh_framework_dir(&home, Some(&app_bundle)).as_deref(),
+            Some(home_dot.as_path())
+        );
+        std::fs::remove_file(home_dot.join("oh-my-winuxsh.winux")).unwrap();
+        assert_eq!(
+            first_valid_winuxsh_framework_dir(&home, Some(&app_bundle)).as_deref(),
+            Some(home_config.as_path())
+        );
+        std::fs::remove_file(home_config.join("oh-my-winuxsh.winux")).unwrap();
+        assert_eq!(
+            first_valid_winuxsh_framework_dir(&home, Some(&app_bundle)).as_deref(),
+            Some(home_version.as_path())
+        );
+        std::fs::remove_file(home_version.join("oh-my-winuxsh.winux")).unwrap();
+        assert_eq!(
+            first_valid_winuxsh_framework_dir(&home, Some(&app_bundle)).as_deref(),
+            Some(app_bundle.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
