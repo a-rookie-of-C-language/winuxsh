@@ -77,7 +77,7 @@ continues to flow through rubash PATH lookup and winuxcmd shims.
 Practical rule:
 
 - Completion may be Windows-aware about executable suffixes.
-- Execution must remain bash/zsh-like and should not adopt PowerShell wildcard,
+- Execution must remain Bash-compatible and should not adopt PowerShell wildcard,
   quoting, or pipeline semantics.
 - Do not add `.ps1` behavior unless explicitly scoped as a completion-only
   convenience and reviewed separately.

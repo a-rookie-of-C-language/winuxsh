@@ -17,8 +17,6 @@ toml = "0.8"
 dirs = "5.0"
 filetime = "0.2"
 sha2 = "0.10"
-wasmparser = "0.244"
-wasmi = "2.0.0-beta.9"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 colored = "2.1"
 log = "0.4"

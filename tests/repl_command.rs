@@ -188,7 +188,6 @@ fn repl_command_primary_rc_tilde_uses_windows_home_when_home_env_is_empty() {
         .current_dir(&start)
         .env("HOME", "")
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env("PATH", std::env::join_paths(paths).unwrap())
         .output()
@@ -239,7 +238,6 @@ fn command_mode_compound_commands_keep_home_paths_native() {
         .current_dir(&start)
         .env("HOME", "")
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env("PATH", std::env::join_paths(paths).unwrap())
         .output()
@@ -311,6 +309,107 @@ fn repl_command_file_command_prefers_path_over_winuxsh_native_helpers() {
 }
 
 #[test]
+fn repl_command_ls_dot_runs_in_start_directory() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-repl-command-ls-dot");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(home.join(".winshrc"), "").unwrap();
+    std::fs::write(start.join("marker.txt"), "marker").unwrap();
+    std::fs::write(
+        bin.join("ls.cmd"),
+        "@echo off\r\necho cwd=%CD%\r\necho args=%*\r\nif not exist marker.txt exit /b 9\r\n",
+    )
+    .unwrap();
+
+    let output = run_winuxsh_with_extra_path(&["-C", "ls ."], &start, &home, &bin);
+
+    assert_success(&output, "repl command ls dot");
+    let stdout = stdout_text(&output).replace('\\', "/");
+    assert!(stdout.contains("args=."), "stdout was {stdout:?}");
+    assert!(
+        stdout.contains(&display_path(&start)),
+        "ls did not run in start dir; stdout was {stdout:?}"
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn repl_command_starship_receives_windows_profile_env() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("winuxsh-repl-command-starship-env");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    let bin = temp.join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".winshrc.toml"), "[winuxcmd]\nenabled = false\n").unwrap();
+    std::fs::write(home.join(".winshrc"), "").unwrap();
+    std::fs::write(
+        bin.join("starship.cmd"),
+        "@echo off\r\necho userprofile=%USERPROFILE%\r\necho home=%HOME%\r\necho appdata=%APPDATA%\r\necho localappdata=%LOCALAPPDATA%\r\necho homedrive=%HOMEDRIVE%\r\necho homepath=%HOMEPATH%\r\n",
+    )
+    .unwrap();
+
+    let old_path = std::env::var_os("PATH");
+    let mut paths = vec![bin.clone()];
+    if let Some(old_path) = old_path {
+        paths.extend(std::env::split_paths(&old_path));
+    }
+    let output = Command::new(winuxsh_binary())
+        .args(["-C", "starship prompt"])
+        .current_dir(&start)
+        .env("HOME", &home)
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env_remove("USERPROFILE")
+        .env_remove("APPDATA")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run winuxsh starship env test: {err}"));
+
+    assert_success(&output, "repl command starship env");
+    let stdout = stdout_text(&output).replace('\\', "/");
+    let home = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("home="))
+        .unwrap_or_else(|| panic!("missing home= in {stdout:?}"));
+    assert!(
+        stdout.contains(&format!("userprofile={home}")),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&format!("home={home}")),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&format!("appdata={home}/AppData/Roaming")),
+        "stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&format!("localappdata={home}/AppData/Local")),
+        "stdout was {stdout:?}"
+    );
+    assert!(stdout.contains("homedrive="), "stdout was {stdout:?}");
+    assert!(stdout.contains("homepath="), "stdout was {stdout:?}");
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn command_mode_sets_shell_to_current_exe_when_missing() {
     let temp = unique_temp_dir("winuxsh-command-mode-shell-env");
     let home = temp.join("home");
@@ -325,7 +424,6 @@ fn command_mode_sets_shell_to_current_exe_when_missing() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env_remove("SHELL")
         .env_remove("BASH")
@@ -412,7 +510,6 @@ fn run_winuxsh_command(
         .current_dir(start)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("ZDOTDIR", home)
         .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
         .env_remove("WINUXSH_REPL_COMMAND_RC")
         .env_remove("WINUXSH_REPL_PRECMD_RAN")

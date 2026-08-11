@@ -171,6 +171,16 @@ fn completion_probe_loads_startup_rc_aliases() {
 }
 
 #[test]
+fn completion_probe_loads_startup_rc_functions() {
+    let env = ProbeEnv::new("winuxsh-completion-rc-function");
+    env.write_rc("function deploy_site() { echo deploy; }\n");
+
+    let suggestions = run_probe("dep", &env, &[]);
+
+    assert_contains(&suggestions, "deploy_site");
+}
+
+#[test]
 fn path_completion_escapes_spaces_in_candidates() {
     let env = ProbeEnv::new("winuxsh-completion-spaces");
     std::fs::create_dir_all(env.start.join("two dir")).unwrap();
@@ -336,8 +346,7 @@ fn run_winuxsh_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, St
         .current_dir(cwd)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"))
-        .env("ZDOTDIR", home);
+        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"));
 
     for (key, value) in extra_env {
         command.env(key, value);

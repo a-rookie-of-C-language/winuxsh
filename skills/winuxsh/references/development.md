@@ -5,9 +5,9 @@ Use this reference before changing the winuxsh repository itself.
 ## Read Local Rules
 
 Read `AGENTS.md` first. The live project rule is to run project commands
-through `winuxsh -c '<command>'` and keep commands Windows-native. Ensure
-`winuxsh` resolves to the intended installed user binary unless deliberately
-testing a checked-out build.
+directly when the active tool session is already Winuxsh. Use `winuxsh -c`
+only when launching from an external host or deliberately testing a fresh
+script-mode child shell. Keep commands Windows-native.
 
 ## Component Ownership
 
@@ -29,22 +29,18 @@ workarounds for rubash bugs, and do not reintroduce WinuxCmd FFI/DLL routing.
 Fast loop:
 
 ```bash
-winuxsh -c 'cargo fmt --check -p winuxsh; cargo build --locked; cargo test --workspace --locked'
+cargo fmt --check -p winuxsh
+cargo build --locked
+cargo test --workspace --locked
 ```
 
 Focused loops:
 
 ```bash
-winuxsh -c 'cargo test -p winuxsh-runtime --lib --locked'
-winuxsh -c 'cargo test --test completion_probe --locked'
-winuxsh -c 'cargo test --test repl_command --locked'
-winuxsh -c 'cargo test --test plugin_inventory --locked'
-```
-
-Migration/importer maintenance only:
-
-```bash
-winuxsh -c 'cargo test -p winuxsh-runtime --test zsh_compat --locked'
+cargo test -p winuxsh-runtime --lib --locked
+cargo test --test completion_probe --locked
+cargo test --test repl_command --locked
+cargo test --test plugin_inventory --locked
 ```
 
 Host-contract and compatibility tests require WinuxCmd command links in the
@@ -53,8 +49,8 @@ tests, use the Windows separator (`;`) so both `std::process::Command` and
 rubash child commands see the links:
 
 ```bash
-winuxsh -c 'PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test host_contract --locked -- --ignored'
-winuxsh -c 'PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test compat --locked -- --ignored'
+PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test host_contract --locked -- --ignored
+PATH="C:/path/to/WinuxCmd/build-vs-release;$PATH" WINUXCMD_PATH="C:/path/to/WinuxCmd/build-vs-release/winuxcmd.exe" cargo test --test compat --locked -- --ignored
 ```
 
 If `ls`, `grep`, `tr`, or similar commands are missing, repair the WinuxCmd
@@ -73,7 +69,7 @@ Keep `-c` separate: it is the quiet script/CI path and must not require
 changes, test both sides:
 
 ```bash
-winuxsh -c 'cargo test --test repl_command --locked'
+cargo test --test repl_command --locked
 target/debug/winuxsh.exe --help
 target/debug/winuxsh.exe -C 'echo one-shot-repl'
 target/debug/winuxsh.exe -c 'echo script-mode'
@@ -87,7 +83,9 @@ Do not document `-C` as generally available until the target binary's
 Use checked-out binaries only when deliberately testing that exact build:
 
 ```bash
-winuxsh -c 'cargo build --locked; target/debug/winuxsh.exe --version; target/debug/winuxsh.exe -c "printf %s\\n ok"'
+cargo build --locked
+target/debug/winuxsh.exe --version
+target/debug/winuxsh.exe -c "printf %s\\n ok"
 ```
 
 Otherwise, avoid adding `target/debug` or `target/release` ahead of the
@@ -98,7 +96,8 @@ installed user binary in PATH. Stale or locked binaries can hide real behavior.
 The upstream Bash local gate is intentionally external to normal CI:
 
 ```bash
-winuxsh -c 'BASH_RUNNER="${BASH_RUNNER:-bash}"; "$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh'
+BASH_RUNNER="${BASH_RUNNER:-bash}"
+"$BASH_RUNNER" scripts/run-bash-upstream-with-winuxsh.sh
 ```
 
 Expected pass condition is `86` total, `86` passed, `0` failed for the Winuxsh
@@ -117,9 +116,8 @@ Choose tests by behavior:
 - Runtime config, prompt, completion, shell host integration:
   `winuxsh-runtime` library tests.
 - Completion UX: `--completion-probe` and `tests/completion_probe.rs`.
-- Plugin inventory/bundles/process/WASM: `tests/plugin_inventory.rs`.
+- Plugin inventory/bundles/process adapters: `tests/plugin_inventory.rs`.
 - Bash semantics: rubash upstream first, then Winuxsh integration tests.
-- Legacy migration importer: `zsh_compat` and binary-level migration tests.
 
 Preserve quiet `winuxsh -c`, `winuxsh -C`, and script execution. User-facing
 REPL polish belongs in interactive paths unless the change explicitly targets

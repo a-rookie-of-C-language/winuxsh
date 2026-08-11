@@ -182,27 +182,10 @@ Available template tokens include `{cwd}`, `{cwd_base}`, `{user_host}`,
 startup/precmd so late Git work warms the next prompt instead of redrawing the
 line the user is typing on.
 
-## 7. Import your .zshrc (optional)
-
-If you already have a `.zshrc` with Oh My Zsh, let winuxsh inspect it:
-
-```sh
-winuxsh --zsh-compat-report
-winuxsh --zsh-compat-import-plan
-```
-
-Review the plan. If it looks safe (it scans, does not blindly source):
-
-```sh
-winuxsh --zsh-compat-import-apply
-winuxsh --zsh-compat-doctor
-```
-
-## 8. Official plugin bundle
+## 7. Official plugin bundle
 
 Winuxsh has a built-in plugin system. `oh-my-winuxsh` is the
-official bundled plugin distribution, not an Oh My Zsh fork and not zsh plugin
-support. It ships first-party packs such as `git`, `docker`, `kubectl`,
+official bundled plugin distribution. It ships first-party packs such as `git`, `docker`, `kubectl`,
 `npm`, `zoxide`, `direnv`, `dotenv`, `fzf`, prompt presets, and keybinding
 presets.
 
@@ -225,20 +208,18 @@ enabled = false
 permissions = ["cwd:read", "process:run:zoxide"]
 ```
 
-Existing `[zsh.native_plugins]` and `[zsh.native_widgets]` config remains a
-legacy migration compatibility surface. New machine-managed config should use
-`[plugins]`, while user-authored interactive startup should use `~/.winuxshrc`.
-Official shell helper packs can ship reviewed bundle-local `init.winux` source
-scripts. If `~/.winuxshrc` exists, it is the source-plugin entry point and
-loads the framework directly. Without `~/.winuxshrc`, the legacy managed
-startup path can still load enabled source packs before fallback `~/.winshrc`.
-Use `winuxsh plugin list`, `winuxsh plugin search`, `winuxsh plugin themes`,
-and `winuxsh plugin review` for current inventory, theme sources, and
-permission checks; legacy `--zsh-native-packs` remains migration-only.
+New machine-managed config should use `[plugins]`, while user-authored
+interactive startup should use `~/.winuxshrc`. Official shell helper packs can
+ship reviewed bundle-local `init.winux` source scripts. If `~/.winuxshrc`
+exists, it is the source-plugin entry point and loads the framework directly.
+Without `~/.winuxshrc`, managed startup can still load enabled source packs
+before fallback `~/.winshrc`. Use `winuxsh plugin list`,
+`winuxsh plugin search`, `winuxsh plugin themes`, and
+`winuxsh plugin review` for current inventory, theme sources, and permission
+checks.
 
 ## What next
 
-- [Zsh Migration Guide](zsh-migration-guide.md) for detailed `.zshrc` import
 - [Plugin System Direction](../planning/plugin-system-direction.md) for the v3 plugin model
 - [Plugin System Roadmap](../planning/plugin-system-roadmap.md) for the execution sequence
 - [Oh My Winuxsh Bundle Plan](../planning/oh-my-winuxsh-bundle-plan.md) for the official bundle

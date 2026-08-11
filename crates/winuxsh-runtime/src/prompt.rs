@@ -713,12 +713,20 @@ mod tests {
         let _style = EnvGuard::unset("WINUXSH_PROMPT_CWD_STYLE");
         let _cwd = CwdGuard::enter(&project);
 
-        let prompt = WinuxshPrompt::new(Some("{cwd} {cwd_base} %~".to_string()), None, None, "default");
+        let prompt = WinuxshPrompt::new(
+            Some("{cwd} {cwd_base} %~".to_string()),
+            None,
+            None,
+            "default",
+        );
         let rendered = prompt.render_prompt_left();
 
         assert!(rendered.contains("~/repo/project"), "{rendered:?}");
         assert!(rendered.contains("project"), "{rendered:?}");
-        assert!(!rendered.contains(&home.to_string_lossy().to_string()), "{rendered:?}");
+        assert!(
+            !rendered.contains(&home.to_string_lossy().to_string()),
+            "{rendered:?}"
+        );
 
         let _ = std::fs::remove_dir_all(home);
     }
@@ -745,8 +753,12 @@ mod tests {
 
     #[test]
     fn structured_git_snapshot_is_repainted_with_theme_colours() {
-        let mut prompt =
-            WinuxshPrompt::new(Some("{git}{prompt_char}".to_string()), None, None, "default");
+        let mut prompt = WinuxshPrompt::new(
+            Some("{git}{prompt_char}".to_string()),
+            None,
+            None,
+            "default",
+        );
         prompt.set_git_status_snapshot(Some(GitRepoStatus {
             branch: Some("feature".to_string()),
             dirty: true,
@@ -874,7 +886,9 @@ mod tests {
 
     fn ansi_style_before<'a>(rendered: &'a str, needle: &str) -> &'a str {
         let idx = rendered.find(needle).expect("needle should be rendered");
-        let start = rendered[..idx].rfind("\u{1b}[").expect("style should exist");
+        let start = rendered[..idx]
+            .rfind("\u{1b}[")
+            .expect("style should exist");
         &rendered[start..idx]
     }
 

@@ -12,10 +12,9 @@ use rubash::TokenKind;
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::WinuxshCompleter;
-use crate::config::{EditorMode, MenuConfig, NativeWidgetConfig};
+use crate::config::{EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig};
 use crate::shell::Shell;
 use crate::syntax_highlighting::WinuxshSyntaxHighlighter;
-use crate::zsh_compat::NativeWidgetSuggestion;
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
@@ -129,7 +128,7 @@ fn history_exclusion_prefix(ignore_space_prefixed: bool) -> Option<String> {
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
-    native_widget_bindings: &[NativeWidgetSuggestion],
+    native_widget_bindings: &[NativeWidgetBinding],
 ) -> Box<dyn EditMode> {
     match mode {
         EditorMode::Emacs => {
@@ -192,7 +191,7 @@ fn add_native_widget_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
     config: &NativeWidgetConfig,
-    bindings: &[NativeWidgetSuggestion],
+    bindings: &[NativeWidgetBinding],
 ) {
     if !config.enabled {
         return;
@@ -208,7 +207,7 @@ fn add_native_widget_keybindings(
         if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
             continue;
         }
-        let Some(key) = binding.key.as_deref().and_then(parse_zsh_key_sequence) else {
+        let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
             continue;
         };
         let Some(event) = native_widget_event(&binding.widget) else {
@@ -301,7 +300,7 @@ fn completion_event() -> ReedlineEvent {
     ])
 }
 
-fn parse_zsh_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     if let Some(key) = parse_named_key_sequence(value) {
         return Some(key);
     }
@@ -751,7 +750,7 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 
 /// Run the interactive REPL.
 pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
-    // First-run setup wizard (Oh-My-Zsh style)
+    // First-run setup wizard.
     if crate::setup_wizard::is_first_run() {
         let _ = crate::setup_wizard::run_wizard();
     }
@@ -1139,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn native_widget_maps_standard_zle_widgets_to_reedline_events() {
+    fn native_widget_maps_standard_editor_widgets_to_reedline_events() {
         let mut keybindings = default_emacs_keybindings();
         let config = NativeWidgetConfig {
             enabled: true,
@@ -1198,12 +1197,8 @@ mod tests {
         ));
     }
 
-    fn native_widget_binding(
-        key: &str,
-        keymap: Option<&str>,
-        widget: &str,
-    ) -> NativeWidgetSuggestion {
-        NativeWidgetSuggestion {
+    fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
+        NativeWidgetBinding {
             widget: widget.to_string(),
             function: None,
             key: Some(key.to_string()),

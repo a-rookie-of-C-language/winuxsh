@@ -4,7 +4,7 @@
 //! (prompt, history, completion). All shell language semantics are delegated
 //! to rubash; this layer only adds the Windows-facing UX.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,26 +19,17 @@ use rubash::{
     Ast, Token, TokenKind,
 };
 
-use crate::completion::runtime::RuntimeCompletionPlugin;
 use crate::completion::{CompletionState, WinuxshCompleter};
 use crate::config::{
     load as load_config, AutosuggestConfig, EditorMode, HookConfig, MenuConfig, NativePluginConfig,
-    NativeWidgetConfig, SyntaxHighlightConfig,
+    NativeWidgetBinding, NativeWidgetConfig, SyntaxHighlightConfig,
 };
 use crate::git_status::GitPromptSymbols;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
-use crate::plugins::{
-    PluginKind, PluginProcessSpec, PluginRuntimeState, PluginWasmSpec, OFFICIAL_BUNDLE_NAME,
-};
+use crate::plugins::{PluginKind, PluginProcessSpec, PluginRuntimeState, OFFICIAL_BUNDLE_NAME};
 use crate::prompt::{GitPromptDecor, PromptBackend, PromptIndicators, WinuxshPrompt};
 use crate::prompt_segments::{
     SegmentId, SegmentPreset, SegmentPrompt, SegmentPromptAdapter, SegmentPromptConfig,
-};
-use crate::zsh_compat::{
-    apply_alias, apply_safe_env, completion_defs_from_report,
-    dynamic_completion_defs_from_report_with_options, git_prompt_format_from_report,
-    runtime_completion_commands_from_report, scan, DynamicCompletionRunOptions,
-    NativeWidgetSuggestion, ZshImportOptions,
 };
 
 use crate::winuxcmd;
@@ -68,12 +59,11 @@ pub struct Shell {
     pub autosuggest: AutosuggestConfig,
     pub syntax_highlighting: SyntaxHighlightConfig,
     pub native_widgets: NativeWidgetConfig,
-    pub native_widget_bindings: Vec<NativeWidgetSuggestion>,
+    pub native_widget_bindings: Vec<NativeWidgetBinding>,
     pub plugins: PluginRuntimeState,
     pub native_plugins: NativePluginConfig,
     pub hooks: HookConfig,
     pub aliases: HashMap<String, String>,
-    pub zsh_options: HashSet<String>,
     pub zoxide_last_tracked_dir: Option<String>,
     pub last_working_dir_cache_path: PathBuf,
     pub last_working_dir_restored: bool,
@@ -124,22 +114,7 @@ impl Shell {
         // 1. Load legacy/managed TOML config if present.
         let config = load_config();
 
-        // 2. Apply opt-in, known-safe zsh profile env/PATH records before
-        // winuxcmd injection and before rubash snapshots the process env.
-        let zsh_report = if config.zsh.enabled && config.zsh.auto_apply {
-            let report = scan(&ZshImportOptions::from_config(&config.zsh));
-            let summary = apply_safe_env(&report);
-            log::debug!(
-                "zsh safe env import: env={} path_entries={}",
-                summary.env_applied,
-                summary.path_entries_applied
-            );
-            Some(report)
-        } else {
-            None
-        };
-
-        // 3. WinuxCmd PATH injection (best-effort), honoring config override.
+        // 2. WinuxCmd PATH injection (best-effort), honoring config override.
         if config.winuxcmd_enabled {
             if let Err(e) = winuxcmd::ensure_on_path_with_override(config.winuxcmd_path.as_deref())
             {
@@ -157,25 +132,15 @@ impl Shell {
         }
         executor.set_env("WINUXSH_PROMPT_SYMBOL", &config.shell.prompt_symbol);
         sync_executor_path_from_process_path(&mut executor);
-        let plugin_state = crate::plugins::effective_plugin_state(&config.plugins, &config.zsh);
+        let plugin_state = crate::plugins::effective_plugin_state(&config.plugins);
         let host_plugin_state = plugin_state.clone();
         executor.set_host_external_command_handler(move |words, env| {
             execute_winuxsh_host_external_command(words, env, &host_plugin_state)
         });
 
-        // 5. Apply imported aliases first, then legacy/managed TOML aliases so
-        // explicit structured config remains authoritative when names collide.
+        // 5. Apply legacy/managed TOML aliases so explicit structured config
+        // remains authoritative when names collide.
         let mut aliases = HashMap::new();
-        if let Some(report) = &zsh_report {
-            let mut aliases_applied = 0usize;
-            for alias in &report.aliases {
-                if apply_alias(&mut executor, &alias.name, &alias.value) {
-                    aliases.insert(alias.name.clone(), alias.value.clone());
-                    aliases_applied += 1;
-                }
-            }
-            log::debug!("zsh safe alias import: aliases={}", aliases_applied);
-        }
         for (name, value) in &config.aliases {
             if apply_alias(&mut executor, name, value) {
                 aliases.insert(name.clone(), value.clone());
@@ -214,11 +179,7 @@ impl Shell {
             config.shell.prompt_style.as_deref().unwrap_or("template")
         };
         let git_prompt_symbols = GitPromptSymbols::from(&config.git_prompt);
-        let template_git_prompt_format = config
-            .shell
-            .git_prompt_format
-            .clone()
-            .or_else(|| zsh_report.as_ref().and_then(git_prompt_format_from_report));
+        let template_git_prompt_format = config.shell.git_prompt_format.clone();
         let native_prompt_configured = config.shell.prompt_format.is_some()
             || config.shell.right_prompt_format.is_some()
             || config.shell.git_prompt_format.is_some()
@@ -274,24 +235,8 @@ impl Shell {
             }
             PromptBackend::Segments(SegmentPromptAdapter::new(SegmentPrompt::new(seg_config)))
         } else {
-            // Native TOML stays authoritative; zsh prompt imports only fill
-            // empty native prompt fields.
-            let prompt_format = config.shell.prompt_format.clone().or_else(|| {
-                zsh_report.as_ref().and_then(|report| {
-                    report
-                        .prompt
-                        .as_ref()
-                        .and_then(|prompt| prompt.translated_format.clone())
-                })
-            });
-            let right_prompt_format = config.shell.right_prompt_format.clone().or_else(|| {
-                zsh_report.as_ref().and_then(|report| {
-                    report
-                        .right_prompt
-                        .as_ref()
-                        .and_then(|prompt| prompt.translated_format.clone())
-                })
-            });
+            let prompt_format = config.shell.prompt_format.clone();
+            let right_prompt_format = config.shell.right_prompt_format.clone();
             let template_prompt = WinuxshPrompt::new_with_symbol(
                 prompt_format,
                 right_prompt_format,
@@ -307,6 +252,7 @@ impl Shell {
         // 7. User-local state files.
         let home_dir = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
         normalize_executor_home_env(&mut executor, &home_dir);
+        ensure_windows_profile_env(&mut executor, &home_dir);
         set_default_winuxsh_framework_env(&mut executor, &home_dir);
         let history_path = config
             .history
@@ -321,18 +267,6 @@ impl Shell {
         );
         initial_completion_state.behavior = config.completion_behavior;
         let completion_state = Arc::new(Mutex::new(initial_completion_state));
-        let mut zsh_completion_defs = zsh_report
-            .as_ref()
-            .map(completion_defs_from_report)
-            .unwrap_or_default();
-        if let (Some(report), Some(options)) = (
-            zsh_report.as_ref(),
-            DynamicCompletionRunOptions::from_zsh_config(&config.zsh),
-        ) {
-            zsh_completion_defs.extend(dynamic_completion_defs_from_report_with_options(
-                report, &options,
-            ));
-        }
         let bundle_completion_defs = crate::plugins::plugin_completion_defs(&plugin_state);
 
         // 9. Load completion dirs from config (inline, not in thread).
@@ -341,48 +275,16 @@ impl Shell {
             s.load_completion_dirs_with_bundle_and_definitions(
                 &config.completion_dirs,
                 bundle_completion_defs,
-                zsh_completion_defs,
+                Vec::new(),
             );
-            if config.zsh.runtime_completions.enabled {
-                if let Some(report) = zsh_report.as_ref() {
-                    let runtime_commands = runtime_completion_commands_from_report(
-                        report,
-                        &config.zsh.runtime_completions.commands,
-                    );
-                    if !runtime_commands.is_empty() {
-                        s.add_plugin(Arc::new(RuntimeCompletionPlugin::new(
-                            runtime_commands,
-                            Duration::from_millis(
-                                config.zsh.runtime_completions.timeout_millis.max(1),
-                            ),
-                        )));
-                    }
-                }
-            }
         }
 
-        let mut syntax_highlighting = config.zsh.syntax_highlighting.clone();
-        if let Some(report) = &zsh_report {
-            for style in &report.highlight_styles {
-                syntax_highlighting
-                    .styles
-                    .entry(style.key.clone())
-                    .or_insert_with(|| style.value.clone());
-            }
-        }
-        let mut native_widgets = config.zsh.native_widgets.clone();
+        let mut native_widgets = config.native_widgets.clone();
         if plugin_state.has_decision("keybindings") && !plugin_state.is_enabled("keybindings") {
             native_widgets.enabled = false;
             native_widgets.presets.clear();
         }
-        let native_widget_bindings = if native_widgets.enabled && native_widgets.import_bindkeys {
-            zsh_report
-                .as_ref()
-                .map(|report| report.native_widgets.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let native_widget_bindings = Vec::new();
 
         let mut shell = Self {
             executor,
@@ -394,15 +296,14 @@ impl Shell {
             history_ignore_space_prefixed: config.history.ignore_space_prefixed,
             menu_config: config.menus,
             editor_mode: config.editor.edit_mode,
-            autosuggest: config.zsh.autosuggestions.with_env_overrides(),
-            syntax_highlighting: syntax_highlighting.with_env_overrides(),
+            autosuggest: config.autosuggest.with_env_overrides(),
+            syntax_highlighting: config.syntax_highlighting.with_env_overrides(),
             native_widgets,
             native_widget_bindings,
             plugins: plugin_state,
-            native_plugins: config.zsh.native_plugins,
+            native_plugins: config.native_plugins,
             hooks: config.hooks,
             aliases,
-            zsh_options: HashSet::new(),
             zoxide_last_tracked_dir: None,
             last_working_dir_cache_path,
             last_working_dir_restored: false,
@@ -488,8 +389,6 @@ impl Shell {
             self.execute_native_last_working_dir()?
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             code
-        } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
-            code
         } else if let Some(execution) = self.execute_host_synced_simple_ast(&ast) {
             match execution {
                 Ok(code) => code,
@@ -547,13 +446,12 @@ impl Shell {
             self.mark_gitstatus_dirty_current_dir();
         }
         self.sync_process_path_from_executor_path();
-        self.sync_zsh_options_from_executor();
         self.sync_alias_mirror_from_executor();
         Ok(code)
     }
 
     /// Execute a line as an interactive REPL command, including native hook
-    /// points that mirror common zsh lifecycle concepts.
+    /// points for prompt, command, and directory-change lifecycle behavior.
     pub fn execute_interactive_line(&mut self, line: &str) -> anyhow::Result<i32> {
         let old_pwd = self.executor.get_env("PWD").map(str::to_owned);
         self.run_preexec_hooks(line);
@@ -586,7 +484,7 @@ impl Shell {
 
     /// Restore the last working directory once for interactive REPL startup.
     ///
-    /// This mirrors Oh My Zsh's last-working-dir guard: only jump when the
+    /// This mirrors common last-working-dir guards: only jump when the
     /// shell starts in the normal home directory, so terminals opened directly
     /// inside a project are left alone.
     pub fn restore_last_working_dir_for_repl(&mut self) {
@@ -621,6 +519,7 @@ impl Shell {
     /// framework entry point. `~/.winshrc` remains a compatibility fallback.
     pub fn run_startup_rc(&mut self) {
         normalize_executor_home_env(&mut self.executor, &self.home_dir);
+        ensure_windows_profile_env(&mut self.executor, &self.home_dir);
         self.sync_gitstatus_prompt_env();
         let rc_path = self.startup_rc_path();
         let primary_rc = rc_path.as_ref().is_some_and(|path| {
@@ -756,7 +655,9 @@ impl Shell {
             stashes: self.parse_gitstatus_count("WINUXSH_GITSTATUS_STASHES"),
             conflicts: self.parse_gitstatus_count("WINUXSH_GITSTATUS_CONFLICTS"),
         };
-        if self.executor.get_env("WINUXSH_PROMPT_GIT") != Some(self.render_git_prompt_snapshot(&status).as_str()) {
+        if self.executor.get_env("WINUXSH_PROMPT_GIT")
+            != Some(self.render_git_prompt_snapshot(&status).as_str())
+        {
             return None;
         }
         Some(status)
@@ -829,7 +730,8 @@ impl Shell {
                 .set_env("WINUXSH_PLUGIN_BUNDLE_DIR", &bundle_root);
             self.executor.set_env("WINUXSH_PLUGIN_NAME", &source.pack);
             self.executor.set_env("WINUXSH_PLUGIN_DIR", &plugin_dir);
-            self.executor.set_env("WINUXSH_PLUGIN_SOURCE", &plugin_source);
+            self.executor
+                .set_env("WINUXSH_PLUGIN_SOURCE", &plugin_source);
             self.executor.set_env("WINUXSH_PLUGIN_HOOK", hook_name);
             match self.source_file_into_current_shell(&source.path) {
                 Ok(code) => {
@@ -1003,8 +905,10 @@ impl Shell {
             .set_env("WINUXSH_GITSTATUS_STASHES", &status.stashes.to_string());
         self.executor
             .set_env("WINUXSH_GITSTATUS_CONFLICTS", &status.conflicts.to_string());
-        self.executor
-            .set_env("WINUXSH_PROMPT_GIT", &self.render_git_prompt_snapshot(&status));
+        self.executor.set_env(
+            "WINUXSH_PROMPT_GIT",
+            &self.render_git_prompt_snapshot(&status),
+        );
         self.executor.set_env("WINUXSH_PROMPT_GIT_SOURCE", "native");
         self.executor.set_env("WINUXSH_PROMPT_GIT_DIRTY", "0");
     }
@@ -1140,72 +1044,6 @@ impl Shell {
         Ok(Some(code))
     }
 
-    fn execute_wasm_plugin_simple_ast(&mut self, ast: &Ast) -> anyhow::Result<Option<i32>> {
-        if ast.commands.len() != 1 {
-            return Ok(None);
-        }
-        let command = &ast.commands[0];
-        if command.words.is_empty()
-            || !command.assignments.is_empty()
-            || !command.compound_assignments.is_empty()
-            || !command.array_element_assignments.is_empty()
-            || !command.process_substitutions.is_empty()
-            || !command.command_substitutions.is_empty()
-            || !command.arithmetic_expansions.is_empty()
-            || !command.parameter_expansions.is_empty()
-            || !command.brace_expansions.is_empty()
-            || !command.extglob_patterns.is_empty()
-            || !command.pathname_patterns.is_empty()
-            || !command.redirects.is_empty()
-            || command.redirect_in.is_some()
-            || command.redirect_out.is_some()
-            || command.append.is_some()
-            || command.redirect_err.is_some()
-            || command.redirect_err_append.is_some()
-            || command.heredoc.is_some()
-            || command.here_string.is_some()
-            || command.pipe.is_some()
-            || command.background
-            || command.and_or.is_some()
-            || command.inverted
-            || command.pipeline_command.is_some()
-            || command.and_or_list.is_some()
-            || command.time_command.is_some()
-            || command.background_command.is_some()
-            || command.inverted_command.is_some()
-            || command.subshell
-            || command.subshell_end
-            || command.for_command.is_some()
-            || command.arithmetic_command.is_some()
-            || command.if_command.is_some()
-            || command.loop_command.is_some()
-            || command.conditional_command.is_some()
-            || command.subshell_command.is_some()
-            || command.case_command.is_some()
-            || command.select_command.is_some()
-            || command.function_command.is_some()
-            || command.brace_group.is_some()
-            || command.coproc_command.is_some()
-        {
-            return Ok(None);
-        }
-
-        let command_name = &command.words[0];
-        let Some((pack_name, wasm, module_path, permissions)) =
-            self.wasm_plugin_for_command(command_name)
-        else {
-            return Ok(None);
-        };
-        let code = self.run_wasm_plugin_command(
-            &pack_name,
-            &wasm,
-            &module_path,
-            &permissions,
-            &command.words[1..],
-        )?;
-        Ok(Some(code))
-    }
-
     fn process_plugin_for_command(
         &self,
         command_name: &str,
@@ -1234,30 +1072,6 @@ impl Shell {
         provider_name: &str,
     ) -> Option<(String, PluginProcessSpec, Vec<String>)> {
         process_plugin_for_provider_from_state(provider_name, &self.plugins)
-    }
-
-    fn wasm_plugin_for_command(
-        &self,
-        command_name: &str,
-    ) -> Option<(String, PluginWasmSpec, PathBuf, Vec<String>)> {
-        let inventory = crate::plugins::active_plugin_inventory();
-        let bundle_path = inventory.path?;
-        inventory.packs.into_iter().find_map(|pack| {
-            if pack.kind != PluginKind::Wasm || !self.plugins.is_enabled(&pack.name) {
-                return None;
-            }
-            if !pack
-                .exports
-                .commands
-                .iter()
-                .any(|exported| exported == command_name)
-            {
-                return None;
-            }
-            let wasm = pack.wasm?;
-            let module_path = bundle_path.join(&wasm.module);
-            Some((pack.name, wasm, module_path, pack.permissions))
-        })
     }
 
     fn process_plugins_for_hook(&self, hook_name: &str) -> Vec<(String, PluginProcessSpec)> {
@@ -1359,127 +1173,8 @@ impl Shell {
             &env,
         )
     }
-    fn run_wasm_plugin_command(
-        &mut self,
-        pack_name: &str,
-        wasm: &PluginWasmSpec,
-        module_path: &Path,
-        permissions: &[String],
-        args: &[String],
-    ) -> anyhow::Result<i32> {
-        self.sync_process_cwd_from_executor_pwd();
-        self.sync_process_path_from_executor_path();
-        let cwd = if permissions
-            .iter()
-            .any(|permission| permission == "cwd:read")
-        {
-            self.executor
-                .get_env("PWD")
-                .map(|pwd| pwd.as_bytes().to_vec())
-        } else {
-            None
-        };
-        let env_values = wasm_plugin_allowed_env_values(permissions, &self.executor);
-        let bytes = match std::fs::read(module_path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                eprintln!(
-                    "winuxsh: wasm plugin '{}' failed to read '{}': {}",
-                    pack_name,
-                    module_path.display(),
-                    err
-                );
-                return Ok(1);
-            }
-        };
-        let mut config = wasmi::Config::default();
-        config.consume_fuel(true).allow_start_fn(false);
-        let engine = wasmi::Engine::new(&config);
-        let module = match wasmi::Module::new(&engine, &bytes) {
-            Ok(module) => module,
-            Err(err) => {
-                eprintln!(
-                    "winuxsh: wasm plugin '{}' failed to compile '{}': {}",
-                    pack_name,
-                    module_path.display(),
-                    err
-                );
-                return Ok(1);
-            }
-        };
-        let mut store = wasmi::Store::new(
-            &engine,
-            WasmPluginStoreState {
-                limits: wasmi::StoreLimitsBuilder::new()
-                    .memory_size(wasm_memory_limit_bytes(wasm.max_memory_pages))
-                    .memories(1)
-                    .tables(1)
-                    .instances(1)
-                    .trap_on_grow_failure(true)
-                    .build(),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                args: args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
-                cwd,
-                env_values,
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        if let Err(err) = store.set_fuel(wasm_plugin_fuel_budget(wasm.timeout_millis)) {
-            eprintln!(
-                "winuxsh: wasm plugin '{}' failed to set fuel budget: {}",
-                pack_name, err
-            );
-            return Ok(1);
-        }
-        let mut linker = wasmi::Linker::<WasmPluginStoreState>::new(&engine);
-        if let Err(err) = define_wasm_plugin_host_imports(&mut linker) {
-            eprintln!(
-                "winuxsh: wasm plugin '{}' failed to configure host ABI: {}",
-                pack_name, err
-            );
-            return Ok(1);
-        }
-        let instance = match linker.instantiate_and_start(&mut store, &module) {
-            Ok(instance) => instance,
-            Err(err) => {
-                return Ok(wasm_plugin_error_code(
-                    pack_name,
-                    "failed to instantiate",
-                    module_path,
-                    wasm.timeout_millis,
-                    err,
-                ));
-            }
-        };
-        let main = match instance.get_typed_func::<(), i32>(&store, "winuxsh_plugin_main") {
-            Ok(main) => main,
-            Err(err) => {
-                eprintln!(
-                    "winuxsh: wasm plugin '{}' missing export 'winuxsh_plugin_main' with signature () -> i32 in '{}': {}",
-                    pack_name,
-                    module_path.display(),
-                    err
-                );
-                return Ok(1);
-            }
-        };
-        let call_result = main.call(&mut store, ());
-        flush_wasm_plugin_host_output(&mut store);
-        match call_result {
-            Ok(code) => Ok(code),
-            Err(err) => Ok(wasm_plugin_error_code(
-                pack_name,
-                "failed while running",
-                module_path,
-                wasm.timeout_millis,
-                err,
-            )),
-        }
-    }
-
     fn native_selector_enabled(&self) -> bool {
-        self.native_plugin_enabled("fzf") || self.native_plugin_enabled("zsh-interactive-cd")
+        self.native_plugin_enabled("fzf")
     }
 
     fn apply_direnv_export(&mut self) {
@@ -1983,6 +1678,7 @@ impl Shell {
                 .unwrap_or_else(|| state.current_dir.clone());
             state.env_vars = self.executor.env_vars_snapshot();
             state.aliases = self.aliases.keys().cloned().collect();
+            state.functions = self.executor.functions_snapshot().into_iter().collect();
         }
     }
 
@@ -2064,29 +1760,6 @@ impl Shell {
         }
     }
 
-    fn sync_zsh_options_from_executor(&mut self) {
-        let Some(value) = self.executor.get_env("__RUBASH_ZSH_OPTIONS") else {
-            return;
-        };
-        self.zsh_options = value
-            .split('\x1f')
-            .filter(|option| !option.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        let history_ignore_space = self.zsh_options.contains("hist_ignore_space");
-        self.history_ignore_space_prefixed = history_ignore_space;
-        self.executor.set_env(
-            "WINUXSH_HIST_IGNORE_SPACE",
-            if history_ignore_space { "1" } else { "0" },
-        );
-
-        let history_ignore_dups = self.zsh_options.contains("hist_ignore_dups");
-        self.executor.set_env(
-            "WINUXSH_HIST_IGNORE_DUPS",
-            if history_ignore_dups { "1" } else { "0" },
-        );
-    }
     /// Last exit code from rubash executor.
     pub fn last_exit_code(&self) -> i32 {
         self.executor.last_exit_code()
@@ -2127,8 +1800,6 @@ impl Shell {
 
         let execution = if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             Ok(code)
-        } else if let Some(code) = self.execute_wasm_plugin_simple_ast(&ast)? {
-            Ok(code)
         } else {
             self.execute_host_synced_simple_ast(&ast)
                 .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
@@ -2160,7 +1831,6 @@ impl Shell {
 
         self.sync_process_cwd_from_executor_pwd();
         self.sync_process_path_from_executor_path();
-        self.sync_zsh_options_from_executor();
         self.sync_alias_mirror_from_executor();
         Ok(code)
     }
@@ -3430,7 +3100,6 @@ fn is_forbidden_dotenv_key(key: &str) -> bool {
             | "PAGER"
             | "PATH"
             | "VISUAL"
-            | "ZDOTDIR"
             | "ZSH"
     )
 }
@@ -3444,6 +3113,52 @@ fn normalize_executor_home_env(executor: &mut Executor, home_dir: &Path) {
     if should_update && !home.is_empty() {
         executor.set_env("HOME", &home);
     }
+}
+
+fn ensure_windows_profile_env(executor: &mut Executor, home_dir: &Path) {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let home = shell_path_to_host_path(&home_dir.to_string_lossy()).replace('/', "\\");
+    if home.trim().is_empty() {
+        return;
+    }
+
+    set_executor_env_if_missing_or_empty(executor, "USERPROFILE", &home);
+    if let Some((drive, path)) = windows_drive_and_home_path(&home) {
+        set_executor_env_if_missing_or_empty(executor, "HOMEDRIVE", &drive);
+        set_executor_env_if_missing_or_empty(executor, "HOMEPATH", &path);
+    }
+    set_executor_env_if_missing_or_empty(
+        executor,
+        "APPDATA",
+        &format!("{}\\AppData\\Roaming", home.trim_end_matches('\\')),
+    );
+    set_executor_env_if_missing_or_empty(
+        executor,
+        "LOCALAPPDATA",
+        &format!("{}\\AppData\\Local", home.trim_end_matches('\\')),
+    );
+}
+
+fn set_executor_env_if_missing_or_empty(executor: &mut Executor, name: &str, value: &str) {
+    if executor
+        .get_env(name)
+        .map_or(true, |current| current.trim().is_empty())
+    {
+        executor.export_env(name, value);
+    }
+}
+
+fn windows_drive_and_home_path(path: &str) -> Option<(String, String)> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 3 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let drive = path[..2].to_string();
+    let rest = path[2..].trim_start_matches(['\\', '/']);
+    Some((drive, format!("\\{}", rest.replace('/', "\\"))))
 }
 
 fn set_default_winuxsh_framework_env(executor: &mut Executor, home_dir: &Path) {
@@ -3477,12 +3192,18 @@ fn app_bundled_winuxsh_framework_dir() -> Option<PathBuf> {
     is_winuxsh_framework_dir(&path).then_some(path)
 }
 
-fn first_valid_winuxsh_framework_dir(home_dir: &Path, app_bundle: Option<&Path>) -> Option<PathBuf> {
+fn first_valid_winuxsh_framework_dir(
+    home_dir: &Path,
+    app_bundle: Option<&Path>,
+) -> Option<PathBuf> {
     let mut candidates = vec![
         home_dir.join(".oh-my-winuxsh"),
         home_dir.join(".winuxsh").join("oh-my-winuxsh"),
     ];
-    let version_root = home_dir.join(".winuxsh").join("bundles").join(OFFICIAL_BUNDLE_NAME);
+    let version_root = home_dir
+        .join(".winuxsh")
+        .join("bundles")
+        .join(OFFICIAL_BUNDLE_NAME);
     if let Ok(entries) = std::fs::read_dir(version_root) {
         let mut versions = entries
             .filter_map(Result::ok)
@@ -3634,6 +3355,29 @@ fn is_windows_drive_path(value: &str) -> bool {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn apply_alias(executor: &mut Executor, name: &str, value: &str) -> bool {
+    if !is_alias_name(name) {
+        return false;
+    }
+
+    let source = format!("alias {}={}", name, shell_quote(value));
+    let tokens = tokenize(&source);
+    if tokens.is_empty() {
+        return false;
+    }
+    let ast = parse(&tokens);
+    executor.execute_ast(&ast).is_ok() && executor.last_exit_code() == 0
+}
+
+fn is_alias_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch == '-' || ch == '!' || ch.is_ascii_alphanumeric())
 }
 
 struct ProcessPluginInvocationOutput {
@@ -3833,344 +3577,6 @@ fn process_plugin_temp_path(command: &str, stream: &str) -> PathBuf {
         std::process::id(),
         nanos
     ))
-}
-
-struct WasmPluginStoreState {
-    limits: wasmi::StoreLimits,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    args: Vec<Vec<u8>>,
-    cwd: Option<Vec<u8>>,
-    env_values: HashMap<String, Vec<u8>>,
-}
-
-enum WasmPluginStream {
-    Stdout,
-    Stderr,
-}
-
-const WASM_PLUGIN_HOST_MODULE: &str = "winuxsh:plugin/host";
-const WASM_PLUGIN_MAX_HOST_WRITE_BYTES: usize = 64 * 1024;
-const WASM_PLUGIN_MAX_ARG_BYTES: usize = 64 * 1024;
-const WASM_PLUGIN_MAX_CWD_BYTES: usize = 64 * 1024;
-const WASM_PLUGIN_MAX_ENV_NAME_BYTES: usize = 256;
-const WASM_PLUGIN_MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
-
-fn define_wasm_plugin_host_imports(
-    linker: &mut wasmi::Linker<WasmPluginStoreState>,
-) -> anyhow::Result<()> {
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "stdout_write",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32, len: i32| -> i32 {
-            wasm_plugin_host_write(caller, ptr, len, WasmPluginStream::Stdout)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "stderr_write",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32, len: i32| -> i32 {
-            wasm_plugin_host_write(caller, ptr, len, WasmPluginStream::Stderr)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "arg_count",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>| -> i32 {
-            i32::try_from(caller.data().args.len()).unwrap_or(-1)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "arg_len",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32| -> i32 {
-            wasm_plugin_arg_len(caller, index)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "arg_read",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32, ptr: i32| -> i32 {
-            wasm_plugin_arg_read(caller, index, ptr)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "cwd_len",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>| -> i32 { wasm_plugin_cwd_len(caller) },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "cwd_read",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32| -> i32 {
-            wasm_plugin_cwd_read(caller, ptr)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "env_len",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>, name_ptr: i32, name_len: i32| -> i32 {
-            wasm_plugin_env_len(caller, name_ptr, name_len)
-        },
-    )?;
-    linker.func_wrap(
-        WASM_PLUGIN_HOST_MODULE,
-        "env_read",
-        |caller: wasmi::Caller<'_, WasmPluginStoreState>,
-         name_ptr: i32,
-         name_len: i32,
-         value_ptr: i32|
-         -> i32 { wasm_plugin_env_read(caller, name_ptr, name_len, value_ptr) },
-    )?;
-    Ok(())
-}
-
-fn wasm_plugin_host_write(
-    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
-    ptr: i32,
-    len: i32,
-    stream: WasmPluginStream,
-) -> i32 {
-    let (Ok(offset), Ok(length)) = (usize::try_from(ptr), usize::try_from(len)) else {
-        return -1;
-    };
-    if length > WASM_PLUGIN_MAX_HOST_WRITE_BYTES {
-        return -1;
-    }
-    let Some(memory) = caller
-        .get_export("memory")
-        .and_then(wasmi::Extern::into_memory)
-    else {
-        return -1;
-    };
-    let mut bytes = vec![0_u8; length];
-    if memory.read(&caller, offset, &mut bytes).is_err() {
-        return -1;
-    }
-    let stream_buffer = match stream {
-        WasmPluginStream::Stdout => &mut caller.data_mut().stdout,
-        WasmPluginStream::Stderr => &mut caller.data_mut().stderr,
-    };
-    if stream_buffer
-        .len()
-        .checked_add(bytes.len())
-        .map_or(true, |total| total > WASM_PLUGIN_MAX_HOST_WRITE_BYTES)
-    {
-        return -1;
-    }
-    stream_buffer.extend_from_slice(&bytes);
-    0
-}
-
-fn wasm_plugin_arg_len(caller: wasmi::Caller<'_, WasmPluginStoreState>, index: i32) -> i32 {
-    let Ok(index) = usize::try_from(index) else {
-        return -1;
-    };
-    caller
-        .data()
-        .args
-        .get(index)
-        .and_then(|arg| i32::try_from(arg.len()).ok())
-        .unwrap_or(-1)
-}
-
-fn wasm_plugin_arg_read(
-    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
-    index: i32,
-    ptr: i32,
-) -> i32 {
-    let (Ok(index), Ok(offset)) = (usize::try_from(index), usize::try_from(ptr)) else {
-        return -1;
-    };
-    let Some(bytes) = caller.data().args.get(index).cloned() else {
-        return -1;
-    };
-    if bytes.len() > WASM_PLUGIN_MAX_ARG_BYTES {
-        return -1;
-    }
-    let Some(memory) = caller
-        .get_export("memory")
-        .and_then(wasmi::Extern::into_memory)
-    else {
-        return -1;
-    };
-    if memory.write(&mut caller, offset, &bytes).is_err() {
-        return -1;
-    }
-    i32::try_from(bytes.len()).unwrap_or(-1)
-}
-
-fn wasm_plugin_cwd_len(caller: wasmi::Caller<'_, WasmPluginStoreState>) -> i32 {
-    caller
-        .data()
-        .cwd
-        .as_ref()
-        .and_then(|cwd| i32::try_from(cwd.len()).ok())
-        .unwrap_or(-1)
-}
-
-fn wasm_plugin_cwd_read(mut caller: wasmi::Caller<'_, WasmPluginStoreState>, ptr: i32) -> i32 {
-    let Ok(offset) = usize::try_from(ptr) else {
-        return -1;
-    };
-    let Some(bytes) = caller.data().cwd.clone() else {
-        return -1;
-    };
-    if bytes.len() > WASM_PLUGIN_MAX_CWD_BYTES {
-        return -1;
-    }
-    let Some(memory) = caller
-        .get_export("memory")
-        .and_then(wasmi::Extern::into_memory)
-    else {
-        return -1;
-    };
-    if memory.write(&mut caller, offset, &bytes).is_err() {
-        return -1;
-    }
-    i32::try_from(bytes.len()).unwrap_or(-1)
-}
-
-fn wasm_plugin_env_len(
-    caller: wasmi::Caller<'_, WasmPluginStoreState>,
-    name_ptr: i32,
-    name_len: i32,
-) -> i32 {
-    let Some(name) = wasm_plugin_env_name(&caller, name_ptr, name_len) else {
-        return -1;
-    };
-    caller
-        .data()
-        .env_values
-        .get(&name)
-        .filter(|value| value.len() <= WASM_PLUGIN_MAX_ENV_VALUE_BYTES)
-        .and_then(|value| i32::try_from(value.len()).ok())
-        .unwrap_or(-1)
-}
-
-fn wasm_plugin_env_read(
-    mut caller: wasmi::Caller<'_, WasmPluginStoreState>,
-    name_ptr: i32,
-    name_len: i32,
-    value_ptr: i32,
-) -> i32 {
-    let Some(name) = wasm_plugin_env_name(&caller, name_ptr, name_len) else {
-        return -1;
-    };
-    let Ok(offset) = usize::try_from(value_ptr) else {
-        return -1;
-    };
-    let Some(bytes) = caller.data().env_values.get(&name).cloned() else {
-        return -1;
-    };
-    if bytes.len() > WASM_PLUGIN_MAX_ENV_VALUE_BYTES {
-        return -1;
-    }
-    let Some(memory) = caller
-        .get_export("memory")
-        .and_then(wasmi::Extern::into_memory)
-    else {
-        return -1;
-    };
-    if memory.write(&mut caller, offset, &bytes).is_err() {
-        return -1;
-    }
-    i32::try_from(bytes.len()).unwrap_or(-1)
-}
-
-fn wasm_plugin_env_name(
-    caller: &wasmi::Caller<'_, WasmPluginStoreState>,
-    name_ptr: i32,
-    name_len: i32,
-) -> Option<String> {
-    let (Ok(offset), Ok(length)) = (usize::try_from(name_ptr), usize::try_from(name_len)) else {
-        return None;
-    };
-    if length == 0 || length > WASM_PLUGIN_MAX_ENV_NAME_BYTES {
-        return None;
-    }
-    let memory = caller
-        .get_export("memory")
-        .and_then(wasmi::Extern::into_memory)?;
-    let mut bytes = vec![0_u8; length];
-    memory.read(caller, offset, &mut bytes).ok()?;
-    let name = String::from_utf8(bytes).ok()?;
-    wasm_plugin_env_permission_name(&format!("env:read:{name}"))?;
-    Some(name)
-}
-
-fn wasm_plugin_allowed_env_values(
-    permissions: &[String],
-    executor: &Executor,
-) -> HashMap<String, Vec<u8>> {
-    let mut values = HashMap::new();
-    for permission in permissions {
-        let Some(name) = wasm_plugin_env_permission_name(permission) else {
-            continue;
-        };
-        if let Some(value) = executor.get_env(name) {
-            values.insert(name.to_string(), value.as_bytes().to_vec());
-        }
-    }
-    values
-}
-
-fn wasm_plugin_env_permission_name(permission: &str) -> Option<&str> {
-    let name = permission.strip_prefix("env:read:")?;
-    if name.is_empty()
-        || name.len() > WASM_PLUGIN_MAX_ENV_NAME_BYTES
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        return None;
-    }
-    Some(name)
-}
-
-fn flush_wasm_plugin_host_output(store: &mut wasmi::Store<WasmPluginStoreState>) {
-    let state = store.data_mut();
-    if !state.stdout.is_empty() {
-        let _ = std::io::stdout().write_all(&state.stdout);
-    }
-    if !state.stderr.is_empty() {
-        let _ = std::io::stderr().write_all(&state.stderr);
-    }
-}
-
-fn wasm_memory_limit_bytes(max_memory_pages: u32) -> usize {
-    (max_memory_pages as usize).saturating_mul(65_536)
-}
-
-fn wasm_plugin_fuel_budget(timeout_millis: u64) -> u64 {
-    timeout_millis.max(1).saturating_mul(100_000)
-}
-
-fn wasm_plugin_error_code(
-    pack_name: &str,
-    phase: &str,
-    module_path: &Path,
-    timeout_millis: u64,
-    err: wasmi::Error,
-) -> i32 {
-    if err.as_trap_code() == Some(wasmi::TrapCode::OutOfFuel) {
-        eprintln!(
-            "winuxsh: wasm plugin '{}' timed out after {}ms fuel budget while running '{}'",
-            pack_name,
-            timeout_millis,
-            module_path.display()
-        );
-        124
-    } else {
-        eprintln!(
-            "winuxsh: wasm plugin '{}' {} '{}': {}",
-            pack_name,
-            phase,
-            module_path.display(),
-            err
-        );
-        1
-    }
 }
 
 fn resolve_native_command_path(command: &str) -> Option<PathBuf> {
@@ -4789,7 +4195,6 @@ bundles = ["oh-my-winuxsh"]
             Some("primary")
         );
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
-        assert_eq!(shell.executor.get_env("WINUXSH_PROMPT_LEFT"), None);
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -4842,7 +4247,10 @@ winuxsh_run_chpwd_hooks() {
         shell.run_preexec_hooks("echo hello");
         shell.run_chpwd_hooks_if_changed("C:/old", "C:/new");
 
-        assert_eq!(shell.executor.get_env("WINUXSH_FRAMEWORK_PRECMD"), Some("0"));
+        assert_eq!(
+            shell.executor.get_env("WINUXSH_FRAMEWORK_PRECMD"),
+            Some("0")
+        );
         assert_eq!(
             shell.executor.get_env("WINUXSH_FRAMEWORK_PREEXEC"),
             Some("echo hello")
@@ -4852,66 +4260,9 @@ winuxsh_run_chpwd_hooks() {
             Some("C:/old->C:/new")
         );
         assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
-        assert_eq!(shell.executor.get_env("WINUXSH_PROMPT_GIT"), None);
+        assert_eq!(shell.executor.get_env("FRAMEWORK_ROOT_VALUE"), None);
 
         let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn zsh_setopt_lines_are_accepted_in_startup_rc() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-setopt-startup");
-        let home = temp.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(WINUXSH_RC_FILE),
-            r#"
-plugins=(
-    git
-    completion
-)
-setopt hist_ignore_dups
-setopt hist_ignore_space prompt_subst prompt_percent brace_expand tilde_expand variable_expand command_subst arith_expand monitor
-unsetopt prompt_percent
-export AFTER_SETOPT=ok
-"#,
-        )
-        .unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-        shell.home_dir = home;
-        shell.run_startup_rc();
-
-        assert_eq!(shell.executor.get_env("AFTER_SETOPT"), Some("ok"));
-        assert!(shell.history_ignore_space_prefixed);
-        assert_eq!(
-            shell.executor.get_env("WINUXSH_HIST_IGNORE_DUPS"),
-            Some("1")
-        );
-        assert!(shell.zsh_options.contains("hist_ignore_space"));
-        assert!(shell.zsh_options.contains("prompt_subst"));
-        assert!(!shell.zsh_options.contains("prompt_percent"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn zsh_setopt_no_prefix_flips_option_state() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let mut shell = test_shell(HookConfig::default());
-
-        assert_eq!(shell.execute_script("setopt hist_ignore_space").unwrap(), 0);
-        assert!(shell.history_ignore_space_prefixed);
-        assert!(shell.zsh_options.contains("hist_ignore_space"));
-
-        assert_eq!(
-            shell.execute_script("setopt no_hist_ignore_space").unwrap(),
-            0
-        );
-        assert!(!shell.history_ignore_space_prefixed);
-        assert!(!shell.zsh_options.contains("hist_ignore_space"));
     }
 
     #[test]
@@ -5224,15 +4575,13 @@ export AFTER_SETOPT=ok
         )
         .unwrap();
         let host_home = host_display_path(&home);
-        let shell_style_home = if cfg!(windows)
-            && host_home.len() >= 2
-            && host_home.as_bytes()[1] == b':'
-        {
-            let drive = (host_home.as_bytes()[0] as char).to_ascii_lowercase();
-            format!("/{drive}{}", &host_home[2..])
-        } else {
-            host_home
-        };
+        let shell_style_home =
+            if cfg!(windows) && host_home.len() >= 2 && host_home.as_bytes()[1] == b':' {
+                let drive = (host_home.as_bytes()[0] as char).to_ascii_lowercase();
+                format!("/{drive}{}", &host_home[2..])
+            } else {
+                host_home
+            };
         let _home_guard = EnvVarGuard::set_value("HOME", "");
         let _userprofile_guard = EnvVarGuard::set_value("USERPROFILE", &shell_style_home);
 
@@ -5957,7 +5306,7 @@ BACKTICK_VALUE=`whoami`
 
         let mut shell = test_shell(HookConfig::default());
         shell.native_plugins.enabled = true;
-        shell.native_plugins.presets = vec!["zsh-interactive-cd".to_string()];
+        shell.native_plugins.presets = vec!["fzf".to_string()];
 
         let parent_shell_path = shell_display_path(&parent);
         assert_eq!(
@@ -6306,7 +5655,7 @@ bundles = ["oh-my-winuxsh"]
     }
 
     #[test]
-    fn explicit_keybindings_disable_blocks_legacy_native_widgets() {
+    fn explicit_keybindings_disable_blocks_native_widgets() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("winuxsh-disable-keybindings");
@@ -6326,7 +5675,7 @@ load = []
 [plugins.keybindings]
 enabled = false
 
-[zsh.native_widgets]
+[native_widgets]
 enabled = true
 presets = ["history_substring_search"]
 import_bindkeys = true
@@ -6505,10 +5854,10 @@ enabled = true
     }
 
     #[test]
-    fn explicit_plugin_disable_overrides_legacy_zoxide_native_preset() {
+    fn explicit_plugin_disable_overrides_native_zoxide_preset() {
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("winuxsh-plugin-zoxide-disable-legacy");
+        let temp = unique_temp_dir("winuxsh-plugin-zoxide-disable-native");
         std::fs::create_dir_all(&temp).unwrap();
         let config_path = temp.join(".winshrc.toml");
         std::fs::write(
@@ -6525,7 +5874,7 @@ load = []
 [plugins.zoxide]
 enabled = false
 
-[zsh.native_plugins]
+[native_plugins]
 enabled = true
 presets = ["zoxide"]
 "#,
@@ -6747,9 +6096,7 @@ packs_dir = "packs"
         )
         .unwrap();
         std::fs::write(
-            path.join("plugins")
-                .join("prompt-core")
-                .join("plugin.toml"),
+            path.join("plugins").join("prompt-core").join("plugin.toml"),
             format!(
                 r#"name = "prompt-core"
 version = {version:?}
@@ -6891,7 +6238,6 @@ winuxsh_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             native_plugins: NativePluginConfig::default(),
             hooks,
             aliases: HashMap::new(),
-            zsh_options: HashSet::new(),
             zoxide_last_tracked_dir: None,
             last_working_dir_cache_path: PathBuf::from(".winuxsh/cache/last-working-dir"),
             last_working_dir_restored: false,

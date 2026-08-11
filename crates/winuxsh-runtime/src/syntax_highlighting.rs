@@ -1,4 +1,4 @@
-//! Native zsh-syntax-highlighting-style line highlighter.
+//! Native Winuxsh line highlighter.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
 
-use crate::autosuggest::parse_zsh_style;
+use crate::autosuggest::parse_style;
 use crate::completion::command::CommandCompleter;
 use crate::config::SyntaxHighlightConfig;
 use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
@@ -33,7 +33,7 @@ enum SyntaxKind {
 }
 
 impl SyntaxKind {
-    fn zsh_key(self) -> &'static str {
+    fn style_key(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::UnknownToken => "unknown-token",
@@ -56,8 +56,7 @@ impl SyntaxKind {
     }
 }
 
-/// Reedline highlighter that implements a conservative subset of zsh's `main`
-/// highlighter.
+/// Reedline highlighter for common shell tokens.
 pub struct WinuxshSyntaxHighlighter {
     styles: HashMap<SyntaxKind, Style>,
     commands: HashSet<String>,
@@ -76,9 +75,9 @@ impl WinuxshSyntaxHighlighter {
     {
         let mut styles = default_styles();
         for (key, value) in &config.styles {
-            if let Some(kind) = kind_from_zsh_key(key) {
+            if let Some(kind) = kind_from_style_key(key) {
                 let default = styles.get(&kind).copied().unwrap_or_default();
-                styles.insert(kind, parse_zsh_style(value, default));
+                styles.insert(kind, parse_style(value, default));
             }
         }
 
@@ -626,7 +625,7 @@ fn is_shell_escape_target(ch: char) -> bool {
         )
 }
 
-fn kind_from_zsh_key(key: &str) -> Option<SyntaxKind> {
+fn kind_from_style_key(key: &str) -> Option<SyntaxKind> {
     let key = key.to_ascii_lowercase();
     [
         SyntaxKind::Default,
@@ -648,7 +647,7 @@ fn kind_from_zsh_key(key: &str) -> Option<SyntaxKind> {
         SyntaxKind::Comment,
     ]
     .into_iter()
-    .find(|kind| kind.zsh_key() == key)
+    .find(|kind| kind.style_key() == key)
 }
 
 fn default_styles() -> HashMap<SyntaxKind, Style> {

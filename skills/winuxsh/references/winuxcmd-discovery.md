@@ -113,22 +113,18 @@ grep --help
 man grep
 ```
 
-From Codex/pwsh, keep help probes inside Winuxsh:
+Inside a native Winuxsh session, run help probes directly:
 
-```powershell
-winuxsh -c 'winuxcmd.exe wpm --help | head -80'
-winuxsh -c 'grep --help | head -40'
+```bash
+winuxcmd.exe wpm --help | head -80
+grep --help | head -40
+command -v ls
+command -v cat
 ```
 
-## Avoid Host-Shell Alias Collisions
-
-Pwsh aliases can shadow names such as `ls`, `cat`, and `man`. To inspect
-Winuxsh behavior, run the lookup inside Winuxsh:
-
-```powershell
-winuxsh -c 'command -v ls; ls -la'
-winuxsh -c 'command -v cat; cat --help | head -20'
-```
+If launching from PowerShell or another external host, use `runner.md` and keep
+the actual lookup inside Winuxsh so host aliases such as PowerShell `ls`, `cat`,
+and `man` do not affect the result.
 
 If a user intentionally disables WinuxCmd and relies on another provider,
 respect that setup for user tasks. For this repository's release-style tests,

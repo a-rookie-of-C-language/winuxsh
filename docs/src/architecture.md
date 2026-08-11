@@ -1,10 +1,10 @@
 # Winuxsh v2 Architecture
 
-> 基于 rubash + winuxcmd 的 Windows 原生 bash/zsh-like terminal
+> 基于 rubash + winuxcmd 的 Windows 原生 Bash-compatible terminal
 
 ## 项目定位
 
-winuxsh 是一个 Windows 原生、无隔离、给人和 agent 都可以直接使用的 bash/zsh-like terminal。它**不自己实现 shell 语言**，而是作为 **rubash lib**（bash 兼容引擎）的交互式前端 + **winuxcmd**（coreutils）的路由层。它的核心价值在于 Windows 原生进程/环境体验：reedline REPL、补全系统、主题系统、Ctrl+C 处理、终端集成，以及稳定的非交互式 agent 执行契约。
+winuxsh 是一个 Windows 原生、无隔离、给人和 agent 都可以直接使用的 Bash-compatible terminal。它**不自己实现 shell 语言**，而是作为 **rubash lib**（bash 兼容引擎）的交互式前端 + **winuxcmd**（coreutils）的路由层。它的核心价值在于 Windows 原生进程/环境体验：reedline REPL、补全系统、主题系统、Ctrl+C 处理、终端集成，以及稳定的非交互式 agent 执行契约。
 
 winuxsh 不是 MSYS2、Git Bash、Cygwin 或 WSL 风格的隔离环境。`~` 指向普通 Windows 用户 home（PowerShell 中的 home / `USERPROFILE` / `dirs::home_dir()`），PATH、cwd、env、stdout、stderr、exit code 都是正常 Windows 进程状态。
 
@@ -59,7 +59,7 @@ rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 - `~/.winshrc` 是兼容 fallback；只有 `~/.winuxshrc` 不存在时才作为旧用户
   rc 启动文件读取。
 - `~/.winshrc.toml` 继续作为 legacy/managed 结构化状态读取，用于 plugin CLI
-  enable/disable 记录、权限、bundle 版本、zsh migration blocks、测试隔离、补全
+  enable/disable 记录、权限、bundle 版本、legacy managed blocks、测试隔离、补全
   目录、WinuxCmd override 等机器可编辑状态。
 - 当 `~/.winuxshrc` 存在时，它是 source plugin/framework 的入口；host 不再
   同时从 TOML 默认插件状态偷偷 source 一遍官方 source plugins，避免双入口和
@@ -67,26 +67,25 @@ rubash = { git = "https://github.com/unixwin/rubash.git", branch = "master" }
 - 普通 `winuxsh -c`、脚本文件和 stdin 脚本仍保持安静确定，不加载交互式 rc 或
   source plugins。
 
-设计原则是减少人类可见入口：用户日常只改 `~/.winuxshrc`；TOML 留给兼容、
-迁移、CLI 管理和可审计机器状态。
+设计原则是减少人类可见入口：用户日常只改 `~/.winuxshrc`；TOML 留给
+CLI 管理、测试隔离和可审计机器状态。
 
 ### 5. 插件系统
 
-v3 插件系统是 Winuxsh 自己的插件系统，不是 zsh 插件兼容层。
+v3 插件系统是 Winuxsh 自己的插件系统。
 
 - `oh-my-winuxsh` 作为官方 bundled plugin distribution 随 winuxsh 发行。
-- git/docker/kubectl/npm 这类 Oh My 风格 shell helper 可以作为
+- git/docker/kubectl/npm 这类 shell helper 可以作为
   `kind = "source"` 的 first-party pack，从 bundle 内 `init.winux` 加载。
 - zoxide/direnv/dotenv/fzf 等需要更强 host 行为的能力继续由
   `kind = "builtin"` 或后续显式 effect/runtime API 承接。
-- WASM/WASI 是第三方插件的长期运行时。
+- 第三方插件当前通过受审阅的 source packs 和 process adapters 接入，权限模型由 manifest 统一声明。
 - process/IPC 插件是外部工具桥和调试后端。
-- 插件不能扩展 rubash parser/executor，也不能 source 任意 zsh、legacy
-  `.winsh`、或用户目录里发现的 rc 片段。source pack 只能加载
+- 插件不能扩展 rubash parser/executor，也不能 source 任意 legacy
+  `.winsh` 或用户目录里发现的 rc 片段。source pack 只能加载
   manifest 声明的 bundle-local `.winux` 文件，并且需要 `shell:source`
   权限。
-- Winuxsh 不支持 ZLE runtime；只允许把少量 zsh 风格键位名翻译到 reedline
-  原生编辑动作。
+- Winuxsh 编辑器能力由 reedline 和 Winuxsh 原生 keybinding presets 提供。
 
 ## 目录结构
 
@@ -161,10 +160,10 @@ winuxsh/
 
 - v2.2: rubash rewrite 稳定化、补全增强、Vi/Ctrl+R、配置一致性、用户主题
 - v2.3: Windows 原生 terminal contract、agent 友好的非交互式行为、history/prompt/completion UX
-- v2.4: zsh-like 交互体验 polish（右 prompt、提示、补全菜单、默认配置）
+- v2.4: 交互体验 polish（右 prompt、提示、补全菜单、默认配置）
 - v3: 内置 Winuxsh 插件系统；`oh-my-winuxsh` 作为官方 bundled plugin
   distribution；先用 `builtin` registry 统一现有 first-party packs，再引入
-  WASM/WASI 作为第三方插件运行时。zsh 兼容保持一次性迁移/维护层。
+  第三方插件通过 source/process runtime 接入。
 - 非目标: Linux/macOS 原生 shell 产品；rubash 可跨平台复用，但 winuxsh 产品目标是 Windows
 
 ---

@@ -16,9 +16,10 @@ Winuxsh uses three user-facing files:
   machine-editable overrides. Do not make it the normal human-authored startup
   file.
 
-`winuxsh -c`, script files, stdin script execution, agent tests, and CI must
-stay independent from all interactive rc files. Use `-C` / `--repl-command`
-when a one-shot probe specifically needs REPL startup and lifecycle hooks.
+Direct project commands, `winuxsh -c`, script files, stdin script execution,
+agent tests, and CI must stay independent from all interactive rc files. Use
+`-C` / `--repl-command` when a one-shot probe specifically needs REPL startup
+and lifecycle hooks.
 
 ## Minimal ~/.winuxshrc
 
@@ -119,16 +120,17 @@ alias gs='git status'
 mkcd() { mkdir -p "$1" && cd "$1"; }
 ```
 
-Do not rely on either file for `winuxsh -c` or CI. If command-mode behavior
+Do not rely on either file for tests, CI, or `winuxsh -c`. If command behavior
 depends on an environment variable, pass it explicitly in the command or test
 environment.
 
 ## Test Isolation
 
-Use `WINUXSH_CONFIG` to point probes at a temporary `.winshrc.toml`:
+Use `WINUXSH_CONFIG` to point child-process probes at a temporary
+`.winshrc.toml`:
 
 ```bash
-WINUXSH_CONFIG=C:/Temp/winuxsh-test/.winshrc.toml winuxsh -c 'printf "%s\n" "$PWD"'
+WINUXSH_CONFIG=C:/Temp/winuxsh-test/.winshrc.toml target/debug/winuxsh.exe -c 'printf "%s\n" "$PWD"'
 ```
 
 Plugin and bundle tests may also use:

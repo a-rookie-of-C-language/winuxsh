@@ -8,13 +8,6 @@
 //!   winuxsh --help | -h      → usage
 //!   winuxsh --version        → version (winuxsh / rubash / winuxcmd)
 //!   winuxsh setup            → re-run the interactive prompt/plugin wizard
-//!   winuxsh --zsh-compat-report      → scan zsh config and print report
-//!   winuxsh --zsh-compat-report-json → scan zsh config and print JSON report
-//!   winuxsh --zsh-compat-import-plan → print a reviewable .winshrc.toml patch
-//!   winuxsh --zsh-compat-import-apply → write the import patch with a backup
-//!   winuxsh --zsh-compat-import-status → inspect import block and backups
-//!   winuxsh --zsh-compat-import-rollback-plan → print restore command
-//!   winuxsh --zsh-compat-doctor → summarize zsh compatibility health
 //!   winuxsh plugin list [--json] → list official Winuxsh plugins
 //!   winuxsh plugin info <name> [--json] → inspect one official plugin
 //!   winuxsh plugin search [query] [--json] → discover official plugins
@@ -29,9 +22,6 @@
 //!   winuxsh plugin install <name> → install an official plugin
 //!   winuxsh plugin uninstall <name> → uninstall an official plugin
 //!   winuxsh plugin enable <name> → write managed plugin TOML
-//!   winuxsh --zsh-native-packs → list legacy zsh migration pack mappings
-//!   winuxsh --zsh-native-packs-json → list legacy zsh migration mappings as JSON
-//!   winuxsh --zsh-profile-plan <profile> → print a native zsh profile TOML plan
 //!   winuxsh --completion-probe "line" [cursor] → print REPL completions
 //!   winuxsh --install-wt-profile → add/update the Windows Terminal profile
 //!   winuxsh --self-update → download and run the latest installer
@@ -87,46 +77,6 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--gitstatus-daemon" => winuxsh_runtime::git_status::run_daemon_stdio(),
-        "--zsh-compat-report" => {
-            print_zsh_compat_report(false)?;
-            Ok(())
-        }
-        "--zsh-compat-report-json" => {
-            print_zsh_compat_report(true)?;
-            Ok(())
-        }
-        "--zsh-compat-import-plan" => {
-            print_zsh_compat_import_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-import-apply" => {
-            apply_zsh_compat_import_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-import-status" => {
-            print_zsh_compat_import_status()?;
-            Ok(())
-        }
-        "--zsh-compat-import-rollback-plan" => {
-            print_zsh_compat_import_rollback_plan()?;
-            Ok(())
-        }
-        "--zsh-compat-doctor" => {
-            print_zsh_compat_doctor()?;
-            Ok(())
-        }
-        "--zsh-native-packs" => {
-            print_zsh_native_packs(false)?;
-            Ok(())
-        }
-        "--zsh-native-packs-json" => {
-            print_zsh_native_packs(true)?;
-            Ok(())
-        }
-        "--zsh-profile-plan" => {
-            print_zsh_profile_plan(args)?;
-            Ok(())
-        }
         "--completion-probe" => {
             print_completion_probe(args)?;
             Ok(())
@@ -336,17 +286,7 @@ fn print_usage() {
     println!("  plugin enable <name>      Write managed plugin TOML");
     println!("  plugin disable <name>     Write managed plugin TOML");
     println!();
-    println!("  --zsh-compat-report       Scan ~/.zshrc, show safe-import report");
-    println!("  --zsh-compat-report-json  Same, as JSON");
-    println!("  --zsh-compat-import-plan  Generate a .winshrc.toml import patch");
-    println!("  --zsh-compat-import-apply Apply the patch (with backup)");
-    println!("  --zsh-compat-import-status Inspect import block and backup");
-    println!("  --zsh-compat-import-rollback-plan  Show restore command");
-    println!("  --zsh-compat-doctor       Legacy zsh migration health summary");
     println!();
-    println!("  --zsh-native-packs        Legacy: list zsh migration pack mappings");
-    println!("  --zsh-native-packs-json   Legacy: same, as JSON");
-    println!("  --zsh-profile-plan <profile>  Print TOML for a profile");
     println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
@@ -414,7 +354,7 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
     let json = parse_plugin_json_flag(args)?;
     let config = winuxsh_runtime::config::load();
-    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins, &config.zsh);
+    let report = winuxsh_runtime::plugins::plugin_doctor_report(&config.plugins);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -429,8 +369,7 @@ fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
     };
     let json = parse_plugin_json_flag(&args[1..])?;
     let config = winuxsh_runtime::config::load();
-    let review =
-        winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins, &config.zsh)?;
+    let review = winuxsh_runtime::plugins::plugin_permission_review(name, &config.plugins)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&review)?);
     } else {
@@ -951,174 +890,6 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);
     }
-    Ok(())
-}
-
-fn print_zsh_compat_import_plan() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report)
-    );
-    Ok(())
-}
-
-fn apply_zsh_compat_import_plan() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let summary = winuxsh_runtime::zsh_compat::apply_import_plan_to_config(&config_path, &plan)?;
-
-    println!(
-        "Wrote zsh compatibility import block to {}",
-        summary.config_path.display()
-    );
-    if summary.replaced_existing_block {
-        println!("Replaced the previous winuxsh-managed zsh import block");
-    } else {
-        println!("Added a new winuxsh-managed zsh import block");
-    }
-    if let Some(backup_path) = summary.backup_path {
-        println!("Backup: {}", backup_path.display());
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_import_status() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let status = winuxsh_runtime::zsh_compat::inspect_import_config_status(&config_path, &plan)?;
-
-    println!("Config: {}", status.config_path.display());
-    println!("Exists: {}", yes_no(status.config_exists));
-    println!(
-        "Managed block: {}",
-        zsh_import_block_state_label(status.block_state)
-    );
-    if status.toml_valid {
-        println!("TOML: valid");
-    } else {
-        println!(
-            "TOML: invalid ({})",
-            status.toml_error.as_deref().unwrap_or("unknown error")
-        );
-    }
-    println!(
-        "Next apply: {}",
-        zsh_import_apply_readiness_label(status.apply_readiness)
-    );
-    if let Some(error) = status.apply_error {
-        println!("Apply detail: {}", error);
-    }
-    println!("Backups: {}", status.backup_paths.len());
-    if let Some(path) = status.backup_paths.last() {
-        println!("Latest backup: {}", path.display());
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_import_rollback_plan() -> anyhow::Result<()> {
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let plan = winuxsh_runtime::zsh_compat::inspect_import_rollback_plan(&config_path)?;
-
-    println!("Config: {}", plan.config_path.display());
-    println!("Backups: {}", plan.backup_paths.len());
-    if let Some(path) = plan.latest_backup_path {
-        println!("Latest backup: {}", path.display());
-    } else {
-        println!("Latest backup: none");
-    }
-    if let Some(command) = plan.restore_command {
-        println!("Restore command:");
-        println!("{}", command);
-    } else {
-        println!("Restore command: unavailable (no backups found)");
-    }
-    Ok(())
-}
-
-fn print_zsh_compat_doctor() -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    let plan = winuxsh_runtime::zsh_compat::import_plan_toml(&options, &report);
-    let config_path = winuxsh_runtime::config::default_config_path();
-    let status = winuxsh_runtime::zsh_compat::inspect_import_config_status(&config_path, &plan)?;
-    let rollback = winuxsh_runtime::zsh_compat::inspect_import_rollback_plan(&config_path)?;
-
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::zsh_compat_doctor_text(&report, &status, &rollback)
-    );
-    Ok(())
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
-}
-
-fn zsh_import_block_state_label(
-    state: winuxsh_runtime::zsh_compat::ZshImportBlockState,
-) -> &'static str {
-    match state {
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Missing => "missing",
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Present => "present",
-        winuxsh_runtime::zsh_compat::ZshImportBlockState::Malformed => "malformed",
-    }
-}
-
-fn zsh_import_apply_readiness_label(
-    readiness: winuxsh_runtime::zsh_compat::ZshImportApplyReadiness,
-) -> &'static str {
-    match readiness {
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::AddNewBlock => "add new block",
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::ReplaceExistingBlock => {
-            "replace existing block"
-        }
-        winuxsh_runtime::zsh_compat::ZshImportApplyReadiness::Blocked => "blocked",
-    }
-}
-
-fn print_zsh_compat_report(json: bool) -> anyhow::Result<()> {
-    let config = winuxsh_runtime::config::load();
-    let options = winuxsh_runtime::zsh_compat::ZshImportOptions::for_report(&config.zsh);
-    let report = winuxsh_runtime::zsh_compat::scan(&options);
-    if json {
-        println!("{}", report.to_json_pretty()?);
-    } else {
-        println!("{}", report.to_human());
-    }
-    Ok(())
-}
-
-fn print_zsh_native_packs(json: bool) -> anyhow::Result<()> {
-    if json {
-        println!("{}", winuxsh_runtime::zsh_compat::native_zsh_packs_json()?);
-    } else {
-        println!("{}", winuxsh_runtime::zsh_compat::native_zsh_packs_text());
-    }
-    Ok(())
-}
-
-fn print_zsh_profile_plan(args: &[String]) -> anyhow::Result<()> {
-    let Some(profile) = args.get(2) else {
-        anyhow::bail!("--zsh-profile-plan requires a profile: agent or zsh-lite");
-    };
-    println!(
-        "{}",
-        winuxsh_runtime::zsh_compat::zsh_profile_plan_toml_for_name(profile)?
-    );
     Ok(())
 }
 

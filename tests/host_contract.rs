@@ -161,7 +161,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
     assert_success(&output, "script-file .winshrc isolation");
@@ -171,7 +170,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,7 +212,7 @@ fn temporary_assignment_reaches_nested_winuxsh_child() {
 }
 
 #[test]
-fn zsh_setopt_is_supported_when_sourcing_startup_rc() {
+fn rubash_setopt_is_visible_when_sourcing_startup_rc() {
     let temp = unique_temp_dir("winuxsh-host-setopt");
     let home = temp.join("home");
     let start = temp.join("start");
@@ -614,7 +612,6 @@ fn piped_stdin_without_args_runs_plain_script_surface() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -652,7 +649,6 @@ fn piped_stdin_without_args_runs_multiline_compound_block() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -685,7 +681,6 @@ fn piped_stdin_without_args_runs_heredoc_as_one_chunk() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -725,7 +720,6 @@ fn piped_stdin_child_script_reads_unconsumed_parent_input() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("THIS_SH", shell_path(&winuxsh_binary()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -789,7 +783,6 @@ fn command_mode_pipeline_first_stage_reads_host_stdin() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -836,7 +829,6 @@ fn script_file_args_populate_positional_parameters() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
 
@@ -873,7 +865,6 @@ fn slash_drive_script_file_argument_executes_script() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh slash-drive script: {err}"));
 
@@ -974,7 +965,6 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1008,8 +998,7 @@ fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
         .arg(script)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("ZDOTDIR", home);
+        .env("USERPROFILE", home);
 
     for (key, value) in extra_env {
         command.env(key, value);
