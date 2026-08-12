@@ -201,19 +201,11 @@ fn prepend_exe_dir_to_path(exe: &Path) -> Result<PathBuf> {
     let current_path = std::env::var("PATH").unwrap_or_default();
     let dir_str = dir.to_string_lossy().to_string();
 
-    // Skip if already at the front (idempotent).
-    if current_path.starts_with(&dir_str) {
+    if path_starts_with_dir(&current_path, &dir_str) {
         return Ok(dir);
     }
 
-    // Avoid duplicating the entry elsewhere in PATH.
-    let mut parts: Vec<String> = current_path
-        .split(if cfg!(windows) { ';' } else { ':' })
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty() && s != &dir_str)
-        .collect();
-    parts.insert(0, dir_str.clone());
-    let new_path = parts.join(if cfg!(windows) { ";" } else { ":" });
+    let new_path = path_with_dir_prepended(&current_path, &dir_str);
     // On Windows, `std::env::set_var` normalizes "PATH" to "Path".
     // Rubash internally uses `env_vars.get("PATH")` (all caps), which
     // is case-sensitive in the HashMap. Force the all-caps entry so rubash
@@ -224,6 +216,50 @@ fn prepend_exe_dir_to_path(exe: &Path) -> Result<PathBuf> {
     std::env::set_var("PATH", &new_path);
     log::debug!("winuxcmd PATH injected: {}", dir_str);
     Ok(dir)
+}
+
+fn path_with_dir_prepended(current_path: &str, dir: &str) -> String {
+    let mut parts: Vec<String> = current_path
+        .split(path_list_separator())
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            (!entry.is_empty() && !path_entries_equal(entry, dir)).then(|| entry.to_string())
+        })
+        .collect();
+    parts.insert(0, dir.to_string());
+    parts.join(&path_list_separator().to_string())
+}
+
+fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
+    current_path
+        .split(path_list_separator())
+        .next()
+        .map(|entry| path_entries_equal(entry.trim(), dir))
+        .unwrap_or(false)
+}
+
+fn path_entries_equal(left: &str, right: &str) -> bool {
+    comparable_path_entry(left) == comparable_path_entry(right)
+}
+
+fn comparable_path_entry(value: &str) -> String {
+    let mut normalized = value.trim_matches('"').replace('\\', "/");
+    while normalized.len() > 3 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn path_list_separator() -> char {
+    if cfg!(windows) {
+        ';'
+    } else {
+        ':'
+    }
 }
 
 fn auto_activate_bundled_winuxcmd(exe: &Path) {
@@ -495,6 +531,61 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(exe_dir);
         let _ = std::fs::remove_dir_all(path_dir);
+    }
+
+    #[test]
+    fn path_front_check_compares_complete_entries() {
+        let sep = path_list_separator();
+        let current = format!("C:/Tools/WinuxCmdExtra{sep}C:/Other");
+
+        assert!(!path_starts_with_dir(&current, "C:/Tools/WinuxCmd"));
+    }
+
+    #[test]
+    fn path_front_check_does_not_skip_leading_empty_entry() {
+        let sep = path_list_separator();
+        let current = format!("{sep}C:/Tools/WinuxCmd{sep}C:/Other");
+
+        assert!(!path_starts_with_dir(&current, "C:/Tools/WinuxCmd"));
+        assert_eq!(
+            path_with_dir_prepended(&current, "C:/Tools/WinuxCmd"),
+            format!("C:/Tools/WinuxCmd{sep}C:/Other")
+        );
+    }
+
+    #[test]
+    fn path_prepend_removes_duplicate_entries() {
+        let sep = path_list_separator();
+        let current = format!("C:/Other{sep}C:/Tools/WinuxCmd{sep}D:/Bin");
+        let expected = format!("C:/Tools/WinuxCmd{sep}C:/Other{sep}D:/Bin");
+
+        assert_eq!(
+            path_with_dir_prepended(&current, "C:/Tools/WinuxCmd"),
+            expected
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_prepend_deduplicates_windows_equivalent_entries() {
+        let current = "C:/Other;c:\\tools\\winuxcmd\\;D:/Bin";
+
+        assert_eq!(
+            path_with_dir_prepended(current, "C:/Tools/WinuxCmd"),
+            "C:/Tools/WinuxCmd;C:/Other;D:/Bin"
+        );
+        assert!(path_starts_with_dir(
+            "c:\\tools\\winuxcmd\\;C:/Other",
+            "C:/Tools/WinuxCmd"
+        ));
+    }
+
+    #[test]
+    fn path_prepend_handles_empty_path() {
+        assert_eq!(
+            path_with_dir_prepended("", "C:/Tools/WinuxCmd"),
+            "C:/Tools/WinuxCmd"
+        );
     }
 
     #[test]
