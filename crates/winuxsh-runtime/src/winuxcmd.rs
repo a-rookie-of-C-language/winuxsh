@@ -233,7 +233,7 @@ fn path_with_dir_prepended(current_path: &str, dir: &str) -> String {
 fn path_starts_with_dir(current_path: &str, dir: &str) -> bool {
     current_path
         .split(path_list_separator())
-        .find(|entry| !entry.trim().is_empty())
+        .next()
         .map(|entry| path_entries_equal(entry.trim(), dir))
         .unwrap_or(false)
 }
@@ -539,6 +539,18 @@ mod tests {
         let current = format!("C:/Tools/WinuxCmdExtra{sep}C:/Other");
 
         assert!(!path_starts_with_dir(&current, "C:/Tools/WinuxCmd"));
+    }
+
+    #[test]
+    fn path_front_check_does_not_skip_leading_empty_entry() {
+        let sep = path_list_separator();
+        let current = format!("{sep}C:/Tools/WinuxCmd{sep}C:/Other");
+
+        assert!(!path_starts_with_dir(&current, "C:/Tools/WinuxCmd"));
+        assert_eq!(
+            path_with_dir_prepended(&current, "C:/Tools/WinuxCmd"),
+            format!("C:/Tools/WinuxCmd{sep}C:/Other")
+        );
     }
 
     #[test]
