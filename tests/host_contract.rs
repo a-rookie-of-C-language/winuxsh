@@ -161,7 +161,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh script file: {err}"));
     assert_success(&output, "script-file .winshrc isolation");
@@ -171,7 +170,6 @@ echo SHOULD_NOT_PRINT
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,7 +212,7 @@ fn temporary_assignment_reaches_nested_winuxsh_child() {
 }
 
 #[test]
-fn zsh_setopt_is_supported_when_sourcing_startup_rc() {
+fn rubash_setopt_is_visible_when_sourcing_startup_rc() {
     let temp = unique_temp_dir("winuxsh-host-setopt");
     let home = temp.join("home");
     let start = temp.join("start");
@@ -392,7 +390,7 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
 }
 
 #[test]
-fn redirected_recursive_cp_uses_winuxsh_native_cp_not_rubash_shortcut() {
+fn redirected_recursive_cp_uses_path_command_not_winuxsh_native_builtin() {
     if !cfg!(windows) {
         return;
     }
@@ -415,13 +413,13 @@ fn redirected_recursive_cp_uses_winuxsh_native_cp_not_rubash_shortcut() {
     );
     let output = run_winuxsh(&script, &start, &home, &[]);
 
-    assert_success(&output, "redirected recursive cp native dispatch");
+    assert_success(&output, "redirected recursive cp path dispatch");
     let stdout = stdout_lines(&output);
     assert!(
         stdout
             .first()
-            .is_some_and(|line| line.starts_with("cp (winuxsh native) ")),
-        "cp --version should come from winuxsh native cp, got {stdout:?}"
+            .is_some_and(|line| line.starts_with("cp (") && !line.contains("winuxsh native")),
+        "cp --version should come from PATH, not winuxsh native cp, got {stdout:?}"
     );
     assert_eq!(
         std::fs::read_to_string(dest.join("sub").join("file.txt")).unwrap(),
@@ -490,7 +488,7 @@ fn sourced_rc_keeps_winuxcmd_visible_to_windows_children() {
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     let output = run_winuxsh(
-        "source ~/.winshrc; where.exe ls; where.exe winuxcmd",
+        "source ~/.winshrc; cmd.exe /D /C set PATH",
         &start,
         &home,
         &[
@@ -501,10 +499,23 @@ fn sourced_rc_keeps_winuxcmd_visible_to_windows_children() {
     );
 
     assert_success(&output, "source rc keeps winuxcmd on child PATH");
-    let stdout = normalize_text(&output.stdout).replace('\\', "/");
-    assert!(stdout.contains("/winuxcmd/ls.exe"), "stdout was {stdout:?}");
+    let stdout = normalize_text(&output.stdout);
+    let normalized_stdout = stdout.replace('\\', "/").to_ascii_lowercase();
+    let expected_winuxcmd_dirs = [
+        native_path(&bin).replace('\\', "/").to_ascii_lowercase(),
+        slash_drive_path(&bin)
+            .unwrap_or_else(|| shell_path(&bin))
+            .to_ascii_lowercase(),
+    ];
     assert!(
-        stdout.contains("/winuxcmd/winuxcmd.exe"),
+        expected_winuxcmd_dirs
+            .iter()
+            .any(|path| normalized_stdout.contains(path)),
+        "child PATH did not contain winuxcmd dir {:?}: {stdout:?}",
+        expected_winuxcmd_dirs
+    );
+    assert!(
+        normalized_stdout.contains("c:/does-not-exist-winuxsh-test"),
         "stdout was {stdout:?}"
     );
 
@@ -601,7 +612,6 @@ fn piped_stdin_without_args_runs_plain_script_surface() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -639,7 +649,6 @@ fn piped_stdin_without_args_runs_multiline_compound_block() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -672,7 +681,6 @@ fn piped_stdin_without_args_runs_heredoc_as_one_chunk() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -712,7 +720,6 @@ fn piped_stdin_child_script_reads_unconsumed_parent_input() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .env("THIS_SH", shell_path(&winuxsh_binary()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -776,7 +783,6 @@ fn command_mode_pipeline_first_stage_reads_host_stdin() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -823,7 +829,6 @@ fn script_file_args_populate_positional_parameters() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"));
 
@@ -860,7 +865,6 @@ fn slash_drive_script_file_argument_executes_script() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .output()
         .unwrap_or_else(|err| panic!("spawn winuxsh slash-drive script: {err}"));
 
@@ -961,7 +965,6 @@ fn closed_stdout_pipe_does_not_print_broken_pipe_error() {
         .current_dir(&start)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
-        .env("ZDOTDIR", &home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -995,8 +998,7 @@ fn run_winuxsh(script: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String
         .arg(script)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("ZDOTDIR", home);
+        .env("USERPROFILE", home);
 
     for (key, value) in extra_env {
         command.env(key, value);
@@ -1056,7 +1058,20 @@ fn comparable_path(value: &str) -> String {
         let drive = value[0..1].to_ascii_uppercase();
         value.replace_range(0..1, &drive);
     }
-    value.trim_end_matches('/').to_string()
+    let normalized = value.trim_end_matches('/').to_string();
+    // cmd.exe may report 8.3 short-name paths (e.g. RUNNER~1); expand them
+    // through the filesystem so both sides compare as long names.
+    if cfg!(windows) {
+        if let Ok(expanded) = std::fs::canonicalize(normalized.replace('/', "\\")) {
+            let mut expanded = expanded.to_string_lossy().replace('\\', "/");
+            if expanded.len() >= 2 && expanded.as_bytes()[1] == b':' {
+                let drive = expanded[0..1].to_ascii_uppercase();
+                expanded.replace_range(0..1, &drive);
+            }
+            return expanded.trim_end_matches('/').to_string();
+        }
+    }
+    normalized
 }
 
 fn shell_path(path: &Path) -> String {

@@ -1,4 +1,4 @@
-//! Configuration loading from `.winshrc.toml`
+//! Legacy/managed TOML configuration loading from `.winshrc.toml`
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::completion::{CompletionBehavior, CompletionMatchMode};
+use crate::path_utils::{shell_home_dir, shell_path_to_host_path};
 use crate::plugins::OFFICIAL_BUNDLE_NAME;
 use crate::prompt::PromptIndicators;
 
-/// Shell configuration, loaded from `~/.winshrc.toml`.
+/// Shell configuration, loaded from legacy/managed TOML when present.
 #[derive(Debug, Clone, Default)]
 pub struct ShellConfig {
     /// Prompt indicator symbol (e.g. "%", "\$", "\u276f", "\u3bb")
@@ -108,91 +109,6 @@ impl Default for MenuConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZshCompatLevel {
-    Safe,
-    Warn,
-    Experimental,
-}
-
-impl Default for ZshCompatLevel {
-    fn default() -> Self {
-        Self::Safe
-    }
-}
-
-impl ZshCompatLevel {
-    fn from_config_value(value: &str) -> Self {
-        match value.to_ascii_lowercase().as_str() {
-            "safe" => Self::Safe,
-            "warn" => Self::Warn,
-            "experimental" => Self::Experimental,
-            other => {
-                log::warn!("Unknown zsh compat_level '{}', falling back to safe", other);
-                Self::Safe
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ZshConfig {
-    pub enabled: bool,
-    pub zdotdir: Option<PathBuf>,
-    pub import_zshrc: bool,
-    pub import_oh_my_zsh: bool,
-    pub plugins: Vec<String>,
-    pub compat_level: ZshCompatLevel,
-    pub auto_apply: bool,
-    pub autosuggestions: AutosuggestConfig,
-    pub syntax_highlighting: SyntaxHighlightConfig,
-    pub dynamic_completions: DynamicCompletionConfig,
-    pub runtime_completions: RuntimeCompletionConfig,
-    pub native_widgets: NativeWidgetConfig,
-    pub native_plugins: NativePluginConfig,
-}
-
-impl Default for ZshConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            zdotdir: None,
-            import_zshrc: true,
-            import_oh_my_zsh: true,
-            plugins: Vec::new(),
-            compat_level: ZshCompatLevel::Safe,
-            auto_apply: false,
-            autosuggestions: AutosuggestConfig::default(),
-            syntax_highlighting: SyntaxHighlightConfig::default(),
-            dynamic_completions: DynamicCompletionConfig::default(),
-            runtime_completions: RuntimeCompletionConfig::default(),
-            native_widgets: NativeWidgetConfig::default(),
-            native_plugins: NativePluginConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DynamicCompletionConfig {
-    pub enabled: bool,
-    pub commands: Vec<String>,
-    pub timeout_millis: u64,
-    pub cache_ttl_secs: Option<u64>,
-    pub cache_dir: Option<PathBuf>,
-}
-
-impl Default for DynamicCompletionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            commands: Vec::new(),
-            timeout_millis: 1500,
-            cache_ttl_secs: Some(86400),
-            cache_dir: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCompletionConfig {
     pub enabled: bool,
@@ -225,6 +141,17 @@ impl Default for NativeWidgetConfig {
             import_bindkeys: true,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeWidgetBinding {
+    pub widget: String,
+    pub function: Option<String>,
+    pub key: Option<String>,
+    pub keymap: Option<String>,
+    pub source_file: Option<PathBuf>,
+    pub line: Option<usize>,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,22 +215,22 @@ impl Default for AutosuggestConfig {
 
 impl AutosuggestConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(value) = std::env::var("ZSH_AUTOSUGGEST_STRATEGY") {
+        if let Ok(value) = std::env::var("WINUXSH_AUTOSUGGEST_STRATEGY") {
             let strategies = parse_autosuggest_strategy_value(&value);
             if !strategies.is_empty() {
                 self.strategies = strategies;
             }
         }
-        if let Ok(value) = std::env::var("ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE") {
+        if let Ok(value) = std::env::var("WINUXSH_AUTOSUGGEST_HIGHLIGHT_STYLE") {
             if !value.trim().is_empty() {
                 self.highlight_style = value;
             }
         }
-        if let Ok(value) = std::env::var("ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE") {
+        if let Ok(value) = std::env::var("WINUXSH_AUTOSUGGEST_BUFFER_MAX_SIZE") {
             match value.trim().parse::<usize>() {
                 Ok(max_size) => self.buffer_max_size = Some(max_size),
                 Err(err) => log::warn!(
-                    "Invalid ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE '{}': {}",
+                    "Invalid WINUXSH_AUTOSUGGEST_BUFFER_MAX_SIZE '{}': {}",
                     value,
                     err
                 ),
@@ -358,20 +285,20 @@ impl Default for SyntaxHighlightConfig {
 
 impl SyntaxHighlightConfig {
     pub fn with_env_overrides(mut self) -> Self {
-        if let Ok(value) = std::env::var("ZSH_HIGHLIGHT_HIGHLIGHTERS") {
-            let highlighters = parse_zsh_arrayish_value(&value);
+        if let Ok(value) = std::env::var("WINUXSH_HIGHLIGHT_HIGHLIGHTERS") {
+            let highlighters = parse_arrayish_value(&value);
             if !highlighters.is_empty() {
                 self.highlighters = highlighters;
             }
         }
-        if let Ok(value) = std::env::var("ZSH_HIGHLIGHT_MAXLENGTH") {
+        if let Ok(value) = std::env::var("WINUXSH_HIGHLIGHT_MAXLENGTH") {
             match value.trim().parse::<usize>() {
                 Ok(max_length) => self.max_length = Some(max_length),
-                Err(err) => log::warn!("Invalid ZSH_HIGHLIGHT_MAXLENGTH '{}': {}", value, err),
+                Err(err) => log::warn!("Invalid WINUXSH_HIGHLIGHT_MAXLENGTH '{}': {}", value, err),
             }
         }
-        if let Ok(value) = std::env::var("ZSH_HIGHLIGHT_STYLES") {
-            for (key, value) in parse_zsh_style_map_value(&value) {
+        if let Ok(value) = std::env::var("WINUXSH_HIGHLIGHT_STYLES") {
+            for (key, value) in parse_style_map_value(&value) {
                 self.styles.insert(key, value);
             }
         }
@@ -387,7 +314,7 @@ impl SyntaxHighlightConfig {
     }
 }
 
-fn parse_zsh_arrayish_value(value: &str) -> Vec<String> {
+fn parse_arrayish_value(value: &str) -> Vec<String> {
     value
         .trim()
         .trim_start_matches('(')
@@ -403,7 +330,7 @@ fn parse_zsh_arrayish_value(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_zsh_style_map_value(value: &str) -> Vec<(String, String)> {
+fn parse_style_map_value(value: &str) -> Vec<(String, String)> {
     value
         .split(';')
         .filter_map(|entry| {
@@ -431,7 +358,11 @@ struct WinshrcToml {
     winuxcmd: Option<WinuxCmdToml>,
     hooks: Option<HooksToml>,
     plugins: Option<PluginsToml>,
-    zsh: Option<ZshToml>,
+    autosuggestions: Option<AutosuggestToml>,
+    syntax_highlighting: Option<SyntaxHighlightToml>,
+    runtime_completions: Option<RuntimeCompletionToml>,
+    native_widgets: Option<NativeWidgetToml>,
+    native_plugins: Option<NativePluginToml>,
     git_prompt: Option<GitPromptToml>,
 }
 
@@ -500,23 +431,6 @@ struct HooksToml {
 }
 
 #[derive(Debug, Deserialize)]
-struct ZshToml {
-    enabled: Option<bool>,
-    zdotdir: Option<String>,
-    import_zshrc: Option<bool>,
-    import_oh_my_zsh: Option<bool>,
-    plugins: Option<Vec<String>>,
-    compat_level: Option<String>,
-    auto_apply: Option<bool>,
-    autosuggestions: Option<AutosuggestToml>,
-    syntax_highlighting: Option<SyntaxHighlightToml>,
-    dynamic_completions: Option<DynamicCompletionToml>,
-    runtime_completions: Option<RuntimeCompletionToml>,
-    native_widgets: Option<NativeWidgetToml>,
-    native_plugins: Option<NativePluginToml>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AutosuggestToml {
     enabled: Option<bool>,
     strategy: Option<Vec<String>>,
@@ -530,15 +444,6 @@ struct SyntaxHighlightToml {
     highlighters: Option<Vec<String>>,
     max_length: Option<usize>,
     styles: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DynamicCompletionToml {
-    enabled: Option<bool>,
-    commands: Option<Vec<String>>,
-    timeout_millis: Option<u64>,
-    cache_ttl_secs: Option<u64>,
-    cache_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -597,7 +502,7 @@ pub struct GitPromptConfig {
 impl Default for GitPromptConfig {
     fn default() -> Self {
         Self {
-            // oh-my-zsh style: boolean symbols (no count by default).
+            // Boolean symbols by default: no count unless the format uses {n}.
             // Users who want counts can set e.g. staged = "●{n}" explicitly.
             staged: "●".to_string(),
             unstaged: "✚".to_string(),
@@ -644,7 +549,11 @@ pub struct FullConfig {
     pub winuxcmd_path: Option<PathBuf>,
     pub hooks: HookConfig,
     pub plugins: PluginConfig,
-    pub zsh: ZshConfig,
+    pub autosuggest: AutosuggestConfig,
+    pub syntax_highlighting: SyntaxHighlightConfig,
+    pub runtime_completions: RuntimeCompletionConfig,
+    pub native_widgets: NativeWidgetConfig,
+    pub native_plugins: NativePluginConfig,
     pub git_prompt: GitPromptConfig,
 }
 
@@ -666,13 +575,17 @@ impl Default for FullConfig {
             winuxcmd_path: None,
             hooks: HookConfig::default(),
             plugins: PluginConfig::default(),
-            zsh: ZshConfig::default(),
+            autosuggest: AutosuggestConfig::default(),
+            syntax_highlighting: SyntaxHighlightConfig::default(),
+            runtime_completions: RuntimeCompletionConfig::default(),
+            native_widgets: NativeWidgetConfig::default(),
+            native_plugins: NativePluginConfig::default(),
             git_prompt: GitPromptConfig::default(),
         }
     }
 }
 
-/// Load config from `~/.winshrc.toml`. Returns defaults if the file
+/// Load legacy/managed config from `WINUXSH_CONFIG` or `~/.winshrc.toml`. Returns defaults if the file
 /// does not exist or cannot be parsed (logs warning).
 #[derive(Debug, Deserialize)]
 struct GitPromptToml {
@@ -713,12 +626,11 @@ pub fn default_config_path() -> PathBuf {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".winshrc.toml")
 }
 
 fn build_config(parsed: WinshrcToml) -> FullConfig {
-    let zsh = parsed.zsh.map(build_zsh_config).unwrap_or_default();
     let plugins = parsed.plugins.map(build_plugin_config).unwrap_or_default();
     let shell = parsed.shell;
     let completions = parsed.completions;
@@ -775,7 +687,26 @@ fn build_config(parsed: WinshrcToml) -> FullConfig {
         winuxcmd_path: parsed.winuxcmd.and_then(|w| w.path).map(PathBuf::from),
         hooks: parsed.hooks.map(build_hook_config).unwrap_or_default(),
         plugins,
-        zsh,
+        autosuggest: parsed
+            .autosuggestions
+            .map(build_autosuggest_config)
+            .unwrap_or_default(),
+        syntax_highlighting: parsed
+            .syntax_highlighting
+            .map(build_syntax_highlight_config)
+            .unwrap_or_default(),
+        runtime_completions: parsed
+            .runtime_completions
+            .map(build_runtime_completion_config)
+            .unwrap_or_default(),
+        native_widgets: parsed
+            .native_widgets
+            .map(build_native_widget_config)
+            .unwrap_or_default(),
+        native_plugins: parsed
+            .native_plugins
+            .map(build_native_plugin_config)
+            .unwrap_or_default(),
         git_prompt: build_git_prompt_config(parsed.git_prompt),
     }
 }
@@ -861,7 +792,7 @@ fn build_menu_config(parsed: MenusToml) -> MenuConfig {
 }
 
 fn expand_tilde_path(value: &str) -> PathBuf {
-    let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = || shell_home_dir().unwrap_or_else(|| PathBuf::from("."));
     if value == "~" {
         return home();
     }
@@ -869,7 +800,7 @@ fn expand_tilde_path(value: &str) -> PathBuf {
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        return home().join(rest);
+        return home().join(shell_path_to_host_path(rest));
     }
     PathBuf::from(value)
 }
@@ -936,45 +867,6 @@ fn build_plugin_pack_config(parsed: PluginPackToml) -> PluginPackConfig {
     }
 }
 
-fn build_zsh_config(parsed: ZshToml) -> ZshConfig {
-    ZshConfig {
-        enabled: parsed.enabled.unwrap_or(false),
-        zdotdir: parsed.zdotdir.map(PathBuf::from),
-        import_zshrc: parsed.import_zshrc.unwrap_or(true),
-        import_oh_my_zsh: parsed.import_oh_my_zsh.unwrap_or(true),
-        plugins: parsed.plugins.unwrap_or_default(),
-        compat_level: parsed
-            .compat_level
-            .map(|level| ZshCompatLevel::from_config_value(&level))
-            .unwrap_or_default(),
-        auto_apply: parsed.auto_apply.unwrap_or(false),
-        autosuggestions: parsed
-            .autosuggestions
-            .map(build_autosuggest_config)
-            .unwrap_or_default(),
-        syntax_highlighting: parsed
-            .syntax_highlighting
-            .map(build_syntax_highlight_config)
-            .unwrap_or_default(),
-        dynamic_completions: parsed
-            .dynamic_completions
-            .map(build_dynamic_completion_config)
-            .unwrap_or_default(),
-        runtime_completions: parsed
-            .runtime_completions
-            .map(build_runtime_completion_config)
-            .unwrap_or_default(),
-        native_widgets: parsed
-            .native_widgets
-            .map(build_native_widget_config)
-            .unwrap_or_default(),
-        native_plugins: parsed
-            .native_plugins
-            .map(build_native_plugin_config)
-            .unwrap_or_default(),
-    }
-}
-
 fn build_autosuggest_config(parsed: AutosuggestToml) -> AutosuggestConfig {
     let defaults = AutosuggestConfig::default();
     AutosuggestConfig {
@@ -992,17 +884,6 @@ fn build_syntax_highlight_config(parsed: SyntaxHighlightToml) -> SyntaxHighlight
         highlighters: parsed.highlighters.unwrap_or(defaults.highlighters),
         max_length: parsed.max_length,
         styles: parsed.styles.unwrap_or_default(),
-    }
-}
-
-fn build_dynamic_completion_config(parsed: DynamicCompletionToml) -> DynamicCompletionConfig {
-    let defaults = DynamicCompletionConfig::default();
-    DynamicCompletionConfig {
-        enabled: parsed.enabled.unwrap_or(defaults.enabled),
-        commands: parsed.commands.unwrap_or(defaults.commands),
-        timeout_millis: parsed.timeout_millis.unwrap_or(defaults.timeout_millis),
-        cache_ttl_secs: parsed.cache_ttl_secs.or(defaults.cache_ttl_secs),
-        cache_dir: parsed.cache_dir.map(PathBuf::from),
     }
 }
 
@@ -1073,7 +954,7 @@ max_size = 1234
 ignore_space_prefixed = true
 "#,
         );
-        let expected_path = dirs::home_dir()
+        let expected_path = shell_home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".custom_winuxsh_history");
         assert_eq!(config.history.path, Some(expected_path));
@@ -1330,111 +1211,7 @@ permissions = ["cwd:read", "shell:cwd:write", "process:run:zoxide"]
     }
 
     #[test]
-    fn parses_zsh_config() {
-        let config = parse_config(
-            r#"
-[zsh]
-enabled = true
-zdotdir = "C:/Users/me"
-import_zshrc = false
-import_oh_my_zsh = true
-plugins = ["git", "zsh-autosuggestions"]
-compat_level = "warn"
-auto_apply = true
-
-[zsh.autosuggestions]
-enabled = true
-strategy = ["history", "completion"]
-highlight_style = "fg=#ff00ff,bg=cyan,bold,underline"
-buffer_max_size = 20
-
-[zsh.syntax_highlighting]
-enabled = true
-highlighters = ["main"]
-max_length = 512
-
-[zsh.syntax_highlighting.styles]
-command = "fg=green,bold"
-unknown-token = "fg=red,bold"
-
-[zsh.dynamic_completions]
-enabled = true
-commands = ["docker", "kubectl"]
-timeout_millis = 2000
-cache_ttl_secs = 120
-cache_dir = "C:/Users/me/.winuxsh/cache/zsh-completions"
-
-[zsh.runtime_completions]
-enabled = true
-commands = ["npm"]
-timeout_millis = 750
-
-[zsh.native_widgets]
-enabled = true
-presets = ["autosuggestions", "history_substring_search"]
-import_bindkeys = true
-
-[zsh.native_plugins]
-enabled = true
-presets = ["direnv"]
-"#,
-        );
-
-        assert!(config.zsh.enabled);
-        assert_eq!(config.zsh.zdotdir, Some(PathBuf::from("C:/Users/me")));
-        assert!(!config.zsh.import_zshrc);
-        assert!(config.zsh.import_oh_my_zsh);
-        assert_eq!(config.zsh.plugins, vec!["git", "zsh-autosuggestions"]);
-        assert_eq!(config.zsh.compat_level, ZshCompatLevel::Warn);
-        assert!(config.zsh.auto_apply);
-        assert!(config.zsh.autosuggestions.enabled);
-        assert_eq!(
-            config.zsh.autosuggestions.strategies,
-            vec!["history", "completion"]
-        );
-        assert_eq!(
-            config.zsh.autosuggestions.highlight_style,
-            "fg=#ff00ff,bg=cyan,bold,underline"
-        );
-        assert_eq!(config.zsh.autosuggestions.buffer_max_size, Some(20));
-        assert!(config.zsh.syntax_highlighting.enabled);
-        assert_eq!(config.zsh.syntax_highlighting.highlighters, vec!["main"]);
-        assert_eq!(config.zsh.syntax_highlighting.max_length, Some(512));
-        assert_eq!(
-            config
-                .zsh
-                .syntax_highlighting
-                .styles
-                .get("command")
-                .unwrap(),
-            "fg=green,bold"
-        );
-        assert!(config.zsh.dynamic_completions.enabled);
-        assert_eq!(
-            config.zsh.dynamic_completions.commands,
-            vec!["docker", "kubectl"]
-        );
-        assert_eq!(config.zsh.dynamic_completions.timeout_millis, 2000);
-        assert_eq!(config.zsh.dynamic_completions.cache_ttl_secs, Some(120));
-        assert_eq!(
-            config.zsh.dynamic_completions.cache_dir,
-            Some(PathBuf::from("C:/Users/me/.winuxsh/cache/zsh-completions"))
-        );
-        assert!(config.zsh.runtime_completions.enabled);
-        assert_eq!(config.zsh.runtime_completions.commands, vec!["npm"]);
-        assert_eq!(config.zsh.runtime_completions.timeout_millis, 750);
-        assert!(config.zsh.native_widgets.enabled);
-        assert_eq!(
-            config.zsh.native_widgets.presets,
-            vec!["autosuggestions", "history_substring_search"]
-        );
-        assert!(config.zsh.native_widgets.import_bindkeys);
-        assert!(config.zsh.native_plugins.enabled);
-        assert_eq!(config.zsh.native_plugins.presets, vec!["direnv"]);
-    }
-
-    #[test]
-    fn parses_zsh_autosuggest_strategy_env_style() {
+    fn parses_autosuggest_strategy_env_style() {
         assert_eq!(
             parse_autosuggest_strategy_value("(history completion)"),
             vec!["history", "completion"]
@@ -1459,13 +1236,13 @@ presets = ["direnv"]
     }
 
     #[test]
-    fn parses_zsh_highlight_array_and_style_map_values() {
+    fn parses_highlight_array_and_style_map_values() {
         assert_eq!(
-            parse_zsh_arrayish_value("(main brackets)"),
+            parse_arrayish_value("(main brackets)"),
             vec!["main", "brackets"]
         );
         assert_eq!(
-            parse_zsh_style_map_value("path=fg=cyan;command=fg=green,bold"),
+            parse_style_map_value("path=fg=cyan;command=fg=green,bold"),
             vec![
                 ("path".to_string(), "fg=cyan".to_string()),
                 ("command".to_string(), "fg=green,bold".to_string())

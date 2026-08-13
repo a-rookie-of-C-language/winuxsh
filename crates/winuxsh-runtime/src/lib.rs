@@ -9,7 +9,7 @@ pub mod completion;
 pub mod config;
 pub mod ctrl_c;
 pub mod git_status;
-pub(crate) mod native_file_builtins;
+pub(crate) mod path_utils;
 pub mod plugins;
 pub mod prompt;
 pub mod prompt_segments;
@@ -21,7 +21,6 @@ pub mod terminal;
 pub mod theme;
 pub mod windows_terminal;
 pub mod winuxcmd;
-pub mod zsh_compat;
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -33,7 +32,7 @@ pub(crate) mod test_support {
 pub use completion::{CompletionBehavior, CompletionMatchMode, CompletionState, WinuxshCompleter};
 pub use config::{
     AutosuggestConfig, EditorConfig, EditorMode, HistoryConfig, MenuConfig, PluginConfig,
-    PluginPackConfig, ShellConfig, SyntaxHighlightConfig, ZshCompatLevel, ZshConfig,
+    PluginPackConfig, ShellConfig, SyntaxHighlightConfig,
 };
 pub use prompt::PromptBackend;
 pub use prompt::PromptIndicators;

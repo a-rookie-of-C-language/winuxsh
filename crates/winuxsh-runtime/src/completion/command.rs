@@ -14,44 +14,86 @@ static PATH_CMD_CACHE: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(No
 pub struct CommandCompleter;
 
 impl CommandCompleter {
-    /// Get all available commands (built-in + PATH)
+    /// Get all available commands (built-in + common + PATH)
     pub fn get_all_commands() -> Vec<String> {
         let mut commands = Self::get_builtin_commands();
+        commands.extend(Self::get_common_commands());
         commands.extend(Self::get_path_commands_cached());
         commands.sort();
         commands.dedup();
         commands
     }
 
-    /// Get built-in shell commands
+    /// Get shell builtins owned by rubash.
     pub fn get_builtin_commands() -> Vec<String> {
-        vec![
-            "ls".to_string(),
-            "cd".to_string(),
-            "pwd".to_string(),
-            "echo".to_string(),
-            "exit".to_string(),
-            "clear".to_string(),
-            "cat".to_string(),
-            "grep".to_string(),
-            "find".to_string(),
-            "cp".to_string(),
-            "mv".to_string(),
-            "rm".to_string(),
-            "mkdir".to_string(),
-            "set".to_string(),
-            "setopt".to_string(),
-            "unset".to_string(),
-            "unsetopt".to_string(),
-            "export".to_string(),
-            "env".to_string(),
-            "help".to_string(),
-            "history".to_string(),
-            "alias".to_string(),
-            "unalias".to_string(),
-            "source".to_string(),
-            "type".to_string(),
+        [
+            ".",
+            ":",
+            "[",
+            "alias",
+            "bg",
+            "bind",
+            "break",
+            "builtin",
+            "caller",
+            "cd",
+            "command",
+            "compgen",
+            "complete",
+            "compopt",
+            "continue",
+            "declare",
+            "dirs",
+            "disown",
+            "echo",
+            "enable",
+            "eval",
+            "exec",
+            "exit",
+            "export",
+            "false",
+            "fc",
+            "fg",
+            "getopts",
+            "hash",
+            "help",
+            "history",
+            "jobs",
+            "kill",
+            "let",
+            "local",
+            "logout",
+            "mapfile",
+            "popd",
+            "printf",
+            "pushd",
+            "pwd",
+            "read",
+            "readarray",
+            "readonly",
+            "return",
+            "set",
+            "setopt",
+            "shift",
+            "shopt",
+            "source",
+            "suspend",
+            "test",
+            "times",
+            "trap",
+            "true",
+            "type",
+            "typeset",
+            "ulimit",
+            "umask",
+            "unalias",
+            "unset",
+            "unsetopt",
+            "wait",
         ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     }
 
     /// Get commonly-used commands (shown on empty Tab)
@@ -260,14 +302,21 @@ mod tests {
     #[test]
     fn test_get_builtin_commands() {
         let commands = CommandCompleter::get_builtin_commands();
-        assert!(commands.contains(&"ls".to_string()));
         assert!(commands.contains(&"cd".to_string()));
+        assert!(commands.contains(&"setopt".to_string()));
+        assert!(commands.contains(&"unsetopt".to_string()));
+        assert!(!commands.contains(&"ls".to_string()));
+        assert!(!commands.contains(&"cp".to_string()));
+        assert!(!commands.contains(&"self-update".to_string()));
+        assert!(!commands.contains(&"update-winuxsh".to_string()));
     }
 
     #[test]
     fn test_command_exists() {
-        assert!(CommandCompleter::command_exists("ls"));
         assert!(CommandCompleter::command_exists("cd"));
+        assert!(!CommandCompleter::command_exists(
+            "__winuxsh_missing_command_for_completion_test__"
+        ));
 
         // Verify PATH command lookup without hardcoding platform-specific binaries.
         if let Some(any_path_cmd) = CommandCompleter::get_path_commands().first() {
@@ -288,6 +337,13 @@ mod tests {
         );
         let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
         assert!(result.completions.contains(&"grep".to_string()));
+    }
+
+    #[test]
+    fn command_completion_includes_common_commands_for_partial_input() {
+        let ctx = CompletionContext::new(std::path::PathBuf::from("."), "oh-".to_string(), 3);
+        let result = CommandCompleter::complete(&ctx).unwrap().unwrap();
+        assert!(result.completions.contains(&"oh-my-winuxsh".to_string()));
     }
 
     #[test]

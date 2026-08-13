@@ -5,22 +5,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
-const WASM_HELLO_BYTES: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
-    0x02, 0x01, 0x00, 0x07, 0x17, 0x01, 0x13, 0x77, 0x69, 0x6e, 0x75, 0x78, 0x73, 0x68, 0x5f, 0x70,
-    0x6c, 0x75, 0x67, 0x69, 0x6e, 0x5f, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04,
-    0x00, 0x41, 0x00, 0x0b,
-];
-const WASM_NO_EXPORT_BYTES: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
-    0x02, 0x01, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
-];
-const WASM_SPIN_BYTES: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
-    0x02, 0x01, 0x00, 0x07, 0x17, 0x01, 0x13, 0x77, 0x69, 0x6e, 0x75, 0x78, 0x73, 0x68, 0x5f, 0x70,
-    0x6c, 0x75, 0x67, 0x69, 0x6e, 0x5f, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x0a, 0x0b, 0x01, 0x09,
-    0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x41, 0x00, 0x0b,
-];
 fn winuxsh_binary() -> PathBuf {
     let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
     if p.exists() {
@@ -222,7 +206,7 @@ fn plugin_search_json_reports_matched_fields() {
     );
 }
 #[test]
-fn plugin_themes_lists_builtin_and_bundle_sources() {
+fn plugin_themes_lists_user_and_bundle_sources_only() {
     let temp = temp_dir("plugin-themes-catalog");
     let bundle = temp.join("bundle");
     write_theme_test_bundle(&bundle, "9.9.10");
@@ -231,10 +215,7 @@ fn plugin_themes_lists_builtin_and_bundle_sources() {
     assert_success(&text, "plugin themes text");
     let stdout = stdout_text(&text);
     assert!(stdout.contains("Winuxsh themes"), "{stdout}");
-    assert!(
-        stdout.contains("- default source=builtin owner=winuxsh"),
-        "{stdout}"
-    );
+    assert!(!stdout.contains("builtin_fallback"), "{stdout}");
     assert!(
         stdout.contains(
             "- testmarket source=bundle owner=oh-my-winuxsh@9.9.10 bundle=oh-my-winuxsh pack=themes"
@@ -339,7 +320,7 @@ fn plugin_info_marks_command_not_found_provider_candidate() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("Missing host API/decision: bundle_migration_decision,wasm_provider_abi"),
+        stdout.contains("Missing host API/decision: bundle_migration_decision,provider_abi"),
         "{stdout}"
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
@@ -375,13 +356,13 @@ fn plugin_review_marks_command_not_found_process_provider_readiness() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("WASM providers still require a separate ABI"),
+        stdout.contains("stable provider ABI is finalized"),
         "{stdout}"
     );
 }
 #[test]
 fn plugin_info_unknown_pack_fails() {
-    let output = run_winuxsh(&["plugin", "info", "zle"]);
+    let output = run_winuxsh(&["plugin", "info", "unknown-pack"]);
     assert!(
         !output.status.success(),
         "unknown plugin should fail\nstdout={}\nstderr={}",
@@ -389,7 +370,7 @@ fn plugin_info_unknown_pack_fails() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unknown plugin 'zle'"),
+        String::from_utf8_lossy(&output.stderr).contains("unknown plugin 'unknown-pack'"),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -698,82 +679,69 @@ fn plugin_info_reads_installed_process_pack_contract() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
-fn plugin_info_reads_installed_wasm_pack_contract() {
-    let temp = temp_dir("plugin-installed-wasm-info");
+fn plugin_info_reads_installed_source_pack_contract() {
+    let temp = temp_dir("plugin-installed-source-info");
     let bundle = temp.join("bundle");
-    write_wasm_test_bundle(&bundle, "9.9.7");
+    write_source_test_bundle(&bundle, "9.9.7", "init.winux");
     let output = run_winuxsh_with_env(
-        &["plugin", "info", "wasm-hello"],
+        &["plugin", "info", "source-test"],
         &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
     );
-    assert_success(&output, "plugin info installed wasm pack");
+    assert_success(&output, "plugin info installed source pack");
     let stdout = stdout_text(&output);
-    assert!(stdout.contains("wasm-hello"), "{stdout}");
-    assert!(stdout.contains("Kind: wasm"), "{stdout}");
-    assert!(stdout.contains("Default: off"), "{stdout}");
-    assert!(stdout.contains("Permissions: cwd:read"), "{stdout}");
-    assert!(stdout.contains("Required binaries: none"), "{stdout}");
-    assert!(stdout.contains("WASM:"), "{stdout}");
+    assert!(stdout.contains("Plugin: source-test"), "{stdout}");
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(stdout.contains("Execution model: shell_source"), "{stdout}");
+    assert!(stdout.contains("Permissions: shell:source"), "{stdout}");
+    assert!(stdout.contains("Source:"), "{stdout}");
     assert!(
-        stdout.contains("  protocol: winuxsh:wasm-plugin@0.1.0"),
+        stdout.contains("  entry: packs/source-test/init.winux"),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("  module: wasm/wasm-hello.wasm"),
-        "{stdout}"
-    );
-    assert!(
-        stdout
-            .contains("  sha256: 022f029fa90942dd2e5ba1058a314071fcd859ab15d5d46167bcff1475c14528"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("  wit_world: winuxsh:plugin/hello"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("  timeout_millis: 1000"), "{stdout}");
-    assert!(stdout.contains("  max_memory_pages: 16"), "{stdout}");
-    assert!(stdout.contains("wasm-hello"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
-fn plugin_doctor_json_reports_enabled_wasm_pack() {
-    let temp = temp_dir("plugin-doctor-wasm-json");
+fn plugin_inventory_reads_framework_plugin_directories() {
+    let temp = temp_dir("plugin-framework-directories");
     let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    write_wasm_test_bundle(&bundle, "9.9.7");
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let output = run_winuxsh_with_env(
-        &["plugin", "doctor", "--json"],
-        &[
-            ("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone()),
-            ("WINUXSH_CONFIG", config_path.clone()),
-        ],
+    write_framework_directory_test_bundle(&bundle, "9.9.11");
+
+    let list = run_winuxsh_with_env(
+        &["plugin", "list", "--json"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
     );
-    assert_success(&output, "plugin doctor wasm json");
-    let stdout = stdout_text(&output);
-    assert!(stdout.contains(r#""ok": true"#), "{stdout}");
-    assert!(stdout.contains(r#""source": "env_override""#), "{stdout}");
+    assert_success(&list, "plugin list framework directories json");
+    let stdout = stdout_text(&list);
+    assert!(stdout.contains(r#""name": "prompt-core""#), "{stdout}");
+    assert!(stdout.contains(r#""name": "theme-minimal""#), "{stdout}");
+    assert!(stdout.contains(r#""name": "keybindings""#), "{stdout}");
+    assert!(stdout.contains(r#""kind": "bridge""#), "{stdout}");
     assert!(
-        stdout.contains(r#""trust_source": "local_override""#),
+        !stdout.contains("Legacy Git aliases"),
+        "framework git plugin should replace legacy pack\n{stdout}"
+    );
+
+    let git = run_winuxsh_with_env(
+        &["plugin", "info", "git"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
+    );
+    assert_success(&git, "plugin info framework git");
+    let stdout = stdout_text(&git);
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(stdout.contains("Summary: Framework Git plugin"), "{stdout}");
+    assert!(
+        stdout.contains("  entry: plugins/git/git.plugin.winux"),
         "{stdout}"
     );
-    assert!(stdout.contains("wasm-hello"), "{stdout}");
-    assert!(stdout.contains("wasm"), "{stdout}");
-    assert!(
-        stdout.contains(r#""missing_required_binaries": []"#),
-        "{stdout}"
+
+    let keybindings = run_winuxsh_with_env(
+        &["plugin", "info", "keybindings"],
+        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle)],
     );
+    assert_success(&keybindings, "plugin info framework keybindings bridge");
+    let stdout = stdout_text(&keybindings);
+    assert!(stdout.contains("Kind: bridge"), "{stdout}");
+    assert!(stdout.contains("Execution model: host_bridge"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
@@ -871,76 +839,6 @@ fn plugin_review_text_marks_compiled_official_trust_source() {
         stdout.contains("Mixed pack: static bundle assets are declarative"),
         "{stdout}"
     );
-}
-#[test]
-fn plugin_review_json_marks_enabled_wasm_pack() {
-    let temp = temp_dir("plugin-review-wasm-json");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    write_wasm_test_bundle(&bundle, "9.9.7");
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let output = run_winuxsh_with_env(
-        &["plugin", "review", "wasm-hello", "--json"],
-        &[
-            ("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone()),
-            ("WINUXSH_CONFIG", config_path.clone()),
-        ],
-    );
-    assert_success(&output, "plugin review wasm json");
-    let stdout = stdout_text(&output);
-    assert!(stdout.contains("wasm-hello"), "{stdout}");
-    assert!(stdout.contains("wasm"), "{stdout}");
-    assert!(
-        stdout.contains(r#""trust_source": "local_override""#),
-        "{stdout}"
-    );
-    assert!(stdout.contains(r#""currently_enabled": true"#), "{stdout}");
-    assert!(stdout.contains(r#""token": "cwd:read""#), "{stdout}");
-    assert!(stdout.contains(r#""risk": "low""#), "{stdout}");
-    assert!(
-        stdout.contains("Winuxsh wasmi sandbox without native process permissions"),
-        "{stdout}"
-    );
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn plugin_review_json_marks_env_read_permission_low_risk() {
-    let temp = temp_dir("plugin-review-wasm-env-json");
-    let bundle = temp.join("bundle");
-    write_wasm_test_bundle_with_module_and_permissions(
-        &bundle,
-        "9.9.7",
-        WASM_HELLO_BYTES,
-        "022f029fa90942dd2e5ba1058a314071fcd859ab15d5d46167bcff1475c14528",
-        &["env:read:WINUXSH_WASM_TEST"],
-    );
-    let output = run_winuxsh_with_env(
-        &["plugin", "review", "wasm-hello", "--json"],
-        &[("WINUXSH_PLUGIN_BUNDLE_PATH", bundle.clone())],
-    );
-    assert_success(&output, "plugin review wasm env json");
-    let stdout = stdout_text(&output);
-    assert!(
-        stdout.contains(r#""token": "env:read:WINUXSH_WASM_TEST""#),
-        "{stdout}"
-    );
-    assert!(stdout.contains(r#""risk": "low""#), "{stdout}");
-    assert!(stdout.contains(r#""scope": "environment""#), "{stdout}");
-    assert!(
-        stdout.contains("May read the 'WINUXSH_WASM_TEST' environment variable."),
-        "{stdout}"
-    );
-    let _ = fs::remove_dir_all(temp);
 }
 #[test]
 fn plugin_review_json_marks_external_bundle_trust_source() {
@@ -1228,411 +1126,6 @@ stderr={stderr}"
 }
 
 #[test]
-fn wasm_plugin_command_runs_installed_pack_from_command_mode() {
-    let temp = temp_dir("plugin-wasm-command-run");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    write_wasm_test_bundle(&bundle, "9.9.7");
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command.output().expect("failed to run wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn wasm_plugin_command_missing_main_export_is_deterministic() {
-    let temp = temp_dir("plugin-wasm-command-missing-main");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    write_wasm_test_bundle_with_module(
-        &bundle,
-        "9.9.7",
-        WASM_NO_EXPORT_BYTES,
-        "950ce49f61b709106e01c2e6866951b5470a23dca1f219bb71c00b83ff8d88e9",
-    );
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run missing-export wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(
-        stderr.contains("missing export 'winuxsh_plugin_main'"),
-        "{stderr}"
-    );
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn wasm_plugin_command_can_write_stdout_and_stderr() {
-    let temp = temp_dir("plugin-wasm-host-io");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_io_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module(&bundle, "9.9.7", &module_bytes, &module_sha256);
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run host-io wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(7),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert_eq!(stdout, "hello from wasm\n");
-    assert_eq!(stderr, "warn from wasm\n");
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn wasm_plugin_host_write_without_memory_returns_error() {
-    let temp = temp_dir("plugin-wasm-host-io-no-memory");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_io_no_memory_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module(&bundle, "9.9.7", &module_bytes, &module_sha256);
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run no-memory host-io wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(13),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
-fn wasm_plugin_command_can_read_command_arguments() {
-    let temp = temp_dir("plugin-wasm-host-args");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_args_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module(&bundle, "9.9.7", &module_bytes, &module_sha256);
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello alpha beta"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run host-args wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert_eq!(stdout, "args:alpha/beta\n");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-
-#[test]
-fn wasm_plugin_command_can_read_cwd_when_permission_declared() {
-    let temp = temp_dir("plugin-wasm-host-cwd");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_cwd_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module(&bundle, "9.9.7", &module_bytes, &module_sha256);
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let expected_pwd = shell_path(&temp);
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .current_dir(&temp)
-        .env("PWD", &expected_pwd)
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run host-cwd wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert_eq!(stdout, format!("{expected_pwd}\n"));
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-
-#[test]
-fn wasm_plugin_command_can_read_allowed_env_var() {
-    let temp = temp_dir("plugin-wasm-host-env");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_env_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module_and_permissions(
-        &bundle,
-        "9.9.7",
-        &module_bytes,
-        &module_sha256,
-        &["env:read:WINUXSH_WASM_TEST"],
-    );
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_WASM_TEST", "env-ok")
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run host-env wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert_eq!(stdout, "env-ok\n");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-
-#[test]
-fn wasm_plugin_env_read_without_permission_returns_error() {
-    let temp = temp_dir("plugin-wasm-host-env-no-permission");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_env_no_permission_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module_and_permissions(
-        &bundle,
-        "9.9.7",
-        &module_bytes,
-        &module_sha256,
-        &[],
-    );
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_WASM_TEST", "env-ok")
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run no-permission host-env wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-
-#[test]
-fn wasm_plugin_cwd_read_without_permission_returns_error() {
-    let temp = temp_dir("plugin-wasm-host-cwd-no-permission");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    let module_bytes = wasm_host_cwd_no_permission_module_bytes();
-    let module_sha256 = bytes_sha256(&module_bytes);
-    write_wasm_test_bundle_with_module_and_permissions(
-        &bundle,
-        "9.9.7",
-        &module_bytes,
-        &module_sha256,
-        &[],
-    );
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .current_dir(&temp)
-        .env("PWD", shell_path(&temp))
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run no-permission host-cwd wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.is_empty(), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-
-#[test]
-fn wasm_plugin_command_out_of_fuel_returns_124() {
-    let temp = temp_dir("plugin-wasm-out-of-fuel");
-    let bundle = temp.join("bundle");
-    let config_path = temp.join(".winshrc.toml");
-    write_wasm_test_bundle_with_module(
-        &bundle,
-        "9.9.7",
-        WASM_SPIN_BYTES,
-        "50aa58998af40b059d8ad5f91a00f210f8343e7c8e57b2616644ed19d4538f0b",
-    );
-    fs::write(
-        &config_path,
-        r#"[winuxcmd]
-enabled = false
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = ["wasm-hello"]
-"#,
-    )
-    .unwrap();
-    let mut command = base_winuxsh_command(&["-c", "wasm-hello"]);
-    command
-        .env("WINUXSH_PLUGIN_BUNDLE_PATH", &bundle)
-        .env("WINUXSH_CONFIG", &config_path);
-    let output = command
-        .output()
-        .expect("failed to run runaway wasm plugin command");
-    let stdout = stdout_text(&output);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(124),
-        "stdout={stdout}\nstderr={stderr}"
-    );
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.contains("timed out after"), "{stderr}");
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
 fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
     let temp = temp_dir("plugin-update-rollback-cli");
     let bundle_v1 = temp.join("bundle-v1");
@@ -1682,6 +1175,68 @@ fn plugin_update_and_rollback_switch_active_bundle_from_cli() {
     assert_success(&status, "plugin bundle status after rollback");
     let stdout = stdout_text(&status);
     assert!(stdout.contains("Active version: 9.9.1"), "{stdout}");
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
+fn plugin_update_accepts_source_bundle_with_winux_entry() {
+    let temp = temp_dir("plugin-update-source-winux");
+    let bundle = temp.join("bundle");
+    let envs = plugin_bundle_env(&temp);
+    write_source_test_bundle(&bundle, "9.9.21", "init.winux");
+    let update = run_winuxsh_with_env_owned(
+        &[
+            "plugin".to_string(),
+            "update".to_string(),
+            "oh-my-winuxsh".to_string(),
+            "--from".to_string(),
+            bundle.display().to_string(),
+        ],
+        &envs,
+    );
+    assert_success(&update, "plugin update source bundle");
+    let stdout = stdout_text(&update);
+    assert!(
+        stdout.contains("Updated bundle 'oh-my-winuxsh' to 9.9.21"),
+        "{stdout}"
+    );
+    let info = run_winuxsh_with_env(&["plugin", "info", "source-test"], &envs);
+    assert_success(&info, "plugin info after source bundle update");
+    let stdout = stdout_text(&info);
+    assert!(stdout.contains("Kind: source"), "{stdout}");
+    assert!(
+        stdout.contains("  entry: packs/source-test/init.winux"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(temp);
+}
+#[test]
+fn plugin_update_rejects_source_bundle_without_winux_entry() {
+    let temp = temp_dir("plugin-update-source-bad-suffix");
+    let bundle = temp.join("bundle");
+    let envs = plugin_bundle_env(&temp);
+    write_source_test_bundle(&bundle, "9.9.22", "init.winsh");
+    let update = run_winuxsh_with_env_owned(
+        &[
+            "plugin".to_string(),
+            "update".to_string(),
+            "oh-my-winuxsh".to_string(),
+            "--from".to_string(),
+            bundle.display().to_string(),
+        ],
+        &envs,
+    );
+    assert!(
+        !update.status.success(),
+        "bad source suffix update should fail\nstdout={}\nstderr={}",
+        stdout_text(&update),
+        String::from_utf8_lossy(&update.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&update.stderr);
+    assert!(stderr.contains("must end in .winux"), "stderr={stderr}");
+    let status = run_winuxsh_with_env(&["plugin", "bundle", "status"], &envs);
+    assert_success(&status, "plugin bundle status after bad source suffix");
+    let stdout = stdout_text(&status);
+    assert!(stdout.contains("State: compiled_fallback"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
@@ -1930,41 +1485,6 @@ fn plugin_update_rejects_invalid_process_pack_contract() {
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
-fn plugin_update_rejects_invalid_wasm_pack_contract() {
-    let temp = temp_dir("plugin-wasm-update-invalid");
-    let bundle = temp.join("bundle");
-    let envs = plugin_bundle_env(&temp);
-    write_wasm_test_bundle(&bundle, "9.9.8");
-    let manifest_path = bundle.join("packs").join("wasm-hello").join("plugin.toml");
-    let manifest = fs::read_to_string(&manifest_path)
-        .unwrap()
-        .replace("required_binaries = []", "required_binaries = [\"node\"]");
-    fs::write(&manifest_path, manifest).unwrap();
-    let update = run_winuxsh_with_env_owned(
-        &[
-            "plugin".to_string(),
-            "update".to_string(),
-            "oh-my-winuxsh".to_string(),
-            "--from".to_string(),
-            bundle.display().to_string(),
-        ],
-        &envs,
-    );
-    assert!(
-        !update.status.success(),
-        "invalid wasm pack should fail update\nstdout={}\nstderr={}",
-        stdout_text(&update),
-        String::from_utf8_lossy(&update.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&update.stderr)
-            .contains("wasm pack 'wasm-hello' must not declare native required_binaries"),
-        "stderr={}",
-        String::from_utf8_lossy(&update.stderr)
-    );
-    let _ = fs::remove_dir_all(temp);
-}
-#[test]
 fn plugin_update_rejects_unknown_provider_export() {
     let temp = temp_dir("plugin-update-unknown-provider");
     let bundle = temp.join("bundle");
@@ -2037,43 +1557,6 @@ fn plugin_update_rejects_process_provider_without_command_diagnose_permission() 
     let _ = fs::remove_dir_all(temp);
 }
 
-#[test]
-fn plugin_update_rejects_wasm_provider_export() {
-    let temp = temp_dir("plugin-update-wasm-provider");
-    let bundle = temp.join("bundle");
-    let envs = plugin_bundle_env(&temp);
-    write_wasm_test_bundle(&bundle, "9.9.35");
-    let manifest_path = bundle.join("packs").join("wasm-hello").join("plugin.toml");
-    let manifest = fs::read_to_string(&manifest_path).unwrap().replace(
-        "keybindings = []",
-        "keybindings = []\nproviders = [\"command-not-found\"]",
-    );
-    fs::write(&manifest_path, manifest).unwrap();
-    let update = run_winuxsh_with_env_owned(
-        &[
-            "plugin".to_string(),
-            "update".to_string(),
-            "oh-my-winuxsh".to_string(),
-            "--from".to_string(),
-            bundle.display().to_string(),
-        ],
-        &envs,
-    );
-    assert!(
-        !update.status.success(),
-        "wasm provider export should fail update\nstdout={}\nstderr={}",
-        stdout_text(&update),
-        String::from_utf8_lossy(&update.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&update.stderr).contains(
-            "wasm pack 'wasm-hello' must not export providers until a WASM provider ABI is implemented"
-        ),
-        "stderr={}",
-        String::from_utf8_lossy(&update.stderr)
-    );
-    let _ = fs::remove_dir_all(temp);
-}
 fn run_winuxsh(args: &[&str]) -> Output {
     run_winuxsh_with_env(args, &[])
 }
@@ -2125,9 +1608,6 @@ fn assert_success(output: &Output, context: &str) {
 }
 fn stdout_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
-}
-fn shell_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }
 fn temp_config_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -2318,6 +1798,132 @@ keybindings = []
         &["cwd:read", "process:run:git"],
         &["git"],
     );
+}
+fn write_framework_directory_test_bundle(path: &Path, version: &str) {
+    write_minimal_test_bundle(path, version, "Legacy Git aliases");
+    fs::create_dir_all(path.join("plugins").join("prompt-core")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("git")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("theme-minimal")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("keybindings")).unwrap();
+    fs::create_dir_all(path.join("plugins").join("command-not-found")).unwrap();
+    fs::create_dir_all(path.join("themes")).unwrap();
+
+    fs::write(
+        path.join("plugins").join("prompt-core").join("plugin.toml"),
+        format!(
+            r#"name = "prompt-core"
+version = {version:?}
+kind = "source"
+entry = "prompt-core.plugin.winux"
+summary = "Framework prompt core"
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+prompt_segments = ["cwd", "git", "prompt_char"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("prompt-core")
+            .join("prompt-core.plugin.winux"),
+        "export FRAMEWORK_PROMPT_CORE=loaded\n",
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins").join("git").join("plugin.toml"),
+        format!(
+            r#"name = "git"
+version = {version:?}
+kind = "source"
+entry = "git.plugin.winux"
+summary = "Framework Git plugin"
+permissions = ["shell:source", "cwd:read", "process:run:git"]
+required_binaries = ["git"]
+[exports]
+aliases = true
+completions = ["git"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins").join("git").join("git.plugin.winux"),
+        "alias gst='git status --framework'\n",
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins")
+            .join("theme-minimal")
+            .join("plugin.toml"),
+        format!(
+            r#"name = "theme-minimal"
+version = {version:?}
+kind = "source"
+entry = "theme-minimal.plugin.winux"
+summary = "Framework minimal theme"
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+themes = ["minimal"]
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("theme-minimal")
+            .join("theme-minimal.plugin.winux"),
+        "export FRAMEWORK_THEME=minimal\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("themes").join("minimal.toml"),
+        r#"[prompt_symbol]
+fg = "light magenta"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        path.join("plugins").join("keybindings").join("plugin.toml"),
+        format!(
+            r#"name = "keybindings"
+version = {version:?}
+kind = "bridge"
+entry = "keybindings.plugin.winux"
+summary = "Framework keybinding bridge"
+permissions = []
+required_binaries = []
+[exports]
+keybindings = ["common"]
+host_bridge = "reedline-keybindings"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("plugins")
+            .join("command-not-found")
+            .join("plugin.toml"),
+        format!(
+            r#"name = "command-not-found"
+version = {version:?}
+kind = "bridge"
+entry = "command-not-found.plugin.winux"
+summary = "Framework command-not-found bridge"
+permissions = ["command:diagnose"]
+required_binaries = []
+[exports]
+providers = ["command-not-found"]
+host_bridge = "command-not-found-provider"
+"#
+        ),
+    )
+    .unwrap();
 }
 fn write_theme_test_bundle(path: &Path, version: &str) {
     fs::create_dir_all(path.join("packs").join("themes")).unwrap();
@@ -2539,6 +2145,67 @@ action = "vi-normal-mode"
 fn write_process_test_bundle(path: &Path, version: &str) {
     write_process_test_bundle_with_timeout(path, version, 1000);
 }
+fn write_source_test_bundle(path: &Path, version: &str, source_file: &str) {
+    fs::create_dir_all(path.join("packs").join("source-test")).unwrap();
+    fs::write(
+        path.join("bundle.toml"),
+        format!(
+            r#"name = "oh-my-winuxsh"
+version = {version:?}
+api = "winuxsh:plugin-bundle@0.1.0"
+min_winuxsh = "0.8.3"
+[packs]
+default = []
+available = ["source-test"]
+[layout]
+packs_dir = "packs"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("packs").join("source-test").join("plugin.toml"),
+        format!(
+            r#"name = "source-test"
+bundle = "oh-my-winuxsh"
+version = {version:?}
+kind = "source"
+api = "winuxsh:plugin@0.1.0"
+category = "workflow"
+summary = "Source plugin startup fixture."
+default = false
+permissions = ["shell:source"]
+required_binaries = []
+[exports]
+aliases = true
+completions = []
+prompt_segments = []
+hooks = ["startup"]
+commands = []
+keybindings = []
+[source]
+entry = "packs/source-test/{source_file}"
+"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        path.join("packs").join("source-test").join(source_file),
+        "alias source_test='echo source plugin'\n",
+    )
+    .unwrap();
+    write_test_bundle_index(
+        path,
+        version,
+        "source-test",
+        "source",
+        "workflow",
+        "Source plugin startup fixture.",
+        false,
+        &["shell:source"],
+        &[],
+    );
+}
 fn write_external_process_test_bundle(path: &Path, version: &str) {
     write_external_process_test_bundle_with_pack_bundle(path, version, "community-tools");
 }
@@ -2722,282 +2389,6 @@ timeout_millis = {timeout_millis}
     );
 }
 
-fn write_wasm_test_bundle(path: &Path, version: &str) {
-    write_wasm_test_bundle_with_module(
-        path,
-        version,
-        WASM_HELLO_BYTES,
-        "022f029fa90942dd2e5ba1058a314071fcd859ab15d5d46167bcff1475c14528",
-    );
-}
-fn wasm_host_io_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "stdout_write" (func $stdout_write (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "stderr_write" (func $stderr_write (param i32 i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "hello from wasm\n")
-  (data (i32.const 32) "warn from wasm\n")
-  (func (export "winuxsh_plugin_main") (result i32)
-    (drop (call $stdout_write (i32.const 0) (i32.const 16)))
-    (drop (call $stderr_write (i32.const 32) (i32.const 15)))
-    (i32.const 7)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_io_no_memory_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "stdout_write" (func $stdout_write (param i32 i32) (result i32)))
-  (func (export "winuxsh_plugin_main") (result i32)
-    (if (result i32)
-      (i32.eq
-        (call $stdout_write (i32.const 0) (i32.const 1))
-        (i32.const -1)
-      )
-      (then (i32.const 13))
-      (else (i32.const 1))
-    )
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_args_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "stdout_write" (func $stdout_write (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "arg_count" (func $arg_count (result i32)))
-  (import "winuxsh:plugin/host" "arg_len" (func $arg_len (param i32) (result i32)))
-  (import "winuxsh:plugin/host" "arg_read" (func $arg_read (param i32 i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "args:")
-  (data (i32.const 16) "/")
-  (data (i32.const 18) "\n")
-  (func (export "winuxsh_plugin_main") (result i32)
-    (local $len0 i32)
-    (local $len1 i32)
-    (if (i32.ne (call $arg_count) (i32.const 2))
-      (then (return (i32.const 20)))
-    )
-    (local.set $len0 (call $arg_len (i32.const 0)))
-    (local.set $len1 (call $arg_len (i32.const 1)))
-    (if
-      (i32.or
-        (i32.ne (local.get $len0) (i32.const 5))
-        (i32.ne (local.get $len1) (i32.const 4))
-      )
-      (then (return (i32.const 21)))
-    )
-    (if (i32.ne (call $arg_read (i32.const 0) (i32.const 32)) (local.get $len0))
-      (then (return (i32.const 22)))
-    )
-    (if (i32.ne (call $arg_read (i32.const 1) (i32.const 64)) (local.get $len1))
-      (then (return (i32.const 23)))
-    )
-    (drop (call $stdout_write (i32.const 0) (i32.const 5)))
-    (drop (call $stdout_write (i32.const 32) (local.get $len0)))
-    (drop (call $stdout_write (i32.const 16) (i32.const 1)))
-    (drop (call $stdout_write (i32.const 64) (local.get $len1)))
-    (drop (call $stdout_write (i32.const 18) (i32.const 1)))
-    (i32.const 0)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_cwd_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "stdout_write" (func $stdout_write (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "cwd_len" (func $cwd_len (result i32)))
-  (import "winuxsh:plugin/host" "cwd_read" (func $cwd_read (param i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "\n")
-  (func (export "winuxsh_plugin_main") (result i32)
-    (local $len i32)
-    (local.set $len (call $cwd_len))
-    (if (i32.lt_s (local.get $len) (i32.const 0))
-      (then (return (i32.const 30)))
-    )
-    (if (i32.ne (call $cwd_read (i32.const 32)) (local.get $len))
-      (then (return (i32.const 31)))
-    )
-    (drop (call $stdout_write (i32.const 32) (local.get $len)))
-    (drop (call $stdout_write (i32.const 0) (i32.const 1)))
-    (i32.const 0)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_cwd_no_permission_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "cwd_len" (func $cwd_len (result i32)))
-  (import "winuxsh:plugin/host" "cwd_read" (func $cwd_read (param i32) (result i32)))
-  (memory (export "memory") 1)
-  (func (export "winuxsh_plugin_main") (result i32)
-    (if
-      (i32.and
-        (i32.eq (call $cwd_len) (i32.const -1))
-        (i32.eq (call $cwd_read (i32.const 0)) (i32.const -1))
-      )
-      (then (return (i32.const 0)))
-    )
-    (i32.const 32)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_env_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "stdout_write" (func $stdout_write (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "env_len" (func $env_len (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "env_read" (func $env_read (param i32 i32 i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "WINUXSH_WASM_TEST")
-  (data (i32.const 32) "\n")
-  (func (export "winuxsh_plugin_main") (result i32)
-    (local $len i32)
-    (local.set $len (call $env_len (i32.const 0) (i32.const 17)))
-    (if (i32.ne (local.get $len) (i32.const 6))
-      (then (return (i32.const 40)))
-    )
-    (if (i32.ne (call $env_read (i32.const 0) (i32.const 17) (i32.const 64)) (local.get $len))
-      (then (return (i32.const 41)))
-    )
-    (drop (call $stdout_write (i32.const 64) (local.get $len)))
-    (drop (call $stdout_write (i32.const 32) (i32.const 1)))
-    (i32.const 0)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn wasm_host_env_no_permission_module_bytes() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-(module
-  (import "winuxsh:plugin/host" "env_len" (func $env_len (param i32 i32) (result i32)))
-  (import "winuxsh:plugin/host" "env_read" (func $env_read (param i32 i32 i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "WINUXSH_WASM_TEST")
-  (func (export "winuxsh_plugin_main") (result i32)
-    (if
-      (i32.and
-        (i32.eq (call $env_len (i32.const 0) (i32.const 17)) (i32.const -1))
-        (i32.eq (call $env_read (i32.const 0) (i32.const 17) (i32.const 64)) (i32.const -1))
-      )
-      (then (return (i32.const 0)))
-    )
-    (i32.const 42)
-  )
-)
-"#,
-    )
-    .unwrap()
-}
-fn write_wasm_test_bundle_with_module(
-    path: &Path,
-    version: &str,
-    module_bytes: &[u8],
-    module_sha256: &str,
-) {
-    write_wasm_test_bundle_with_module_and_permissions(
-        path,
-        version,
-        module_bytes,
-        module_sha256,
-        &["cwd:read"],
-    );
-}
-fn write_wasm_test_bundle_with_module_and_permissions(
-    path: &Path,
-    version: &str,
-    module_bytes: &[u8],
-    module_sha256: &str,
-    permissions: &[&str],
-) {
-    fs::create_dir_all(path.join("packs").join("wasm-hello")).unwrap();
-    fs::create_dir_all(path.join("wasm")).unwrap();
-    fs::write(path.join("wasm").join("wasm-hello.wasm"), module_bytes).unwrap();
-    fs::write(
-        path.join("bundle.toml"),
-        format!(
-            r#"name = "oh-my-winuxsh"
-version = {version:?}
-api = "winuxsh:plugin-bundle@0.1.0"
-min_winuxsh = "0.8.3"
-[packs]
-default = []
-available = ["wasm-hello"]
-[layout]
-packs_dir = "packs"
-"#
-        ),
-    )
-    .unwrap();
-    fs::write(
-        path.join("packs").join("wasm-hello").join("plugin.toml"),
-        format!(
-            r#"name = "wasm-hello"
-bundle = "oh-my-winuxsh"
-version = {version:?}
-kind = "wasm"
-api = "winuxsh:plugin@0.1.0"
-category = "workflow"
-summary = "WASM plugin host contract fixture."
-default = false
-permissions = {permissions}
-required_binaries = []
-[exports]
-aliases = false
-completions = []
-prompt_segments = []
-hooks = []
-commands = ["wasm-hello"]
-keybindings = []
-[wasm]
-protocol = "winuxsh:wasm-plugin@0.1.0"
-module = "wasm/wasm-hello.wasm"
-sha256 = {module_sha256:?}
-wit_world = "winuxsh:plugin/hello"
-timeout_millis = 1000
-max_memory_pages = 16
-"#,
-            permissions = toml_string_list(permissions),
-        ),
-    )
-    .unwrap();
-    write_test_bundle_index(
-        path,
-        version,
-        "wasm-hello",
-        "wasm",
-        "workflow",
-        "WASM plugin host contract fixture.",
-        false,
-        permissions,
-        &[],
-    );
-}
 fn write_fake_process_echo(bin: &Path, exit_code: i32, sleep_before_exit: bool) {
     fs::create_dir_all(bin).unwrap();
     if cfg!(windows) {
@@ -3108,11 +2499,6 @@ fn test_file_sha256(path: &Path) -> String {
         }
         hasher.update(&buffer[..read]);
     }
-    format!("{:x}", hasher.finalize())
-}
-fn bytes_sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {

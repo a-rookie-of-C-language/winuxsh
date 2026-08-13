@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
@@ -20,12 +19,23 @@ use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS,
     WINHTTP_OPTION_URL, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const DEFAULT_REPO: &str = "unixwin/winuxsh";
 const USER_AGENT: &str = concat!("winuxsh/", env!("CARGO_PKG_VERSION"));
 const HTTP_TIMEOUT_MS: i32 = 30_000;
 const UPDATE_CHECK_TIMEOUT_MS: i32 = 2_500;
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const INSTALLER_ARGS: [&str; 5] = [
+    "/VERYSILENT",
+    "/SUPPRESSMSGBOXES",
+    "/NORESTART",
+    "/CLOSEAPPLICATIONS",
+    "/FORCECLOSEAPPLICATIONS",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfUpdateOptions {
@@ -59,6 +69,14 @@ struct GitHubAsset {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    {
+        print_self_update_usage();
+        return Ok(());
+    }
+
     let options = parse_options(args)?;
     let release = resolve_latest_release(&options.repo, HTTP_TIMEOUT_MS)?;
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -99,21 +117,10 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    if !cfg!(windows) {
-        anyhow::bail!("self-update installer execution is only supported on Windows");
-    }
+    validate_installer_payload(&installer_path)?;
+    launch_installer(&installer_path)?;
 
-    Command::new(&installer_path)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/CLOSEAPPLICATIONS",
-        ])
-        .spawn()
-        .with_context(|| format!("start installer {}", installer_path.display()))?;
-
-    println!("Started installer. Winuxsh will finish updating after this process exits.");
+    println!("Installer started. Winuxsh will finish updating after open Winuxsh sessions close.");
     Ok(())
 }
 
@@ -129,7 +136,7 @@ pub fn maybe_print_update_hint() {
             let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
             if release_is_newer(&release.tag_name, &current_tag) {
                 eprintln!(
-                    "winuxsh: update available: {} (run 'winuxsh --self-update')",
+                    "winuxsh: update available: {} (run 'self-update' in the REPL, or 'winuxsh --self-update' outside it)",
                     release.tag_name
                 );
             }
@@ -161,6 +168,57 @@ fn parse_options(args: &[String]) -> Result<SelfUpdateOptions> {
         i += 1;
     }
     Ok(options)
+}
+
+fn print_self_update_usage() {
+    println!("Usage: winuxsh --self-update [--check|--dry-run] [--force] [--repo owner/name]");
+    println!("       self-update [--check|--dry-run] [--force] [--repo owner/name]");
+    println!();
+    println!("Inside the Winuxsh REPL, run `self-update` or `update-winuxsh`; the current shell exits after handing off the update.");
+}
+
+fn validate_installer_payload(path: &Path) -> Result<()> {
+    let header =
+        std::fs::read(path).with_context(|| format!("read installer {}", path.display()))?;
+    if header.len() < 2 || &header[..2] != b"MZ" {
+        anyhow::bail!(
+            "downloaded installer {} is not a Windows executable",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn launch_installer(installer_path: &Path) -> Result<()> {
+    let operation = wide_null("open");
+    let file = wide_null(&installer_path.to_string_lossy());
+    let parameters = wide_null(&INSTALLER_ARGS.join(" "));
+    let result = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result <= 32 {
+        anyhow::bail!(
+            "start installer {} failed with ShellExecuteW code {}",
+            installer_path.display(),
+            result
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn launch_installer(_installer_path: &Path) -> Result<()> {
+    anyhow::bail!("self-update installer execution is only supported on Windows")
 }
 
 fn resolve_latest_release(repo: &str, timeout_ms: i32) -> Result<GitHubRelease> {
@@ -824,6 +882,34 @@ mod tests {
     }
 
     #[test]
+    fn installer_args_keep_silent_forced_close_contract() {
+        assert!(INSTALLER_ARGS.contains(&"/VERYSILENT"));
+        assert!(INSTALLER_ARGS.contains(&"/CLOSEAPPLICATIONS"));
+        assert!(INSTALLER_ARGS.contains(&"/FORCECLOSEAPPLICATIONS"));
+    }
+
+    #[test]
+    fn accepts_windows_executable_installer_payload() {
+        let path = temp_installer_path("valid");
+        std::fs::write(&path, b"MZfake").unwrap();
+
+        validate_installer_payload(&path).unwrap();
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_non_executable_installer_payload() {
+        let path = temp_installer_path("invalid");
+        std::fs::write(&path, b"<!doctype html>").unwrap();
+
+        let err = validate_installer_payload(&path).unwrap_err().to_string();
+
+        assert!(err.contains("not a Windows executable"), "{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn request_headers_include_generic_download_defaults() {
         let headers = request_headers_for_token(None);
 
@@ -904,5 +990,16 @@ mod tests {
         assert!(release_is_newer("v0.8.2", "v0.8.1"));
         assert!(!release_is_newer("v0.8.1", "v0.8.1"));
         assert!(!release_is_newer("v0.8.0", "v0.8.1"));
+    }
+
+    fn temp_installer_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "winuxsh-{name}-installer-{}-{nanos}.exe",
+            std::process::id()
+        ))
     }
 }

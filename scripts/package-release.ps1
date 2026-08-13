@@ -118,20 +118,33 @@ try {
     if ($resolvedOhMyWinuxshBundlePath) {
         $bundleStageDir = Join-Path $stageDir "bundles\oh-my-winuxsh"
         New-Item -ItemType Directory -Force -Path $bundleStageDir | Out-Null
-        $requiredBundleEntries = @("bundle.toml", "index.toml", "packs")
+        $requiredBundleEntries = @(
+            "oh-my-winuxsh.winux"
+            "bundle.toml"
+            "index.toml"
+            "lib"
+            "plugins"
+            "packs"
+            "themes"
+        )
         $bundleEntries = @(
+            "oh-my-winuxsh.winux"
             "bundle.toml"
             "index.toml"
             "README.md"
             "CHANGELOG.md"
+            "lib"
+            "plugins"
             "packs"
             "aliases"
             "completions"
             "prompts"
             "keybindings"
+            "themes"
             "wasm"
             "docs"
             "templates"
+            "tools"
         )
         foreach ($entry in $bundleEntries) {
             $source = Join-Path $resolvedOhMyWinuxshBundlePath $entry
@@ -142,6 +155,10 @@ try {
                 throw "Required oh-my-winuxsh bundle entry missing: $source"
             }
         }
+        Get-ChildItem -LiteralPath $bundleStageDir -Recurse -Directory -Filter "__pycache__" |
+            Remove-Item -Recurse -Force
+        Get-ChildItem -LiteralPath $bundleStageDir -Recurse -File -Include "*.pyc", "*.pyo" |
+            Remove-Item -Force
     }
 
     Compress-Archive -LiteralPath $stageDir -DestinationPath $zipPath -Force

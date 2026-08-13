@@ -105,6 +105,8 @@ jobs:
         run: cargo update -p rubash
 
       - name: Build winuxsh
+        env:
+          RUSTFLAGS: ""
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
 
       - name: Download architecture-matched WinuxCmd release

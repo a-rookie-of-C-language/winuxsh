@@ -12,13 +12,35 @@ use rubash::TokenKind;
 
 use crate::autosuggest::HistoryAutosuggestHinter;
 use crate::completion::WinuxshCompleter;
-use crate::config::{EditorMode, MenuConfig, NativeWidgetConfig};
+use crate::config::{EditorMode, MenuConfig, NativeWidgetBinding, NativeWidgetConfig};
 use crate::shell::Shell;
 use crate::syntax_highlighting::WinuxshSyntaxHighlighter;
-use crate::zsh_compat::NativeWidgetSuggestion;
 
 const COMPLETION_MENU: &str = "completion_menu";
 const HISTORY_MENU: &str = "history_menu";
+
+/// Extract the arguments of a `self-update` / `update-winuxsh` REPL command,
+/// or `None` when the line is not one.
+pub fn self_update_command_args(line: &str) -> Option<Vec<String>> {
+    let mut parts = line.trim().split_whitespace();
+    match parts.next()? {
+        "self-update" | "update-winuxsh" => Some(parts.map(str::to_string).collect()),
+        _ => None,
+    }
+}
+
+/// Hand `self-update` off to a child process of the current executable with
+/// `--self-update`, then exit this shell so the installer can replace the
+/// binary. Returns `None` when spawning is not possible; otherwise the child
+/// exit code.
+pub fn spawn_self_update(args: &[String]) -> Option<i32> {
+    let exe = std::env::current_exe().ok()?;
+    let mut command = std::process::Command::new(exe);
+    command.arg("--self-update").args(args);
+    let mut child = command.spawn().ok()?;
+    let status = child.wait().ok()?;
+    Some(status.code().unwrap_or(0))
+}
 
 /// Build a `Reedline` instance for the shell.
 pub fn build_line_editor(shell: &mut Shell) -> anyhow::Result<Reedline> {
@@ -106,7 +128,7 @@ fn history_exclusion_prefix(ignore_space_prefixed: bool) -> Option<String> {
 fn build_edit_mode(
     mode: EditorMode,
     native_widgets: &NativeWidgetConfig,
-    native_widget_bindings: &[NativeWidgetSuggestion],
+    native_widget_bindings: &[NativeWidgetBinding],
 ) -> Box<dyn EditMode> {
     match mode {
         EditorMode::Emacs => {
@@ -169,7 +191,7 @@ fn add_native_widget_keybindings(
     keybindings: &mut Keybindings,
     target: NativeKeymapTarget,
     config: &NativeWidgetConfig,
-    bindings: &[NativeWidgetSuggestion],
+    bindings: &[NativeWidgetBinding],
 ) {
     if !config.enabled {
         return;
@@ -185,7 +207,7 @@ fn add_native_widget_keybindings(
         if !native_widget_keymap_applies(binding.keymap.as_deref(), target) {
             continue;
         }
-        let Some(key) = binding.key.as_deref().and_then(parse_zsh_key_sequence) else {
+        let Some(key) = binding.key.as_deref().and_then(parse_key_sequence) else {
             continue;
         };
         let Some(event) = native_widget_event(&binding.widget) else {
@@ -259,6 +281,7 @@ fn native_widget_event(widget: &str) -> Option<ReedlineEvent> {
         "clear-screen" => Some(ReedlineEvent::ClearScreen),
         "redisplay" => Some(ReedlineEvent::Repaint),
         "expand-or-complete" | "complete-word" => Some(completion_event()),
+        "menu-previous" => Some(ReedlineEvent::MenuPrevious),
         "history-incremental-search-backward" => Some(ReedlineEvent::SearchHistory),
         "up-line-or-history" => Some(ReedlineEvent::Up),
         "down-line-or-history" => Some(ReedlineEvent::Down),
@@ -277,7 +300,10 @@ fn completion_event() -> ReedlineEvent {
     ])
 }
 
-fn parse_zsh_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+fn parse_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    if let Some(key) = parse_named_key_sequence(value) {
+        return Some(key);
+    }
     match value {
         "^[[A" | "\\e[A" | "\\eOA" => Some((KeyModifiers::NONE, KeyCode::Up)),
         "^[[B" | "\\e[B" | "\\eOB" => Some((KeyModifiers::NONE, KeyCode::Down)),
@@ -288,6 +314,47 @@ fn parse_zsh_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
             .or_else(|| parse_control_key_sequence(value))
             .or_else(|| parse_plain_key_sequence(value)),
     }
+}
+
+fn parse_named_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace("control+", "ctrl+")
+        .replace("option+", "alt+");
+    match normalized.as_str() {
+        "tab" => return Some((KeyModifiers::NONE, KeyCode::Tab)),
+        "shift+tab" | "backtab" => return Some((KeyModifiers::SHIFT, KeyCode::BackTab)),
+        "esc" | "escape" => return Some((KeyModifiers::NONE, KeyCode::Esc)),
+        "enter" | "return" => return Some((KeyModifiers::NONE, KeyCode::Enter)),
+        "space" => return Some((KeyModifiers::NONE, KeyCode::Char(' '))),
+        "backspace" => return Some((KeyModifiers::NONE, KeyCode::Backspace)),
+        "delete" | "del" => return Some((KeyModifiers::NONE, KeyCode::Delete)),
+        "up" => return Some((KeyModifiers::NONE, KeyCode::Up)),
+        "down" => return Some((KeyModifiers::NONE, KeyCode::Down)),
+        "left" => return Some((KeyModifiers::NONE, KeyCode::Left)),
+        "right" => return Some((KeyModifiers::NONE, KeyCode::Right)),
+        _ => {}
+    }
+    parse_modified_named_key(&normalized, "ctrl+", KeyModifiers::CONTROL)
+        .or_else(|| parse_modified_named_key(&normalized, "alt+", KeyModifiers::ALT))
+}
+
+fn parse_modified_named_key(
+    value: &str,
+    prefix: &str,
+    modifiers: KeyModifiers,
+) -> Option<(KeyModifiers, KeyCode)> {
+    let rest = value.strip_prefix(prefix)?;
+    if rest == "space" {
+        return Some((modifiers, KeyCode::Char(' ')));
+    }
+    let mut chars = rest.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((modifiers, KeyCode::Char(ch)))
 }
 
 fn parse_alt_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
@@ -683,7 +750,7 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 
 /// Run the interactive REPL.
 pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
-    // First-run setup wizard (Oh-My-Zsh style)
+    // First-run setup wizard.
     if crate::setup_wizard::is_first_run() {
         let _ = crate::setup_wizard::run_wizard();
     }
@@ -717,6 +784,13 @@ pub fn run_repl(shell: &mut Shell) -> anyhow::Result<()> {
                 }
                 if pending.is_empty() && matches!(line.trim(), "exit" | "logout") {
                     break;
+                }
+                if pending.is_empty() {
+                    if let Some(args) = self_update_command_args(line) {
+                        if let Some(code) = spawn_self_update(&args) {
+                            std::process::exit(code);
+                        }
+                    }
                 }
 
                 pending.push(line);
@@ -961,6 +1035,41 @@ mod tests {
     }
 
     #[test]
+    fn native_widget_imports_named_bundle_key_syntax() {
+        let mut keybindings = default_emacs_keybindings();
+        let config = NativeWidgetConfig {
+            enabled: true,
+            presets: Vec::new(),
+            import_bindkeys: true,
+        };
+        let bindings = vec![
+            native_widget_binding("Ctrl+A", Some("emacs"), "beginning-of-line"),
+            native_widget_binding("Alt+B", Some("emacs"), "backward-word"),
+            native_widget_binding("Shift+Tab", Some("emacs"), "menu-previous"),
+        ];
+
+        add_native_widget_keybindings(
+            &mut keybindings,
+            NativeKeymapTarget::Emacs,
+            &config,
+            &bindings,
+        );
+
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::CONTROL, KeyCode::Char('a')),
+            Some(edit_event(EditCommand::MoveToLineStart { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::ALT, KeyCode::Char('b')),
+            Some(edit_event(EditCommand::MoveWordLeft { select: false }))
+        );
+        assert_eq!(
+            keybindings.find_binding(KeyModifiers::SHIFT, KeyCode::BackTab),
+            Some(ReedlineEvent::MenuPrevious)
+        );
+    }
+
+    #[test]
     fn native_widget_bindkeys_respect_vi_keymaps() {
         let mut insert = default_vi_insert_keybindings();
         let mut normal = default_vi_normal_keybindings();
@@ -1029,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn native_widget_maps_standard_zle_widgets_to_reedline_events() {
+    fn native_widget_maps_standard_editor_widgets_to_reedline_events() {
         let mut keybindings = default_emacs_keybindings();
         let config = NativeWidgetConfig {
             enabled: true,
@@ -1088,12 +1197,8 @@ mod tests {
         ));
     }
 
-    fn native_widget_binding(
-        key: &str,
-        keymap: Option<&str>,
-        widget: &str,
-    ) -> NativeWidgetSuggestion {
-        NativeWidgetSuggestion {
+    fn native_widget_binding(key: &str, keymap: Option<&str>, widget: &str) -> NativeWidgetBinding {
+        NativeWidgetBinding {
             widget: widget.to_string(),
             function: None,
             key: Some(key.to_string()),

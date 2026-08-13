@@ -1,11 +1,11 @@
-[package]
+﻿[package]
 name = "winuxsh"
-version = "0.9.0"
+version = "0.10.4"
 edition = "2021"
 rust-version = "1.70"
 license = "GPL-3.0-or-later"
 authors = ["unixwin team <arookieofc@gmail.com>"]
-description = "A bash-compatible shell for Windows, built on rubash + winuxcmd"
+description = "AI-native bash-compatible shell for Windows, built on rubash + winuxcmd"
 readme = "README.md"
 homepage = "https://github.com/unixwin/winuxsh"
 repository = "https://github.com/unixwin/winuxsh"
@@ -24,9 +24,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 sha2 = "0.10"
-wat = "1.254"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
