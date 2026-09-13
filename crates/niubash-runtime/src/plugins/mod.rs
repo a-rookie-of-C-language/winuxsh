@@ -1454,10 +1454,10 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
         title, inventory.bundle, inventory.version
     )));
     out.push('\n');
-    if verbose {
-        out.push_str(&format!("Source: {}\n", inventory.source));
-        out.push_str(&format!("Trust source: {}\n", inventory.trust_source));
-    }
+    out.push_str(&format!("Bundle: {}\n", inventory.bundle));
+    out.push_str(&format!("Source: {}\n", inventory.source));
+    out.push_str(&format!("Trust source: {}\n", inventory.trust_source));
+    out.push_str("These are Niubash-native packs; review source/process packs before enabling.\n");
     match inventory.trust_source.as_str() {
         "external_bundle" => out.push_str(
             "External bundle packs are review-only until registry trust policy is implemented.\n",
@@ -1488,10 +1488,10 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     available.sort_by(|a, b| a.name.cmp(&b.name));
     themes.sort_by(|a, b| a.name.cmp(&b.name));
 
+    for pack in &inventory.packs {
+        out.push_str(&pack_list_line(pack));
+    }
     if verbose {
-        for pack in &inventory.packs {
-            out.push_str(&pack_list_line(pack));
-        }
         return out;
     }
 
@@ -1637,6 +1637,96 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         crate::text_style::bold(&pack.name),
         pack.summary
     ));
+    out.push_str(&format!("Plugin: {}\n", pack.name));
+    out.push_str(&format!("Bundle: {}\n", pack.bundle));
+    out.push_str(&format!("Source: {}\n", inventory.source));
+    out.push_str(&format!("Trust source: {}\n", inventory.trust_source));
+    out.push_str(&format!("Version: {}\n", pack.version));
+    out.push_str(&format!("Summary: {}\n", pack.summary));
+    out.push_str(&format!("Kind: {}\n", pack.kind.as_str()));
+    out.push_str(&format!(
+        "Default: {}\n",
+        if pack.default { "on" } else { "off" }
+    ));
+    out.push_str(&format!(
+        "Execution model: {}\n",
+        plugin_execution_model(pack)
+    ));
+    out.push_str(&format!(
+        "Externalization class: {}\n",
+        plugin_externalization_class(pack)
+    ));
+    if !pack.permissions.is_empty() {
+        out.push_str(&format!("Permissions: {}\n", pack.permissions.join(",")));
+    }
+    if !pack.required_binaries.is_empty() {
+        out.push_str(&format!(
+            "Required binaries: {}\n",
+            pack.required_binaries.join(",")
+        ));
+    }
+    out.push_str(&format!(
+        "  aliases: {}\n",
+        if pack.exports.aliases { "yes" } else { "no" }
+    ));
+    if !pack.exports.completions.is_empty() {
+        out.push_str(&format!(
+            "  completions: {}\n",
+            pack.exports.completions.join(",")
+        ));
+    }
+    if !pack.exports.prompt_segments.is_empty() {
+        out.push_str(&format!(
+            "  prompt_segments: {}\n",
+            pack.exports.prompt_segments.join(",")
+        ));
+    }
+    if !pack.exports.hooks.is_empty() {
+        out.push_str(&format!("  hooks: {}\n", pack.exports.hooks.join(",")));
+    }
+    if !pack.exports.commands.is_empty() {
+        out.push_str(&format!(
+            "  commands: {}\n",
+            pack.exports.commands.join(",")
+        ));
+    }
+    if !pack.exports.keybindings.is_empty() {
+        out.push_str(&format!(
+            "  keybindings: {}\n",
+            pack.exports.keybindings.join(",")
+        ));
+    }
+    if !pack.exports.themes.is_empty() {
+        out.push_str(&format!("  themes: {}\n", pack.exports.themes.join(",")));
+    }
+    if !pack.exports.providers.is_empty() {
+        out.push_str(&format!(
+            "  providers: {}\n",
+            pack.exports.providers.join(",")
+        ));
+    }
+    if let Some(source) = &pack.source {
+        out.push_str("Source:\n");
+        out.push_str(&format!("  entry: {}\n", source.entry));
+    }
+    if let Some(process) = &pack.process {
+        out.push_str("Process:\n");
+        out.push_str(&format!("  protocol: {}\n", process.protocol));
+        out.push_str(&format!("  command: {}\n", process.command));
+        out.push_str(&format!("  args: {}\n", list_or_none(&process.args)));
+        out.push_str(&format!("  timeout_millis: {}\n", process.timeout_millis));
+    }
+    let keybinding_lines = plugin_keybinding_metadata_lines(&inventory, pack);
+    if !keybinding_lines.is_empty() {
+        out.push_str("Keybinding metadata:\n");
+        for line in &keybinding_lines {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let readiness = plugin_readiness_profile(pack);
+    push_readiness_text(&mut out, &readiness);
     out.push_str(&kv(
         "state",
         if pack.default {
@@ -1707,7 +1797,6 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
         out.push_str(&kv("entry", source.entry.clone()));
         out.push('\n');
     }
-    let keybinding_lines = plugin_keybinding_metadata_lines(&inventory, pack);
     if verbose && !keybinding_lines.is_empty() {
         out.push_str("  keybinding metadata:\n");
         for line in keybinding_lines {
@@ -1762,12 +1851,17 @@ pub fn plugin_search_json(query: Option<&str>) -> anyhow::Result<String> {
 }
 pub fn plugin_search_text(query: Option<&str>) -> String {
     let inventory = active_plugin_inventory();
+    let source = inventory.source.clone();
+    let trust_source = inventory.trust_source.clone();
     let mut out = String::new();
     out.push_str("Plugin search\n");
+    out.push_str(&format!("Source: {}\n", source));
+    out.push_str(&format!("Trust source: {}\n", trust_source));
     if let Some(query) = query {
         out.push_str(&format!("Query: {}\n", query));
     }
     for result in plugin_search_results_from_inventory(query, inventory) {
+        out.push_str(&pack_list_line(&result.pack));
         out.push_str(&pack_human_line(&result.pack));
     }
     out
@@ -1856,6 +1950,21 @@ pub fn plugin_bundle_status_text_verbose(verbose: bool) -> String {
         .active_version
         .as_deref()
         .unwrap_or(OFFICIAL_BUNDLE_VERSION);
+    if status.trust_source == "official_bundle" {
+        out.push_str("Official Niubash plugin bundle\n");
+    } else {
+        out.push_str("Niubash plugin bundle status\n");
+    }
+    out.push_str(&format!("State: {}\n", status.state));
+    out.push_str(&format!("Bundle: {}\n", status.bundle));
+    out.push_str(&format!("Source: {}\n", status.source));
+    out.push_str(&format!("Trust source: {}\n", status.trust_source));
+    if let Some(active_version) = &status.active_version {
+        out.push_str(&format!("Active version: {}\n", active_version));
+    }
+    if !status.message.is_empty() {
+        out.push_str(&format!("Message: {}\n", status.message));
+    }
     match status.state.as_str() {
         "installed" => {
             let how = match status.trust_source.as_str() {
@@ -2140,6 +2249,28 @@ pub fn plugin_permission_review(
 }
 pub fn plugin_permission_review_text(review: &PluginPermissionReview) -> String {
     let mut out = String::new();
+    out.push_str(&format!("Plugin permission review: {}\n", review.plugin));
+    out.push_str(&format!("Kind: {}\n", review.kind.as_str()));
+    out.push_str(&format!("Trust source: {}\n", review.trust_source));
+    out.push_str(&format!("Execution model: {}\n", review.execution_model));
+    out.push_str(&format!(
+        "Externalization class: {}\n",
+        review.externalization_class
+    ));
+    push_readiness_text(&mut out, &review.readiness);
+    for item in &review.permissions {
+        out.push_str(&format!(
+            "{} risk={} scope={} {}\n",
+            item.token, item.risk, item.scope, item.description
+        ));
+    }
+    if !review.missing_required_binaries.is_empty() {
+        out.push_str(&format!(
+            "missing required binaries: {}\n",
+            review.missing_required_binaries.join(",")
+        ));
+    }
+    out.push_str(&format!("Install command: {}\n", review.install_command));
     out.push_str(&format!("Permission review — {}\n", review.plugin));
     out.push_str(&format!(
         "  currently enabled: {}\n",
@@ -2723,7 +2854,7 @@ fn validate_source_pack_contract(pack: &PluginPackRecord, root: &Path) -> anyhow
     let ext = path.extension().and_then(|value| value.to_str());
     if ext != Some("niu") && ext != Some("winux") {
         anyhow::bail!(
-            "source pack '{}' entry '{}' must end in .niu or .winux",
+            "source pack '{}' entry '{}' must end in .winux or .niu",
             pack.name,
             source.entry
         );
@@ -3128,6 +3259,15 @@ pub fn plugin_theme_catalog_text() -> String {
     let mut user = Vec::new();
     let mut bundle = Vec::new();
     for entry in plugin_theme_catalog() {
+        out.push_str(&format!(
+            "- {} source={} owner={} bundle={} pack={} trust_source={}\n",
+            entry.name,
+            entry.source,
+            entry.owner,
+            entry.bundle.as_deref().unwrap_or("none"),
+            entry.pack.as_deref().unwrap_or("none"),
+            entry.trust_source
+        ));
         if entry.source == "user" {
             user.push(entry.name);
         } else {
