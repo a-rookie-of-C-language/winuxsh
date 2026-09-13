@@ -35,6 +35,12 @@ pub fn capture() -> ConsoleBaseline {
     platform::capture()
 }
 
+/// Prefer UTF-8 for Windows console I/O so native child tools render Unicode
+/// filenames consistently. This is best-effort and a no-op off Windows.
+pub fn prefer_utf8_code_page() {
+    platform::prefer_utf8_code_page();
+}
+
 /// Restore the baseline console modes and re-show the cursor. Safe to call
 /// when handles are redirected (non-console handles are skipped).
 pub fn restore(baseline: &ConsoleBaseline) {
@@ -48,16 +54,25 @@ mod platform {
     use super::ConsoleBaseline;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_PROCESSED_OUTPUT,
-        ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT, STD_ERROR_HANDLE,
-        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        GetConsoleMode, GetStdHandle, SetConsoleCP, SetConsoleMode, SetConsoleOutputCP,
+        ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
+
+    const UTF8_CODE_PAGE: u32 = 65001;
 
     pub fn capture() -> ConsoleBaseline {
         ConsoleBaseline {
             stdin_mode: console_mode(STD_INPUT_HANDLE),
             stdout_mode: console_mode(STD_OUTPUT_HANDLE).map(ensure_vt_bits),
             stderr_mode: console_mode(STD_ERROR_HANDLE).map(ensure_vt_bits),
+        }
+    }
+
+    pub fn prefer_utf8_code_page() {
+        unsafe {
+            let _ = SetConsoleCP(UTF8_CODE_PAGE);
+            let _ = SetConsoleOutputCP(UTF8_CODE_PAGE);
         }
     }
 
@@ -131,6 +146,7 @@ mod platform {
         #[test]
         fn capture_and_restore_is_safe_and_idempotent() {
             let baseline = capture();
+            prefer_utf8_code_page();
             restore(&baseline);
             restore(&baseline);
         }
@@ -148,6 +164,8 @@ mod platform {
     pub fn capture() -> ConsoleBaseline {
         ConsoleBaseline
     }
+
+    pub fn prefer_utf8_code_page() {}
 
     pub fn restore(_baseline: &ConsoleBaseline) {}
 }

@@ -192,6 +192,42 @@ fn slash_drive_paths_are_compat_input_not_default_output() {
 }
 
 #[test]
+fn slash_drive_root_cd_switches_to_drive_root() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let temp = unique_temp_dir("niubash-host-slash-drive-root-cd");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+
+    let start_native_path = native_path(&start);
+    let bytes = start_native_path.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        let _ = std::fs::remove_dir_all(temp);
+        return;
+    }
+
+    let drive = (bytes[0] as char).to_ascii_uppercase();
+    let drive_root = format!("{drive}:/");
+    let output = run_niu(
+        &format!("cd /{}; pwd; cmd.exe /C cd", drive.to_ascii_lowercase()),
+        &start,
+        &home,
+        &[],
+    );
+    assert_success(&output, "slash-drive root cd");
+    let stdout = stdout_lines(&output);
+    assert_eq!(stdout.len(), 2, "stdout was {stdout:?}");
+    assert_same_path(&stdout[0], &drive_root);
+    assert_same_path(&stdout[1], &drive_root);
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
 fn slash_drive_mktemp_template_creates_file() {
     if !cfg!(windows) {
         return;
@@ -662,6 +698,40 @@ fn native_backslash_drive_paths_work_for_winuxcmd() {
     assert!(
         stdout.iter().any(|line| line.contains("marker.txt")),
         "ls output did not include marker.txt: {stdout:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn winuxcmd_ls_preserves_unicode_filenames() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let Some(winuxcmd) = real_winuxcmd_for_test() else {
+        return;
+    };
+
+    let temp = unique_temp_dir("niubash-host-unicode-ls");
+    let home = temp.join("home");
+    let start = temp.join("start");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&start).unwrap();
+    let filename = "中文测试.txt";
+    std::fs::write(start.join(filename), "ok").unwrap();
+
+    let output = run_niu(
+        "ls",
+        &start,
+        &home,
+        &[("WINUXCMD_PATH", native_path(&winuxcmd))],
+    );
+    assert_success(&output, "unicode filename ls");
+    let stdout = normalize_text(&output.stdout);
+    assert!(
+        stdout.contains(filename),
+        "ls should preserve unicode filename {filename:?}, got {stdout:?}"
     );
 
     let _ = std::fs::remove_dir_all(temp);
