@@ -227,6 +227,13 @@ impl Shell {
 
         // 3. Build rubash Executor after host path selection.
         let shell_was_missing = std::env::var_os("SHELL").is_none();
+        let default_shell_path = if cfg!(windows) && shell_was_missing {
+            std::env::current_exe()
+                .ok()
+                .map(|exe| exe.to_string_lossy().replace('\\', "/"))
+        } else {
+            None
+        };
         if cfg!(windows) {
             // Keep the embedded Rubash path-display contract active for the
             // entire shell lifetime; `cd` consults the process environment.
@@ -234,6 +241,9 @@ impl Shell {
             // Deprecated bridge: current rubash upstream still reads the
             // pre-rename variable; drop once rubash renames its readers.
             std::env::set_var("WINUXSH_SHELL_PATH_STYLE", "native");
+        }
+        if let Some(shell_path) = &default_shell_path {
+            std::env::set_var("SHELL", shell_path);
         }
         let mut executor = Executor::new();
         crate::startup_trace::tick("executor created");
@@ -266,10 +276,8 @@ impl Shell {
         // Starship is initialized through its Bash integration even when
         // Niubash is invoked through the sh/bash command shims.
         executor.set_env("STARSHIP_SHELL", "bash");
-        if cfg!(windows) && shell_was_missing {
-            if let Ok(exe) = std::env::current_exe() {
-                executor.set_env("SHELL", &host_path_to_shell_path(&exe.to_string_lossy()));
-            }
+        if let Some(shell_path) = &default_shell_path {
+            executor.set_env("SHELL", shell_path);
         }
         // Bash sets $BASH to the full pathname used to execute the current
         // instance (bash(1), BASH variable); scripts probe it to detect bash.
