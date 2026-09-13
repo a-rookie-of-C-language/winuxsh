@@ -2,7 +2,7 @@
 """Generate the codex-vs-powershell drama GIF with PIL, frame by frame.
 
 Storyboard: a developer chats with codex; codex's suggestion gets eaten by
-PowerShell's argument parsing; the user loses it; winuxsh saves the day.
+PowerShell's argument parsing; the user loses it; niubash saves the day.
 
 Usage: uv run --with pillow python scripts/gen-demo-drama.py [ffmpeg.exe]
 Output: assets/demo-drama.gif (18s @ 12fps, 880x480)
@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 W, H = 880, 480
 FPS = 12
 DURATION = 18.0
-BG = (13, 17, 23)          # 0x0d1117
+BG = (14, 18, 48)          # 0x0e1230 (brand navy)
 WHITE = (255, 255, 255)
 BLUE = (121, 192, 255)     # 0x79c0ff
 RED = (255, 85, 85)        # 0xff5555
@@ -41,7 +41,7 @@ LINES = [
     (r'> node -e "..." "a b" "" "c\"d" "e\f"', 11.2, 18.0, WHITE, CONSOLA, 24, 70, 130, "left", 30, 0.0, 0, 0.0),
     (r'["a b","","c\"d","e\\f","---"]', 12.4, 18.0, GREEN, CONSOLA, 26, 70, 170, "left", 30, 0.0, 0, 0.0),
     ("you: never going back to pwsh", 14.2, 18.0, GREEN, MSYHBD, 36, 0, 250, "center", 40, 0.0, 1, 0.0),
-    ("winuxsh — bash, native on Windows", 15.6, 18.0, BLUE, MSYHBD, 46, 0, 330, "center", 0, 0.0, 0, 0.8),
+    ("niubash — bash, native on Windows", 15.6, 18.0, BLUE, MSYHBD, 46, 0, 330, "center", 0, 0.0, 0, 0.8),
 ]
 
 
@@ -73,7 +73,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = os.path.join(here, "..", "assets", "demo-drama.gif")
 
-    tmpdir = tempfile.mkdtemp(prefix="winuxsh-drama-")
+    tmpdir = tempfile.mkdtemp(prefix="niubash-drama-")
     font_cache = {}
 
     def font(path, size):

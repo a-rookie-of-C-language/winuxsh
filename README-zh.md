@@ -1,47 +1,130 @@
-# Winuxsh
+<p align="center">
+  <img src="assets/niubash-banner.svg" alt="niubash — Bash, native on Windows." />
+</p>
 
-> **Windows 上的原生 Bash。** 不是 WSL，不是虚拟机，不是 `/mnt/c`，更不是 cmdlet。
-> 不是你记忆中的那个 Bash，但原汁原味的程度没两样。这次，参数一个都不会少。
+> **Bash 原生登陆 Windows——牛来了。**
+> 不用 WSL，不开虚拟机，没有 `/mnt/c`，没有 cmdlet 方言。
+> 一个 `niu.exe`：你手指肌肉记得的那个 shell，也是你 AI agent 天生会说的那个 shell。
 
-中文 · [English](README.md)
+<div align="center">
 
-[![Winuxsh CI](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/winuxsh/actions/workflows/ci.yml)
-[![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/unixwin/winuxsh)](https://github.com/unixwin/winuxsh/stargazers)
+[English](README.md) · [中文](README-zh.md)
 
-一个原生 Windows 二进制。Bash 语法。Windows 路径。真 Windows 程序。
-Unix 命令随包附赠。你的命令和你的工具之间，没有模拟层，也没有翻译官——
-你 AI agent 想摔跤都没地方摔。
+[![niubash CI](https://github.com/unixwin/niubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/niubash/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/unixwin/niubash)](https://github.com/unixwin/niubash/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64%20%7C%20ARM64-blue)](https://github.com/unixwin/niubash)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)](https://github.com/unixwin/niubash)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/unixwin/niubash)](https://github.com/unixwin/niubash/stargazers)
 
-<img src="assets/demo.gif" alt="Winuxsh 交互会话：git prompt、grep、sed 原地编辑、awk 管道、tree" width="760"/>
+</div>
 
-就这些。这就是全部卖点。
+**niubash** 是一个原生 Windows shell，跑的是真·Bash——没有 Linux 虚拟机，
+没有模拟层，没有路径轮盘赌。一个 `niu.exe` 打包了：
+[rubash](https://github.com/unixwin/rubash) 语言引擎、来自
+[winuxcmd](https://github.com/unixwin/winuxcmd) 的
+真 Unix 命令、带 git 状态的 prompt，以及带权限模型的插件系统。
 
-## 一句话卖点
+**亮点**
 
-**你需要的不是 WSL——是 Winuxsh。**
+- **真·Bash** — `if`、`for`、`case`、`$(...)`、管道、heredoc、函数、数组，全都在。引擎是 [rubash](https://github.com/unixwin/rubash)，GNU Bash 官方测试套件 **86/86 全绿**。
+- **Windows 路径，原生进原生出** — 任何方言进，Windows 原生出。没有 `/mnt/c`，没有 MSYS 式路径转换抽风。
+- **Unix 命令随包附赠** — `ls`、`cat`、`grep`、`find`、`sed`、`printf`…… 来自 winuxcmd 的真二进制，就在你的 PATH 上。什么都不用装。
+- **真 Windows 程序，直接调** — `git.exe`、`node.exe`、`python.exe`、`cargo.exe`。你的 PATH 就是你的 PATH。
+- **为 AI agent 而生** — 模型是在 Bash 语料上训练的；niubash 让它们在 Windows 上拿到确定性的 Bash 契约。
+- **一个愿意天天看的 prompt** — 27 款主题、会"长牙"的 git 状态提示、语法高亮、自动建议、vi/emacs 双模式。
+
+现场演示：
+
+<div align="center">
+
+<p><a href="https://dl.caomengxuan666.com"><strong>▶ 观看 41 秒宣传片</strong></a> —— 完整演示，带声音。</p>
+
+<img src="assets/demo.gif" alt="niubash 交互会话：starship 提示符、Tab 补全、grep 管道、heredoc、wpm 包管理、eza 图标" width="720"/>
+
+</div>
+
+## 目录
+
+- [安装](#安装)
+- [配置](#配置)
+- [特性](#特性)
+- [为什么不用 WSL](#为什么不用-wsl)
+- [对 AI agent 友好](#对-ai-agent-友好)
+- [对比](#对比)
+- [架构](#架构)
+- [常见问题](#常见问题)
+- [文档](#文档)
+- [参与贡献](#参与贡献)
+- [许可证](#许可证)
+
+## 安装
+
+去 [Releases](https://github.com/unixwin/niubash/releases) 下载
+`niubash-v*-win-*-setup.exe`，双击，完事——不需要管理员
+权限，它会配好你的 PATH 和 Windows Terminal 配置。嫌重？拿 `.zip` 便携版
+（首次启动自动激活 Unix 命令）。源码构建：
+
+```sh
+git clone https://github.com/unixwin/niubash.git && cd niubash
+cargo build --release && target\release\niu.exe
+```
+
+要求：**Windows 10/11 x64 或 ARM64**，源码构建需 Rust 1.70+。
+
+## 配置
+
+配置只有一份：`~/.niubashrc`，纯 Bash 语法。主题、prompt、插件、环境变量、
+alias、函数都放这里：
+
+```bash
+NIU_THEME=p10-classic
+NIU_THEME_PLUGIN=theme-p10-classic
+NIU_PLUGINS=(prompt-core git common-aliases)
+export NIU_THEME NIU_THEME_PLUGIN
+
+# 官方插件发行版 oh-my-niu
+[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
+
+alias ll='ls -la'
+alias gst='git status'
+hello() { echo "hello from niu"; }
+```
+
+- **多 shell 共享历史** — `NIU_HISTORY_MODE` 三档可选：`shared`（默认）、`session`、`private`。
+- **保持最新** — `niu --self-update`（shell 内也可用 `self-update`）。
+
+## 特性
+
+- **真·Bash 语义** — [rubash](https://github.com/unixwin/rubash) 引擎，GNU Bash 上游测试套件 **86/86 全绿**。
+- **原生路径契约** — 任何方言进，Windows 原生出。MSYS 式的路径转换抽风，这里不存在。
+- **Unix 命令真二进制** — winuxcmd 通过 PATH 命令链接注入，`ls`/`grep` 是真 Windows 进程，不是嵌在 shell 里的模拟。
+- **一个愿意天天看的 prompt** — 27 款主题（agnoster、spaceship、tokyonight、p10 家族……）、会"长牙"的 git 状态提示（staged / modified / untracked / ↑↓ / stash / 冲突）、语法高亮、自动建议、vi/emacs 双模式、Ctrl+R 历史搜索。
+- **带权限模型的插件系统** — 40+ 官方 pack（`git`、`docker`、`kubectl`、`npm`、`zoxide`、`direnv`、`fzf`、`thefuck`……），manifest 统一声明宿主权限，受审阅的 source pack 只能加载 bundle 内声明过的脚本。
+- **补全系统** — shell 定义 + bash 补全脚本自动导入 + `cmd -h` 描述抓取 + 三级缓存。
+- **三种执行模式** — 交互 REPL；一次性命令执行（安静确定性，不加载 rc 和插件）；一次性 REPL 命令，加载完整启动状态后退出。
+- **自更新** — shell、命令层（`wpm update winuxcmd`）、插件包三条更新线各自独立。
+
+## 为什么不用 WSL
+
+为了跑个 `grep` 先开一台 Linux 虚拟机，等于为了喝牛奶买下一整座牧场。
+牛确实是好牛，但日子不必这么过。
 
 每个 Windows shell 都要你交出点什么。CMD 冻结在 1987 年。PowerShell
 不是 Bash——你的 `for`、`grep`、引号直觉，落地即碎。WSL 是你要领养一整个
 Linux 发行版才能打印个目录。Git Bash 模拟 Unix 并*猜*你的路径，而 Windows
 原生工具根本不说它的方言。
 
-Winuxsh 全部还给你：
+niubash 把 Bash 还给你，却不必背负那些开销：没有发行版要打补丁，没有模拟层要哄。
+完整能力与逐项对比都在下面——[特性](#特性) 与 [对比](#对比)。
 
-- **真·Bash** — `if`、`for`、`case`、`$(...)`、管道、heredoc、函数、数组。引擎是 [rubash](https://github.com/unixwin/rubash)，GNU Bash 官方测试套件 **86/86 全绿**。
-- **Windows 路径，原生** — `C:\...`、`C:/...` 原样可用，`/c/...` 输入也听得懂，输出永远是原生。原生工具拿到原生路径，零猜测。
-- **Unix 命令随包附赠** — `ls`、`cat`、`grep`、`find`、`test`、`printf`…… 来自 WinuxCmd，什么都不用装。
-- **真 Windows 程序，直接调** — `git.exe`、`node.exe`、`python.exe`、`cargo.exe`。你的 PATH 就是你的 PATH。
-- **一个你愿意天天看的 prompt** — 27 款主题（agnoster、spaceship、tokyonight、p10 家族……）、会"长牙"的 git 提示、语法高亮、自动建议、vi/emacs 双模式。
-- **带权限模型的插件** — 40+ 随包插件（`git`、`docker`、`kubectl`、`npm`、`zoxide`、`fzf`、`thefuck`……），受审阅的 source 插件和 process 适配器都会声明所需的宿主权限。
+## 对 AI agent 友好
 
-## AI 原生
-
-每个 AI 编程 agent 都会说 Bash。在 Windows 上，它们大多被锁在 PowerShell
-里——就是那个著名的*吃参数*的 shell：
+每个 AI 编程 agent 都会说 Bash——模型是在 Bash 语料上训练的。在 Windows
+上，它们大多被锁在 PowerShell 里，就是那个著名的*吃参数*的 shell：
 
 ```text
-# PowerShell 5.1                              # Winuxsh
+# PowerShell 5.1                              # niubash
 > node -e "console.log(JSON.stringify(        ❯ node -e "console.log(JSON.stringify(
     process.argv.slice(1)))" "a b" "" "c\"d"    process.argv.slice(1)))" "a b" "" "c\"d"
     "e\f" "---"                                 "e\f" "---"
@@ -49,80 +132,78 @@ Winuxsh 全部还给你：
 ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 ```
 
-写了 5 个参数：PowerShell 直接语法报错，Winuxsh 五个全到、一个字节不少。
+写了 5 个参数：PowerShell 直接语法报错，niubash 五个全到、一个字节不少。
 连 [Codex 在 Windows 上都被锁死 PowerShell](https://github.com/openai/codex/issues/31548)，
-用户正在公开投票要求逃生。
-完整案卷见 [Why Winuxsh](docs/src/why-winuxsh.md)。
+用户正在公开投票要求逃生。完整案卷见 [Why niubash](docs/src/why-niubash.md)。
+
+一次性调用是一份契约，不是边角料：
+
+- **无 banner**、stdout/stderr 稳定、**退出码精确传递**——agent 写什么，进程就收到什么。
+- **不加载 rc、不加载插件、不跑交互钩子**，今天跑和明天跑一个样。
+- **路径零转换**：Bash 语感直接可用，没有 MSYS 式的参数改写轮盘赌。
+- Bash 训练出来的模型，在 niubash 里第一次不用"入乡随俗"。
 
 这就是键盘另一头的人经历的日常：
 
-<img src="assets/demo-drama.gif" alt="动画剧情：用户和 codex 对话，PowerShell 吃掉参数，用户崩溃，winuxsh 救场" width="520"/>
+<div align="center">
 
-`winuxsh -c` 是一份契约，不是边角料：**无 banner、stdout/stderr 稳定、
-退出码精确传递。** agent 写什么，进程就收到什么。
+<img src="assets/demo-drama.gif" alt="动画剧情：用户和 codex 对话，PowerShell 吃掉参数，用户崩溃，niubash 救场" width="560"/>
 
-```sh
-winuxsh -c 'test -f Cargo.toml && echo build' && echo "exit=$?"
-winuxsh deploy.sh
+</div>
+
+## 对比
+
+| | niubash | WSL | Git Bash | PowerShell | CMD |
+|---|---|---|---|---|---|
+| Bash 语法 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| 原生 Windows 路径（无 `/mnt/c`） | ✅ | ❌ | ⚠️ 转换抽风 | ✅ | ✅ |
+| 直接调用 `git.exe` / `node.exe` | ✅ | ⚠️ 经 `/mnt/c` | ⚠️ 路径翻译 | ✅ | ✅ |
+| 自带 Unix 命令（`ls`、`grep`、`find`） | ✅ | ✅ | ✅ | ❌ | ❌ |
+| agent 写的 Bash 直接能跑 | ✅ | ✅ | ⚠️ 参数改写 | ❌ | ❌ |
+| 冷启动到提示符 | **~170 ms** | 秒级 | ~1 s | ~280 ms | — |
+| 不装额外 OS、不开 VM | ✅ | ❌ | ✅ | ✅ | ✅ |
+| 主题 / git 提示 / 插件 | ✅ | — | ✅ | ⚠️ | ❌ |
+
+一个二进制。一个进程。没有发行版要打补丁，没有模拟层要哄。
+
+## 架构
+
+```
+niu.exe
+├── niubash 宿主层（Rust）       reedline 行编辑 · 主题 · 补全 · 插件 · Ctrl+C
+├── rubash 语言引擎（lib，Rust）  lexer / parser / executor / builtins
+└── winuxcmd.exe 命令层（C++）   Unix coreutils 真二进制，PATH 命令链接注入
 ```
 
-## 安装
+- **rubash 是引擎，也是唯一权威** — niubash 不自己实现 shell 语言，rubash 作为 Rust crate 直接链接。解析、执行、内建命令、变量展开、重定向、管道、作业控制，全部在上游。修语义 bug 去 [rubash](https://github.com/unixwin/rubash) 上游修，Windows 上每一个 bash 用户一起受益。
+- **winuxcmd 是命令层，不是 DLL** — 没有 FFI、没有路由表魔法。它就是普通 Windows 进程，rubash 通过正常 PATH 找到 `ls`、`grep` 这些命令链接。
+- **oh-my-niu 是官方插件发行版** — 随 niubash 发行，manifest 声明权限，审阅过的 source pack + process 适配器两种形态。
+- 非目标：Linux/macOS 原生 shell 产品。rubash 可跨平台复用，但 niubash 的目标就是 Windows——把一件事做牛。
 
-去 [Releases](https://github.com/unixwin/winuxsh/releases) 下载
-`winuxsh-v*-win-*-setup.exe`，双击，完事——不需要管理员权限，它会配好
-你的 PATH 和 Windows Terminal 配置。嫌重？拿 `.zip` 便携版（首次启动自动
-激活 Unix 命令）。源码构建：
+## 常见问题
 
-```sh
-git clone https://github.com/unixwin/winuxsh.git && cd winuxsh
-cargo build --release && target\release\winuxsh.exe
-```
-
-保持最新：`winuxsh --self-update`。
-
-## 配置
-
-`~/.winuxshrc` 是交互式入口。主题、prompt、插件、环境变量、alias、
-函数都放这里：
-
-```sh
-WINUXSH_THEME=spaceship
-WINUXSH_PLUGINS=(prompt-core git)
-[ -f "$WINUXSH/oh-my-winuxsh.winux" ] && . "$WINUXSH/oh-my-winuxsh.winux"
-```
-
-## 终端彩蛋
-
-Winuxsh 的终端不只能跑命令——还能打印图片。[terminal-flags](https://github.com/caomengxuan666/terminal-flags)
-项目可以把任意图片/GIF 转成独立 ANSI 打印脚本：
-
-```sh
-winuxsh flags/taffy.sh         # 照片，直接显示在终端里
-winuxsh flags/qiu-dance.sh     # GIF 动画，帧率原样保留
-```
-
-真彩色半块像素，运行时不需要 Python 或 Pillow：
-
-<img src="assets/demo-qiu-dance.gif" alt="秋表情动画在 Winuxsh 终端里播放，由生成的 shell 脚本打印" width="560"/>
+- **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix：翻译路径、猜参数。niubash 是原生 Windows 进程，Bash 兼容发生在语言引擎（rubash）里，不在假文件系统里。
+- **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 niubash。
+- **"为什么叫 niu？"** niu = 牛。短、好打、不粘键盘油。项目叫 niubash，二进制叫 `niu`，环境变量前缀 `NIU_`。Windows 上最"牛"的 bash，名字得对得起产品。
+- **"是在黑 PowerShell 吗？"** 不是。PowerShell 是强大的自动化语言，只是它不是 Bash。模型在 Bash 语料上训练，在 Windows 上却被迫说 cmdlet 方言——问题出在错配，不在于谁写得烂。
 
 ## 文档
 
-完整文档站：**[docs](https://unixwin.github.io/winuxsh/)** · [快速上手](docs/src/getting-started.md) · [Why Winuxsh](docs/src/why-winuxsh.md) · [高级用法](docs/src/advanced-usage.md) · [架构](docs/src/architecture.md)
+完整文档站：**[docs](https://unixwin.github.io/niubash/)** · [快速上手](docs/src/getting-started.md) · [Why niubash](docs/src/why-niubash.md) · [高级用法](docs/src/advanced-usage.md) · [架构](docs/src/architecture.md)
 
-底层三件套：[rubash](https://github.com/unixwin/rubash)（Bash 引擎）· WinuxCmd（Unix 命令）· [reedline](https://github.com/nushell/reedline)（行编辑器）
+## 参与贡献
 
-## FAQ
-
-- **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix；Winuxsh 是原生 Windows 进程：原生路径、直接执行 Windows 二进制、Bash 兼容发生在语言引擎里，不在假的文件系统里。
-- **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 Winuxsh。
-- **"我的配置在哪？"** `~/.winuxshrc`——纯 Bash。结构化的插件状态在 `~/.winshrc.toml`。
+欢迎提 bug、feature request 和 PR——开一个
+[issue](https://github.com/unixwin/niubash/issues) 或直接提 PR。文档在
+[`docs/`](docs/)，源码在 [`src/`](src/)。提交前请确保验证循环通过：
+`cargo fmt --check`、`cargo build --locked`、`cargo test --workspace --locked`。
 
 ---
 
-如果 Winuxsh 让你免了一次"为了跑 grep 先开个 Linux 虚拟机"的体验，
-[给仓库点个 Star](https://github.com/unixwin/winuxsh)，顺便告诉一个
-还在用 CMD 的朋友。★
+如果 niubash 帮你省下了"为跑 grep 先开虚拟机"的仪式感，
+[给仓库点个 Star](https://github.com/unixwin/niubash)，把牛市分享给下一个
+还在 CMD 里挣扎的朋友。★
 
-## License
+## 许可证
 
-GPL-3.0-or-later，详见 [LICENSE](LICENSE)。
+MIT，详见 [LICENSE](LICENSE)。

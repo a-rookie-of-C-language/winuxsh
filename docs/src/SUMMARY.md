@@ -1,10 +1,13 @@
 # Summary
 
-- [Winuxsh](index.md)
-- [Why Winuxsh](why-winuxsh.md)
+- [Niubash](index.md)
+- [Why Niubash](why-niubash.md)
 - [Getting Started](getting-started.md)
 - [Advanced Usage](advanced-usage.md)
+- [Hook Contract](hooks.md)
 - [Install & Self-Update](installer.md)
 - [Bash Compatibility Matrix](rubash-bash-compat-matrix.md)
+- [Built-ins & Fast Paths](builtins.md)
 - [Architecture](architecture.md)
-- [Roadmap](winuxsh-roadmap.md)
+- [Windows Path Contract](windows-path-contract.md)
+- [Roadmap](niubash-roadmap.md)

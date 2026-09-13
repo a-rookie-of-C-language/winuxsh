@@ -1,4 +1,4 @@
-name: Winuxsh Release
+name: Niubash Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Winuxsh tag to release, for example v0.7.1"
+        description: "Niubash tag to release, for example v0.7.1"
         required: true
         type: string
       winuxcmd_tag:
@@ -26,6 +26,11 @@ jobs:
   build-windows:
     name: build-windows (${{ matrix.arch }})
     runs-on: windows-2025
+    outputs:
+      # Both matrix legs clone the same rubash master, so this resolves to the
+      # same value in both; the pin step fails the build if the checkout is
+      # not a committed revision.
+      rubash_revision: ${{ steps.rubash.outputs.revision }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +50,8 @@ jobs:
       - name: Checkout rubash path dependency
         run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
 
-      - name: Checkout oh-my-winuxsh bundle
-        run: git clone --depth 1 https://github.com/unixwin/oh-my-winuxsh.git ../oh-my-winuxsh
+      - name: Checkout oh-my-niu bundle
+        run: git clone --depth 1 https://github.com/unixwin/oh-my-niu.git ../oh-my-niu
 
       - name: Resolve release inputs
         id: release
@@ -69,8 +74,8 @@ jobs:
         run: |
           Copy-Item -LiteralPath scripts/package-release.ps1 -Destination (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Force
           New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "installer") | Out-Null
-          Copy-Item -LiteralPath installer/winuxsh.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Force
-          Copy-Item -LiteralPath assets/winuxsh-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Force
+          Copy-Item -LiteralPath installer/niubash.iss -Destination (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Force
+          Copy-Item -LiteralPath assets/niubash-icon.ico -Destination (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Force
 
       - name: Checkout release tag
         shell: pwsh
@@ -79,8 +84,8 @@ jobs:
           git checkout "${{ steps.release.outputs.tag }}"
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "package-release.ps1") -Destination scripts/package-release.ps1 -Force
           New-Item -ItemType Directory -Force -Path installer | Out-Null
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\winuxsh.iss") -Destination installer/winuxsh.iss -Force
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "winuxsh-icon.ico") -Destination assets/winuxsh-icon.ico -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "installer\niubash.iss") -Destination installer/niubash.iss -Force
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "niubash-icon.ico") -Destination assets/niubash-icon.ico -Force
 
       - name: Validate Cargo version matches release tag
         shell: pwsh
@@ -101,10 +106,29 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.rust_target }}
 
-      - name: Update rubash to latest master
-        run: cargo update -p rubash
+      # rubash is a path dependency, so `cargo update -p rubash` cannot pin it:
+      # there is no registry entry to update, and the step silently did nothing.
+      # The revision the binary actually contains is resolved here and embedded
+      # at build time by build.rs, so `niu --version` reports it.
+      - name: Pin rubash revision
+        id: rubash
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath ..\rubash)) {
+            throw "rubash checkout missing at ..\rubash"
+          }
+          $revision = (git -C ..\rubash rev-parse --short=12 HEAD).Trim()
+          if ([string]::IsNullOrWhiteSpace($revision)) {
+            throw "could not resolve rubash revision"
+          }
+          $dirty = git -C ..\rubash status --porcelain
+          if (-not [string]::IsNullOrWhiteSpace($dirty)) {
+            throw "rubash checkout is dirty; a release must pin a committed revision`n$dirty"
+          }
+          Write-Host "rubash revision: $revision"
+          "revision=$revision" >> $env:GITHUB_OUTPUT
 
-      - name: Build winuxsh
+      - name: Build niubash
         env:
           RUSTFLAGS: ""
         run: cargo build --locked --release --target ${{ matrix.rust_target }}
@@ -154,7 +178,7 @@ jobs:
           ./scripts/package-release.ps1 `
             -Version "${{ steps.release.outputs.version }}" `
             -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
-            -OhMyWinuxshBundlePath "..\oh-my-winuxsh" `
+            -OhMyNiubashBundlePath "..\oh-my-niu" `
             -Configuration release `
             -Target "${{ matrix.rust_target }}" `
             -Arch "${{ matrix.arch }}"
@@ -174,9 +198,9 @@ jobs:
           if (-not $iscc) {
             throw "ISCC.exe not found after installing Inno Setup"
           }
-          $sourceDir = Join-Path (Resolve-Path dist) "winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}"
+          $sourceDir = Join-Path (Resolve-Path dist) "niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}"
           $outputDir = Resolve-Path dist
-          & $iscc installer\winuxsh.iss `
+          & $iscc installer\niubash.iss `
             "/DAppVersion=${{ steps.release.outputs.version }}" `
             "/DAppArch=${{ matrix.arch }}" `
             "/DSourceDir=$sourceDir" `
@@ -185,20 +209,20 @@ jobs:
       - name: Add latest-compatible asset aliases
         shell: pwsh
         run: |
-          $versionedZip = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip"
-          $versionedSetup = "dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
-          Copy-Item -LiteralPath $versionedZip -Destination "dist/winuxsh-win-${{ matrix.arch }}.zip" -Force
-          Copy-Item -LiteralPath $versionedSetup -Destination "dist/winuxsh-win-${{ matrix.arch }}-setup.exe" -Force
+          $versionedZip = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip"
+          $versionedSetup = "dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe"
+          Copy-Item -LiteralPath $versionedZip -Destination "dist/niubash-win-${{ matrix.arch }}.zip" -Force
+          Copy-Item -LiteralPath $versionedSetup -Destination "dist/niubash-win-${{ matrix.arch }}-setup.exe" -Force
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
-          name: winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
+          name: niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}
           path: |
-            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
-            dist/winuxsh-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
-            dist/winuxsh-win-${{ matrix.arch }}.zip
-            dist/winuxsh-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}.zip
+            dist/niubash-v${{ steps.release.outputs.version }}-win-${{ matrix.arch }}-setup.exe
+            dist/niubash-win-${{ matrix.arch }}.zip
+            dist/niubash-win-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -230,9 +254,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: Winuxsh ${{ steps.release.outputs.tag }}
+          name: Niubash ${{ steps.release.outputs.tag }}
           body: |
-            Winuxsh ${{ steps.release.outputs.tag }} Windows packages.
+            Niubash ${{ steps.release.outputs.tag }} Windows packages.
+
+            Engine: rubash git ${{ needs.build-windows.outputs.rubash_revision }}
+            Verify locally with `niu --version`, which prints the same revision.
 
             Packages are built remotely for x64 and ARM64. Portable zip packages remain available, and installer packages add user PATH and Windows Terminal profile integration.
           files: |
@@ -241,3 +268,54 @@ jobs:
           fail_on_unmatched_files: true
           overwrite_files: true
           generate_release_notes: true
+
+  publish-crates:
+    name: publish to crates.io
+    runs-on: windows-latest
+    # rubash is not yet published to crates.io, so cargo publish refuses the
+    # bare path dependency. This job will start succeeding once rubash is on
+    # crates.io; until then it is best-effort and must not block the release.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
+      - name: Resolve release inputs
+        id: release
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Invalid release tag '$tag'"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout release tag
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # Publishing needs version-annotated path deps so cargo can swap the
+      # path for a registry dependency. The rubash dep carries no version yet
+      # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
+      # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
+      # published.
+      - name: Publish niubash-runtime to crates.io
+        run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
+
+      - name: Publish niubash to crates.io
+        run: cargo publish --locked -p niubash --token ${{ secrets.CRATES_IO_TOKEN }}

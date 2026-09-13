@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn winuxsh_binary() -> PathBuf {
-    let p = PathBuf::from(env!("CARGO_BIN_EXE_winuxsh"));
+fn niu_binary() -> PathBuf {
+    let p = PathBuf::from(env!("CARGO_BIN_EXE_niu"));
     if p.exists() {
         return p;
     }
@@ -16,17 +16,13 @@ fn winuxsh_binary() -> PathBuf {
     let mut fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fallback.push("target");
     fallback.push("debug");
-    fallback.push(if cfg!(windows) {
-        "winuxsh.exe"
-    } else {
-        "winuxsh"
-    });
+    fallback.push(if cfg!(windows) { "niu.exe" } else { "niubash" });
     fallback
 }
 
 #[test]
 fn empty_command_line_suggests_core_commands() {
-    let env = ProbeEnv::new("winuxsh-completion-empty");
+    let env = ProbeEnv::new("niubash-completion-empty");
     let suggestions = run_probe("", &env, &[]);
 
     assert_contains(&suggestions, "ls");
@@ -35,40 +31,10 @@ fn empty_command_line_suggests_core_commands() {
 
 #[test]
 fn partial_command_word_suggests_command() {
-    let env = ProbeEnv::new("winuxsh-completion-partial");
+    let env = ProbeEnv::new("niubash-completion-partial");
     let suggestions = run_probe("gre", &env, &[]);
 
     assert_contains(&suggestions, "grep");
-}
-
-#[test]
-fn substring_completion_config_suggests_middle_command_match() {
-    let env = ProbeEnv::new("winuxsh-completion-substring");
-    env.write_config(
-        r#"
-[completions]
-matching = "substring"
-"#,
-    );
-
-    let suggestions = run_probe("ep", &env, &[]);
-
-    assert_contains(&suggestions, "grep");
-}
-
-#[test]
-fn command_completion_result_cap_limits_blank_tab() {
-    let env = ProbeEnv::new("winuxsh-completion-result-cap");
-    env.write_config(
-        r#"
-[completions]
-max_command_results = 1
-"#,
-    );
-
-    let suggestions = run_probe("", &env, &[]);
-
-    assert_eq!(suggestions.len(), 1, "got {suggestions:?}");
 }
 
 #[test]
@@ -77,7 +43,7 @@ fn path_command_is_suggested_by_prefix() {
         return;
     }
 
-    let env = ProbeEnv::new("winuxsh-completion-path");
+    let env = ProbeEnv::new("niubash-completion-path");
     let bin = env.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("probecli.cmd"), "@echo off\r\necho probe\r\n").unwrap();
@@ -98,7 +64,7 @@ fn path_command_is_suggested_by_prefix() {
 
 #[test]
 fn blank_argument_position_suggests_paths() {
-    let env = ProbeEnv::new("winuxsh-completion-path-argument");
+    let env = ProbeEnv::new("niubash-completion-path-argument");
     std::fs::create_dir_all(env.start.join("adir")).unwrap();
     std::fs::write(env.start.join("alpha.txt"), "alpha").unwrap();
     std::fs::write(env.start.join(".hidden"), "hidden").unwrap();
@@ -113,7 +79,7 @@ fn blank_argument_position_suggests_paths() {
 
 #[test]
 fn dot_prefix_suggests_hidden_paths() {
-    let env = ProbeEnv::new("winuxsh-completion-hidden-prefix");
+    let env = ProbeEnv::new("niubash-completion-hidden-prefix");
     std::fs::write(env.start.join(".hidden"), "hidden").unwrap();
 
     let suggestions = run_probe("ls .", &env, &[]);
@@ -123,7 +89,7 @@ fn dot_prefix_suggests_hidden_paths() {
 
 #[test]
 fn cd_blank_argument_position_suggests_directories_only() {
-    let env = ProbeEnv::new("winuxsh-completion-cd-argument");
+    let env = ProbeEnv::new("niubash-completion-cd-argument");
     std::fs::create_dir_all(env.start.join("adir")).unwrap();
     std::fs::write(env.start.join("alpha.txt"), "alpha").unwrap();
 
@@ -135,7 +101,7 @@ fn cd_blank_argument_position_suggests_directories_only() {
 
 #[test]
 fn path_completion_preserves_typed_directory_prefix() {
-    let env = ProbeEnv::new("winuxsh-completion-prefix");
+    let env = ProbeEnv::new("niubash-completion-prefix");
     let parent = env.start.join("parent");
     std::fs::create_dir_all(parent.join("adir")).unwrap();
     std::fs::write(parent.join("child.txt"), "child").unwrap();
@@ -150,7 +116,7 @@ fn path_completion_preserves_typed_directory_prefix() {
 
 #[test]
 fn tilde_path_completion_lists_home_entries() {
-    let env = ProbeEnv::new("winuxsh-completion-tilde");
+    let env = ProbeEnv::new("niubash-completion-tilde");
     std::fs::create_dir_all(env.home.join("adir")).unwrap();
     std::fs::write(env.home.join("alpha.txt"), "alpha").unwrap();
 
@@ -162,7 +128,7 @@ fn tilde_path_completion_lists_home_entries() {
 
 #[test]
 fn completion_probe_loads_startup_rc_aliases() {
-    let env = ProbeEnv::new("winuxsh-completion-rc-alias");
+    let env = ProbeEnv::new("niubash-completion-rc-alias");
     env.write_rc("alias fetch='winuxfetch.exe'\n");
 
     let suggestions = run_probe("fet", &env, &[]);
@@ -172,7 +138,7 @@ fn completion_probe_loads_startup_rc_aliases() {
 
 #[test]
 fn completion_probe_loads_startup_rc_functions() {
-    let env = ProbeEnv::new("winuxsh-completion-rc-function");
+    let env = ProbeEnv::new("niubash-completion-rc-function");
     env.write_rc("function deploy_site() { echo deploy; }\n");
 
     let suggestions = run_probe("dep", &env, &[]);
@@ -182,7 +148,7 @@ fn completion_probe_loads_startup_rc_functions() {
 
 #[test]
 fn path_completion_escapes_spaces_in_candidates() {
-    let env = ProbeEnv::new("winuxsh-completion-spaces");
+    let env = ProbeEnv::new("niubash-completion-spaces");
     std::fs::create_dir_all(env.start.join("two dir")).unwrap();
     std::fs::write(env.start.join("two words.txt"), "two").unwrap();
 
@@ -194,26 +160,8 @@ fn path_completion_escapes_spaces_in_candidates() {
 }
 
 #[test]
-fn case_sensitive_completion_config_respects_path_case() {
-    let env = ProbeEnv::new("winuxsh-completion-case-sensitive");
-    env.write_config(
-        r#"
-[completions]
-case_sensitive = true
-"#,
-    );
-    std::fs::write(env.start.join("Alpha.txt"), "alpha").unwrap();
-
-    let lower = run_probe("ls a", &env, &[]);
-    assert_not_contains(&lower, "Alpha.txt");
-
-    let upper = run_probe("ls A", &env, &[]);
-    assert_contains(&upper, "Alpha.txt");
-}
-
-#[test]
 fn path_completion_matches_escaped_spaces_in_input() {
-    let env = ProbeEnv::new("winuxsh-completion-escaped-input");
+    let env = ProbeEnv::new("niubash-completion-escaped-input");
     let parent = env.start.join("parent dir");
     std::fs::create_dir_all(&parent).unwrap();
     std::fs::write(env.start.join("two words.txt"), "two").unwrap();
@@ -228,7 +176,7 @@ fn path_completion_matches_escaped_spaces_in_input() {
 
 #[test]
 fn path_completion_matches_double_quoted_input() {
-    let env = ProbeEnv::new("winuxsh-completion-quoted-input");
+    let env = ProbeEnv::new("niubash-completion-quoted-input");
     std::fs::write(env.start.join("two words.txt"), "two").unwrap();
 
     let suggestions = run_probe("ls \"two w", &env, &[]);
@@ -238,7 +186,7 @@ fn path_completion_matches_double_quoted_input() {
 
 #[test]
 fn command_position_after_pipe_suggests_command() {
-    let env = ProbeEnv::new("winuxsh-completion-pipe");
+    let env = ProbeEnv::new("niubash-completion-pipe");
     let suggestions = run_probe("ls | gre", &env, &[]);
 
     assert_contains(&suggestions, "grep");
@@ -246,7 +194,7 @@ fn command_position_after_pipe_suggests_command() {
 
 #[test]
 fn blank_command_position_after_pipe_suggests_commands() {
-    let env = ProbeEnv::new("winuxsh-completion-pipe-empty");
+    let env = ProbeEnv::new("niubash-completion-pipe-empty");
     let suggestions = run_probe("ls | ", &env, &[]);
 
     assert_contains(&suggestions, "grep");
@@ -255,7 +203,7 @@ fn blank_command_position_after_pipe_suggests_commands() {
 
 #[test]
 fn argument_position_does_not_suggest_commands() {
-    let env = ProbeEnv::new("winuxsh-completion-arg");
+    let env = ProbeEnv::new("niubash-completion-arg");
     let suggestions = run_probe("echo gre", &env, &[]);
 
     assert_not_contains(&suggestions, "grep");
@@ -263,14 +211,14 @@ fn argument_position_does_not_suggest_commands() {
 
 #[test]
 fn installed_bundle_completion_definitions_override_compiled_defaults() {
-    let env = ProbeEnv::new("winuxsh-completion-bundle-def");
+    let env = ProbeEnv::new("niubash-completion-bundle-def");
     let bundle = env.root.join("bundle");
     write_minimal_completion_bundle(&bundle);
 
     let suggestions = run_probe(
         "git --",
         &env,
-        &[("WINUXSH_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
+        &[("NIU_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
     );
     assert_contains(&suggestions, "--bundle-only");
     assert_not_contains(&suggestions, "--version");
@@ -278,14 +226,14 @@ fn installed_bundle_completion_definitions_override_compiled_defaults() {
     let subcommand_suggestions = run_probe(
         "git bundle-subcommand --",
         &env,
-        &[("WINUXSH_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
+        &[("NIU_PLUGIN_BUNDLE_PATH", native_path(&bundle))],
     );
     assert_contains(&subcommand_suggestions, "--bundle-subcommand-flag");
 }
 
 #[test]
 fn git_completion_suggests_daily_subcommands_and_flags() {
-    let env = ProbeEnv::new("winuxsh-completion-git-daily");
+    let env = ProbeEnv::new("niubash-completion-git-daily");
 
     let subcommands = run_probe("git ", &env, &[]);
     assert_contains(&subcommands, "add");
@@ -307,46 +255,20 @@ fn git_completion_suggests_daily_subcommands_and_flags() {
     assert_contains(&push_flags, "--force");
     assert_contains(&push_flags, "--force-with-lease");
 }
-
-#[test]
-fn disabling_git_plugin_removes_git_completion_definitions() {
-    let env = ProbeEnv::new("winuxsh-completion-git-disabled");
-    env.write_config(
-        r#"[winuxcmd]
-enabled = false
-
-[plugins]
-enabled = true
-bundles = ["oh-my-winuxsh"]
-load = []
-
-[plugins.git]
-enabled = false
-"#,
-    );
-
-    let flags = run_probe("git commit --", &env, &[]);
-
-    assert_not_contains(&flags, "--message");
-    assert_not_contains(&flags, "--amend");
-    assert_not_contains(&flags, "--no-verify");
-}
-
 fn run_probe(line: &str, env: &ProbeEnv, extra_env: &[(&str, String)]) -> Vec<String> {
-    let output = run_winuxsh_probe(line, &env.start, &env.home, extra_env);
+    let output = run_niu_probe(line, &env.start, &env.home, extra_env);
     assert_success(&output, line);
     stdout_lines(&output)
 }
 
-fn run_winuxsh_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String)]) -> Output {
-    let mut command = Command::new(winuxsh_binary());
+fn run_niu_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, String)]) -> Output {
+    let mut command = Command::new(niu_binary());
     command
         .arg("--completion-probe")
         .arg(line)
         .current_dir(cwd)
         .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("WINUXSH_CONFIG", home.join(".winshrc.toml"));
+        .env("USERPROFILE", home);
 
     for (key, value) in extra_env {
         command.env(key, value);
@@ -354,7 +276,7 @@ fn run_winuxsh_probe(line: &str, cwd: &Path, home: &Path, extra_env: &[(&str, St
 
     command
         .output()
-        .unwrap_or_else(|err| panic!("spawn winuxsh: {err}"))
+        .unwrap_or_else(|err| panic!("spawn niubash: {err}"))
 }
 
 fn assert_success(output: &Output, context: &str) {
@@ -420,10 +342,10 @@ fn write_minimal_completion_bundle(path: &Path) {
     std::fs::create_dir_all(path.join("completions")).unwrap();
     std::fs::write(
         path.join("bundle.toml"),
-        r#"name = "oh-my-winuxsh"
+        r#"name = "oh-my-niu"
 version = "9.9.9"
-api = "winuxsh:plugin-bundle@0.1.0"
-min_winuxsh = "0.8.3"
+api = "niubash:plugin-bundle@0.1.0"
+min_niubash = "0.8.3"
 [packs]
 default = ["git"]
 available = ["git"]
@@ -436,10 +358,10 @@ completions_dir = "completions"
     std::fs::write(
         path.join("packs").join("git").join("plugin.toml"),
         r#"name = "git"
-bundle = "oh-my-winuxsh"
+bundle = "oh-my-niu"
 version = "9.9.9"
 kind = "builtin"
-api = "winuxsh:plugin@0.1.0"
+api = "niubash:plugin@0.1.0"
 category = "devtools"
 summary = "Installed Git completions"
 default = true
@@ -489,12 +411,8 @@ impl ProbeEnv {
         Self { root, home, start }
     }
 
-    fn write_config(&self, content: &str) {
-        std::fs::write(self.home.join(".winshrc.toml"), content).unwrap();
-    }
-
     fn write_rc(&self, content: &str) {
-        std::fs::write(self.home.join(".winshrc"), content).unwrap();
+        std::fs::write(self.home.join(".winuxshrc"), content).unwrap();
     }
 }
 

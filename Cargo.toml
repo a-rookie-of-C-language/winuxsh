@@ -1,22 +1,26 @@
-﻿[package]
-name = "winuxsh"
-version = "0.10.4"
+[package]
+name = "niubash"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.70"
-license = "GPL-3.0-or-later"
+license = "MIT"
 authors = ["unixwin team <arookieofc@gmail.com>"]
 description = "AI-native bash-compatible shell for Windows, built on rubash + winuxcmd"
 readme = "README.md"
-homepage = "https://github.com/unixwin/winuxsh"
-repository = "https://github.com/unixwin/winuxsh"
+homepage = "https://github.com/unixwin/niubash"
+repository = "https://github.com/unixwin/niubash"
+
+[[bin]]
+name = "niu"
+path = "src/main.rs"
 
 [workspace]
-members = [".", "crates/winuxsh-runtime"]
+members = [".", "crates/niubash-runtime"]
 resolver = "2"
 
 [dependencies]
-winuxsh-runtime = { path = "crates/winuxsh-runtime" }
-rubash = "0.2.2"
+niubash-runtime = { path = "crates/niubash-runtime", version = "1.1.0" }
+rubash = { path = "../rubash" }
 anyhow = "1.0"
 env_logger = "0.10"
 log = "0.4"
@@ -29,3 +33,15 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Network
 [dev-dependencies]
 sha2 = "0.10"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+# Published-binary profile (measured on x64 MSVC against the default release
+# profile): thin LTO + one codegen unit enables cross-crate DCE/inlining
+# (11.9 MB -> 10.99 MB); panic=abort drops unwind tables and landing pads
+# (10.99 MB -> 7.78 MB total). The codebase has no catch_unwind and the
+# Ctrl+C handler is atomic-only, so no explicit recovery path relies on
+# unwinding. Release-mode test runs match dev-profile results; CI keeps
+# running the suite under the default dev profile.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
