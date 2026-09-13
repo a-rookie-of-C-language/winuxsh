@@ -8,7 +8,7 @@ use crate::completion::variables::VariableCompleter;
 use crate::completion::{
     CompletionBehavior, CompletionContext, CompletionPlugin, CompletionResult,
 };
-use reedline::{Completer, Span, Suggestion};
+use reedline::{Completer, CompletionResult as ReedlineCompletionResult, Span, Suggestion};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,11 @@ impl NiubashCompleter {
             state.current_dir = current_dir;
             state.env_vars = env_vars;
         }
+    }
+
+    /// Return plain suggestions for internal probes and tests.
+    pub fn complete(&mut self, input: &str, cursor_pos: usize) -> Vec<Suggestion> {
+        self.complete_input(input, cursor_pos)
     }
 
     /// Complete input
@@ -295,6 +300,7 @@ impl NiubashCompleter {
             .map(|candidate| Suggestion {
                 append_whitespace: !candidate.is_dir,
                 value: candidate.value,
+                display_override: None,
                 description: None,
                 style: None,
                 extra: None,
@@ -302,6 +308,7 @@ impl NiubashCompleter {
                     start: span_start,
                     end: span_end,
                 },
+                match_indices: None,
             })
             .collect()
     }
@@ -335,6 +342,7 @@ impl NiubashCompleter {
             .into_iter()
             .map(|candidate| Suggestion {
                 value: candidate,
+                display_override: None,
                 description: Some("alias".to_string()),
                 style: None,
                 extra: None,
@@ -343,6 +351,7 @@ impl NiubashCompleter {
                     end: span_end,
                 },
                 append_whitespace: true,
+                match_indices: None,
             })
             .collect()
     }
@@ -376,6 +385,7 @@ impl NiubashCompleter {
             .into_iter()
             .map(|candidate| Suggestion {
                 value: candidate,
+                display_override: None,
                 description: Some("function".to_string()),
                 style: None,
                 extra: None,
@@ -384,6 +394,7 @@ impl NiubashCompleter {
                     end: span_end,
                 },
                 append_whitespace: true,
+                match_indices: None,
             })
             .collect()
     }
@@ -404,6 +415,7 @@ impl NiubashCompleter {
 
             suggestions.push(Suggestion {
                 value: completion.clone(),
+                display_override: None,
                 description: description.map(|s| s.to_string()),
                 style: None,
                 extra: None,
@@ -412,6 +424,7 @@ impl NiubashCompleter {
                     end: span_end,
                 },
                 append_whitespace: should_append_completion_whitespace(completion),
+                match_indices: None,
             });
         }
 
@@ -508,8 +521,8 @@ impl PartialOrd for CwdPathCandidate {
 }
 
 impl Completer for NiubashCompleter {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
-        self.complete_input(line, pos)
+    fn complete(&mut self, line: &str, pos: usize) -> ReedlineCompletionResult {
+        ReedlineCompletionResult::fresh(self.complete_input(line, pos))
     }
 }
 

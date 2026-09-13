@@ -61,6 +61,7 @@ fn run_main() -> ExitCode {
 
     // Install Ctrl+C handler (best-effort)
     niubash_runtime::ctrl_c::install();
+    niubash_runtime::console_guard::prefer_utf8_code_page();
 
     // Expose the host binary path so rubash's bash shim can forward to niu.
     // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.

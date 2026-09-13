@@ -59,7 +59,7 @@ pub fn by_name(name: &str) -> Theme {
         return theme;
     }
 
-    log::warn!(
+    log::debug!(
         "Theme '{}' not found in user themes or active bundles; oh-my-niu theme bundle may be missing or invalid",
         name
     );

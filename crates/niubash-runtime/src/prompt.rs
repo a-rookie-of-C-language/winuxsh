@@ -565,6 +565,8 @@ impl Prompt for NiubashPrompt {
             PromptEditMode::Vi(PromptViMode::Normal) => {
                 (&self.indicators.vi_normal, Cow::Borrowed("vi_normal"))
             }
+            PromptEditMode::Vi(_) => (&self.indicators.vi_normal, Cow::Borrowed("vi_visual")),
+            PromptEditMode::Helix(_) => (&self.indicators.default, Cow::Borrowed("helix")),
             PromptEditMode::Custom(mode) => (&self.indicators.default, Cow::Owned(mode)),
         };
         Cow::Owned(self.render_indicator_template(template, &mode_name))

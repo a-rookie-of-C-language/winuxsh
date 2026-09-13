@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reedline::{Completer, Reedline};
+use reedline::Reedline;
 use rubash::{
     executor::{Executor, HostExternalCommandOutput},
     lexer::tokenize,
@@ -2575,7 +2575,7 @@ impl Shell {
             return Ok(());
         }
 
-        stage.heredoc = Some(format!("\x1e{input}"));
+        stage.heredoc = Some(input);
         stage.heredoc_delimiter = Some("NIU_PROCESS_STDIN".to_string());
         Ok(())
     }
@@ -2639,8 +2639,9 @@ fn normalize_cd_windows_drive_command(command: &mut rubash::parser::CommandNode)
     }
 
     for word in command.words.iter_mut().skip(1) {
-        if let Some(normalized) =
-            cd_tilde_path_to_slash_drive(word).or_else(|| windows_drive_path_to_slash_drive(word))
+        if let Some(normalized) = cd_tilde_path_to_slash_drive(word)
+            .or_else(|| windows_drive_path_to_slash_drive(word))
+            .or_else(|| slash_drive_path_to_windows_native(word))
         {
             *word = normalized;
         }
@@ -6121,6 +6122,23 @@ niubash_run_precmd_hooks() {
             let and_or_list = ast.commands[0].and_or_list.as_ref().unwrap();
             assert_eq!(and_or_list.commands[0].words, vec!["cd", "c:"]);
             assert_eq!(and_or_list.commands[1].words, vec!["c:"]);
+        }
+    }
+
+    #[test]
+    fn cd_slash_drive_args_normalize_to_windows_roots() {
+        let tokens = tokenize("cd /d && cd /e/projects");
+        let mut ast = parse(&tokens);
+        normalize_cd_windows_drive_args(&mut ast);
+
+        if cfg!(windows) {
+            let and_or_list = ast.commands[0].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words, vec!["cd", "D:/"]);
+            assert_eq!(and_or_list.commands[1].words, vec!["cd", "E:/projects"]);
+        } else {
+            let and_or_list = ast.commands[0].and_or_list.as_ref().unwrap();
+            assert_eq!(and_or_list.commands[0].words, vec!["cd", "/d"]);
+            assert_eq!(and_or_list.commands[1].words, vec!["cd", "/e/projects"]);
         }
     }
 

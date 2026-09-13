@@ -1207,6 +1207,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
                 pending.clear();
                 continue;
             }
+            Ok(_) => continue,
             Err(e) => {
                 eprintln!("niubash: line editor error: {}", e);
                 let _ = shell.borrow_mut().finish_with_exit_trap(1);
