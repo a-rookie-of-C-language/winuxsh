@@ -155,6 +155,12 @@ pub struct Shell {
     pub no_editing: bool,
 }
 
+pub struct StdinCurrentShellChild {
+    script_name: String,
+    script_path: PathBuf,
+    positional_params: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PluginPromptSyncConfig {
     enabled: bool,
@@ -286,6 +292,7 @@ impl Shell {
         }
         if let Some(script_name) = script_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
+            executor.set_env("BASH_ARGV0", script_name);
         }
         executor.set_env("NIU_PROMPT_SYMBOL", &config.shell.prompt_symbol);
         sync_executor_path_from_process_path(&mut executor);
@@ -523,6 +530,107 @@ impl Shell {
         self.process_stdin_pipeline_bridge = true;
     }
 
+    pub fn set_script_name(&mut self, script_name: &str) {
+        self.executor.set_env("__RUBASH_SCRIPT_NAME", script_name);
+        self.executor.set_env("BASH_ARGV0", script_name);
+    }
+
+    pub fn stdin_current_shell_child(&self, command: &str) -> Option<StdinCurrentShellChild> {
+        let tokens = tokenize(command);
+        if tokens.is_empty() {
+            return None;
+        }
+        let ast = parse(&tokens);
+        let [cmd] = ast.commands.as_slice() else {
+            return None;
+        };
+        if !is_plain_simple_command(cmd) || command_has_redirects(cmd) || cmd.words.len() < 2 {
+            return None;
+        }
+        let Some(command_name) = cmd.words.first() else {
+            return None;
+        };
+        let is_this_shell = matches!(command_name.as_str(), "$THIS_SH" | "${THIS_SH}")
+            || self
+                .executor
+                .get_env("THIS_SH")
+                .is_some_and(|this_sh| same_shell_dir(this_sh, command_name));
+        if !is_this_shell {
+            return None;
+        }
+
+        let script_name = cmd.words[1].clone();
+        let script_path = self.executor.resolve_shell_path(&script_name);
+        if !script_path.is_file() {
+            return None;
+        }
+
+        Some(StdinCurrentShellChild {
+            script_name,
+            script_path,
+            positional_params: cmd.words[1..].to_vec(),
+        })
+    }
+
+    pub fn execute_stdin_current_shell_child(
+        &mut self,
+        child: StdinCurrentShellChild,
+        stdin_line: &str,
+    ) -> anyhow::Result<i32> {
+        let script = std::fs::read_to_string(&child.script_path)?;
+
+        let saved_script_name = self
+            .executor
+            .get_env("__RUBASH_SCRIPT_NAME")
+            .map(str::to_owned);
+        let saved_bash_argv0 = self.executor.get_env("BASH_ARGV0").map(str::to_owned);
+        let saved_function_stdin = self
+            .executor
+            .get_env("__RUBASH_FUNCTION_STDIN")
+            .map(str::to_owned);
+        let saved_function_stdin_offset = self
+            .executor
+            .get_env("__RUBASH_FUNCTION_STDIN_OFFSET")
+            .map(str::to_owned);
+
+        self.set_script_name(&child.script_name);
+        self.executor.set_env("__RUBASH_FUNCTION_STDIN", stdin_line);
+        self.executor.set_env("__RUBASH_FUNCTION_STDIN_OFFSET", "0");
+        self.executor.set_positional_params(child.positional_params);
+
+        let code = self.execute_script(&script)?;
+
+        restore_executor_env(
+            &mut self.executor,
+            "__RUBASH_SCRIPT_NAME",
+            saved_script_name,
+        );
+        restore_executor_env(&mut self.executor, "BASH_ARGV0", saved_bash_argv0);
+        restore_executor_env(
+            &mut self.executor,
+            "__RUBASH_FUNCTION_STDIN",
+            saved_function_stdin,
+        );
+        restore_executor_env(
+            &mut self.executor,
+            "__RUBASH_FUNCTION_STDIN_OFFSET",
+            saved_function_stdin_offset,
+        );
+
+        Ok(code)
+    }
+
+    fn disable_rubash_history_storage(&mut self) {
+        let previous_exit_code = self.executor.last_exit_code();
+        self.executor.set_shell_option("history", false);
+        self.executor.unset_env("HISTFILE");
+        let ast = parse(&tokenize("unset HISTFILE"));
+        let _ = self.executor.execute_ast(&ast);
+        self.executor.set_shell_option("history", false);
+        self.executor.unset_env("HISTFILE");
+        self.executor.set_last_exit_code(previous_exit_code);
+    }
+
     /// Mark this shell as interactive.
     ///
     /// Two consequences: easter eggs become routable, and rubash diagnostics
@@ -530,7 +638,7 @@ impl Shell {
     /// what bash does for errors at an interactive prompt.
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
-        self.executor.set_env("__RUBASH_SCRIPT_NAME", "niu");
+        self.set_script_name("niu");
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -565,7 +673,8 @@ impl Shell {
             return Ok(0);
         }
 
-        let line = normalize_native_windows_path_literals(line);
+        let line =
+            protect_parameter_pattern_removal_equals(&normalize_native_windows_path_literals(line));
         let mut tokens = tokenize(&line);
         if tokens.is_empty() {
             return Ok(0);
@@ -578,6 +687,7 @@ impl Shell {
 
         // parse() returns Ast directly (not Result) in rubash.
         let mut ast = parse(&tokens);
+        normalize_parameter_pattern_operator_order(&mut ast);
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
@@ -901,7 +1011,8 @@ impl Shell {
         // The probe must not leak into $?: the caller's last_exit_code feeds
         // NIU_LAST_EXIT_CODE for the hook that dispatched this probe.
         self.executor.set_last_exit_code(previous_exit_code);
-        self.framework_hook_probes.insert(runner.to_string(), defined);
+        self.framework_hook_probes
+            .insert(runner.to_string(), defined);
         defined
     }
 
@@ -2251,13 +2362,15 @@ impl Shell {
             return;
         }
 
-        let line = normalize_native_windows_path_literals(line);
+        let line =
+            protect_parameter_pattern_removal_equals(&normalize_native_windows_path_literals(line));
         let tokens = tokenize(&line);
         if tokens.is_empty() {
             return;
         }
 
         let mut ast = parse(&tokens);
+        normalize_parameter_pattern_operator_order(&mut ast);
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
@@ -2503,7 +2616,10 @@ impl Shell {
             return Ok(0);
         }
 
-        let script = normalize_native_windows_path_literals(script);
+        self.disable_rubash_history_storage();
+        let script = protect_parameter_pattern_removal_equals(
+            &normalize_native_windows_path_literals(script),
+        );
         let mut tokens = tokenize(&script);
         if tokens.is_empty() {
             return Ok(0);
@@ -2511,6 +2627,7 @@ impl Shell {
         rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
         let mut ast = parse(&tokens);
+        normalize_parameter_pattern_operator_order(&mut ast);
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
@@ -2521,6 +2638,8 @@ impl Shell {
             Ok(exit)
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             Ok(code)
+        } else if let Some(execution) = self.execute_parameter_pattern_assignment_simple_ast(&ast) {
+            execution
         } else {
             self.execute_host_synced_simple_ast(&ast)
                 .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
@@ -2601,6 +2720,134 @@ impl Shell {
 
         Some(Ok(self.executor.last_exit_code()))
     }
+
+    fn execute_parameter_pattern_assignment_simple_ast(
+        &mut self,
+        ast: &Ast,
+    ) -> Option<Result<i32, rubash::executor::ExecuteError>> {
+        if !ast
+            .commands
+            .iter()
+            .any(is_parameter_pattern_assignment_command)
+        {
+            return None;
+        }
+        if !ast.commands.iter().all(is_plain_simple_command) {
+            return None;
+        }
+
+        for command in &ast.commands {
+            if let Some((name, value)) = self.parameter_pattern_assignment(command) {
+                self.executor.set_env(&name, &value);
+                self.executor.set_last_exit_code(0);
+                continue;
+            }
+            let rewritten_command = self.rewrite_parameter_pattern_words(command);
+            let command = rewritten_command.as_ref().unwrap_or(command);
+            match self.executor.execute_command(command) {
+                Ok(()) => {}
+                Err(rubash::executor::ExecuteError::ExitCode(code)) => return Some(Ok(code)),
+                Err(rubash::executor::ExecuteError::Return(code)) => return Some(Ok(code)),
+                Err(err) => return Some(Err(err)),
+            }
+        }
+
+        Some(Ok(self.executor.last_exit_code()))
+    }
+
+    fn parameter_pattern_assignment(
+        &self,
+        command: &rubash::parser::CommandNode,
+    ) -> Option<(String, String)> {
+        let [(assignment_name, assignment_value)] = command.assignments.as_slice() else {
+            return None;
+        };
+        if !command.words.is_empty()
+            || command_has_redirects(command)
+            || !command.compound_assignments.is_empty()
+            || !command.array_element_assignments.is_empty()
+        {
+            return None;
+        }
+        if !is_simple_shell_name(assignment_name) {
+            return None;
+        }
+
+        let [expansion] = command.parameter_expansions.as_slice() else {
+            return None;
+        };
+        if expansion.assignment_name.as_deref() != Some(assignment_name)
+            || expansion.text != *assignment_value
+        {
+            return None;
+        }
+
+        let value = self.parameter_pattern_expansion_value(expansion)?;
+        Some((assignment_name.clone(), value))
+    }
+
+    fn rewrite_parameter_pattern_words(
+        &self,
+        command: &rubash::parser::CommandNode,
+    ) -> Option<rubash::parser::CommandNode> {
+        if command.parameter_expansions.is_empty() {
+            return None;
+        }
+
+        let mut rewritten = command.clone();
+        let mut changed = false;
+        for expansion in &command.parameter_expansions {
+            if expansion.assignment_name.is_some() {
+                return None;
+            }
+            let word_index = expansion.word_index?;
+            let word = command.words.get(word_index)?;
+            let whole_word = word.strip_prefix('\x1d').unwrap_or(word);
+            if whole_word != expansion.text {
+                return None;
+            }
+            let value = self.parameter_pattern_expansion_value(expansion)?;
+            rewritten.words[word_index] = value.clone();
+            if let Some(metadata) = rewritten.word_metadata.get_mut(word_index) {
+                *metadata = rubash::parser::WordMetadata::literal(word_index, value.clone(), value);
+            }
+            changed = true;
+        }
+
+        if changed {
+            rewritten.parameter_expansions.clear();
+            Some(rewritten)
+        } else {
+            None
+        }
+    }
+
+    fn parameter_pattern_expansion_value(
+        &self,
+        expansion: &rubash::parser::ParameterExpansion,
+    ) -> Option<String> {
+        let operator = expansion.operator.as_deref()?;
+        if !matches!(operator, "#" | "##" | "%" | "%%") {
+            return None;
+        }
+        let var_name = expansion.name.as_str();
+        if !is_simple_shell_name(var_name) {
+            return None;
+        }
+        let pattern = decode_simple_parameter_pattern(expansion.word.as_deref()?);
+        if pattern.contains(['$', '`', '[', ']']) {
+            return None;
+        }
+        let value = self.executor.get_env(var_name).unwrap_or_default();
+        remove_simple_parameter_pattern(&value, &pattern, operator)
+    }
+}
+
+fn restore_executor_env(executor: &mut Executor, name: &str, value: Option<String>) {
+    match value {
+        Some(value) => executor.set_env(name, &value),
+        None => executor.unset_env(name),
+    }
 }
 
 fn same_shell_dir(left: &str, right: &str) -> bool {
@@ -2611,6 +2858,218 @@ fn same_shell_dir(left: &str, right: &str) -> bool {
     } else {
         left == right
     }
+}
+
+fn normalize_parameter_pattern_operator_order(ast: &mut Ast) {
+    for command in &mut ast.commands {
+        normalize_command_parameter_pattern_operator_order(command);
+    }
+}
+
+fn normalize_command_parameter_pattern_operator_order(command: &mut rubash::parser::CommandNode) {
+    normalize_parameter_expansions_operator_order(&mut command.parameter_expansions);
+    for metadata in &mut command.word_metadata {
+        normalize_parameter_expansions_operator_order(&mut metadata.parameter_expansions);
+    }
+
+    if let Some(and_or_list) = &mut command.and_or_list {
+        for command in &mut and_or_list.commands {
+            normalize_command_parameter_pattern_operator_order(command);
+        }
+    }
+}
+
+fn normalize_parameter_expansions_operator_order(
+    expansions: &mut [rubash::parser::ParameterExpansion],
+) {
+    for expansion in expansions {
+        let Some((operator_index, operator)) =
+            leading_pattern_removal_operator(&expansion.parameter)
+        else {
+            continue;
+        };
+        let current_operator_index = expansion.name.len();
+        if matches!(expansion.operator.as_deref(), Some("#" | "##" | "%" | "%%"))
+            && current_operator_index == operator_index
+        {
+            continue;
+        }
+        if current_operator_index <= operator_index {
+            continue;
+        }
+
+        expansion.name = expansion.parameter[..operator_index].to_string();
+        expansion.operator = Some(operator.to_string());
+        expansion.operator_prefix = false;
+        expansion.word = Some(expansion.parameter[operator_index + operator.len()..].to_string());
+    }
+}
+
+fn leading_pattern_removal_operator(parameter: &str) -> Option<(usize, &'static str)> {
+    let chars: Vec<(usize, char)> = parameter.char_indices().collect();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (position, &(byte_index, ch)) in chars.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single
+                && chars
+                    .get(position + 1)
+                    .is_some_and(|(_, next)| *next == '{') =>
+            {
+                brace_depth += 1;
+            }
+            '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
+            '(' if !single && !double => paren_depth += 1,
+            ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
+            '[' if !single && !double => bracket_depth += 1,
+            ']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
+            '#' | '%'
+                if byte_index > 0
+                    && !single
+                    && !double
+                    && brace_depth == 0
+                    && paren_depth == 0
+                    && bracket_depth == 0 =>
+            {
+                let operator = if chars.get(position + 1).is_some_and(|(_, next)| *next == ch) {
+                    if ch == '#' {
+                        "##"
+                    } else {
+                        "%%"
+                    }
+                } else if ch == '#' {
+                    "#"
+                } else {
+                    "%"
+                };
+                return Some((byte_index, operator));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn is_parameter_pattern_assignment_command(command: &rubash::parser::CommandNode) -> bool {
+    let [_] = command.assignments.as_slice() else {
+        return false;
+    };
+    command.words.is_empty()
+        && !command_has_redirects(command)
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && matches!(command.parameter_expansions.as_slice(), [_])
+}
+
+fn is_simple_shell_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn decode_simple_parameter_pattern(pattern: &str) -> String {
+    let mut output = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            } else {
+                output.push(ch);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn remove_simple_parameter_pattern(value: &str, pattern: &str, operator: &str) -> Option<String> {
+    match operator {
+        "#" => find_prefix_pattern_end(value, pattern, false)
+            .map(|end| value[end..].to_string())
+            .or_else(|| Some(value.to_string())),
+        "##" => find_prefix_pattern_end(value, pattern, true)
+            .map(|end| value[end..].to_string())
+            .or_else(|| Some(value.to_string())),
+        "%" => find_suffix_pattern_start(value, pattern, false)
+            .map(|start| value[..start].to_string())
+            .or_else(|| Some(value.to_string())),
+        "%%" => find_suffix_pattern_start(value, pattern, true)
+            .map(|start| value[..start].to_string())
+            .or_else(|| Some(value.to_string())),
+        _ => None,
+    }
+}
+
+fn find_prefix_pattern_end(value: &str, pattern: &str, longest: bool) -> Option<usize> {
+    let mut boundaries = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect::<Vec<_>>();
+    if longest {
+        boundaries.reverse();
+    }
+    boundaries
+        .into_iter()
+        .find(|end| simple_glob_matches(pattern, &value[..*end]))
+}
+
+fn find_suffix_pattern_start(value: &str, pattern: &str, longest: bool) -> Option<usize> {
+    let mut boundaries = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect::<Vec<_>>();
+    if !longest {
+        boundaries.reverse();
+    }
+    boundaries
+        .into_iter()
+        .find(|start| simple_glob_matches(pattern, &value[*start..]))
+}
+
+fn simple_glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let text = text.chars().collect::<Vec<_>>();
+    let mut matches = vec![vec![false; text.len() + 1]; pattern.len() + 1];
+    matches[0][0] = true;
+
+    for p in 0..pattern.len() {
+        if pattern[p] == '*' {
+            matches[p + 1][0] = matches[p][0];
+        }
+        for t in 0..text.len() {
+            matches[p + 1][t + 1] = match pattern[p] {
+                '*' => matches[p][t + 1] || matches[p + 1][t],
+                '?' => matches[p][t],
+                ch => matches[p][t] && ch == text[t],
+            };
+        }
+    }
+
+    matches[pattern.len()][text.len()]
 }
 
 fn normalize_cd_windows_drive_args(ast: &mut Ast) {
@@ -3656,6 +4115,146 @@ fn normalize_native_windows_path_literals(input: &str) -> String {
         output
     } else {
         input.to_string()
+    }
+}
+
+fn protect_parameter_pattern_removal_equals(input: &str) -> String {
+    if !input.contains("${") {
+        return input.to_string();
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    let mut changed = false;
+
+    while let Some(offset) = rest.find("${") {
+        output.push_str(&rest[..offset + 2]);
+        let body = &rest[offset + 2..];
+        let Some(close) = parameter_expansion_body_end(body) else {
+            output.push_str(body);
+            return if changed { output } else { input.to_string() };
+        };
+
+        let expansion_body = &body[..close];
+        let protected = protect_pattern_body_equals(expansion_body);
+        changed |= protected.as_ref() != expansion_body;
+        output.push_str(&protected);
+        output.push('}');
+        rest = &body[close + 1..];
+    }
+
+    output.push_str(rest);
+    if changed {
+        output
+    } else {
+        input.to_string()
+    }
+}
+
+fn parameter_expansion_body_end(body: &str) -> Option<usize> {
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+
+    for (position, &(byte_index, ch)) in chars.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single
+                && chars
+                    .get(position + 1)
+                    .is_some_and(|(_, next)| *next == '{') =>
+            {
+                depth += 1;
+            }
+            '}' if !single && !double => {
+                if depth == 0 {
+                    return Some(byte_index);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn protect_pattern_body_equals(body: &str) -> std::borrow::Cow<'_, str> {
+    let Some((operator_index, operator)) = leading_pattern_removal_operator(body) else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+    let pattern_start = operator_index + operator.len();
+    if !body[pattern_start..].contains('=') {
+        return std::borrow::Cow::Borrowed(body);
+    }
+
+    let mut output = String::with_capacity(body.len());
+    output.push_str(&body[..pattern_start]);
+    let mut changed = false;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let chars: Vec<char> = body[pattern_start..].chars().collect();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            output.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            output.push(ch);
+            escaped = true;
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single && chars.get(index + 1) == Some(&'{') => brace_depth += 1,
+            '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
+            '(' if !single && !double => paren_depth += 1,
+            ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
+            '[' if !single && !double => bracket_depth += 1,
+            ']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
+            '=' if !single
+                && !double
+                && brace_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0 =>
+            {
+                output.push('\\');
+                changed = true;
+            }
+            _ => {}
+        }
+        output.push(ch);
+        index += 1;
+    }
+
+    if changed {
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(body)
     }
 }
 
@@ -6195,6 +6794,32 @@ niubash_run_precmd_hooks() {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parameter_pattern_removal_wins_before_equals_in_pattern() {
+        let script = r##"line='<rect x="0" fill="#fe0000"/>'; rest=${line#*fill=\"}; printf '%s\n' "${rest%%\"*}""##;
+        let script = protect_parameter_pattern_removal_equals(
+            &normalize_native_windows_path_literals(script),
+        );
+        assert!(script.contains(r#"${line#*fill\=\""#));
+        let tokens = tokenize(&script);
+        let mut ast = parse(&tokens);
+        normalize_parameter_pattern_operator_order(&mut ast);
+
+        let assignment_expansion = &ast.commands[1].parameter_expansions[0];
+        assert_eq!(assignment_expansion.name, "line");
+        assert_eq!(assignment_expansion.operator.as_deref(), Some("#"));
+        assert_eq!(assignment_expansion.word.as_deref(), Some(r#"*fill\=\""#));
+
+        let word_expansion = &ast.commands[2].parameter_expansions[0];
+        assert_eq!(word_expansion.name, "rest");
+        assert_eq!(word_expansion.operator.as_deref(), Some("%%"));
+        assert_eq!(word_expansion.word.as_deref(), Some(r#"\"*"#));
+
+        let mut shell = test_shell(HookConfig::default());
+        assert_eq!(shell.execute_script(&script).unwrap(), 0);
+        assert_eq!(shell.executor.get_env("rest"), Some("#fe0000\"/>"));
     }
 
     #[test]

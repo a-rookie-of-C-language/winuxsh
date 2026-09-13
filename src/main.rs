@@ -142,7 +142,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             shell.enable_process_stdin_pipeline_bridge();
             shell.executor.set_env("BASH_EXECUTION_STRING", &args[2]);
             if let Some(command_name) = args.get(3) {
-                shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+                shell.set_script_name(command_name);
                 shell.executor.set_positional_params(args[4..].to_vec());
             }
             let code = shell.execute_script(&args[2])?;
@@ -161,7 +161,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("unknown argument '{}' (not a script file)", first);
             }
             let mut shell = niubash_runtime::Shell::new()?;
-            shell.executor.set_env("__RUBASH_SCRIPT_NAME", first);
+            shell.set_script_name(first);
             shell.executor.inherit_process_stdin();
             shell.enable_process_stdin_pipeline_bridge();
             shell.source_non_interactive_env();
@@ -223,7 +223,7 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     }
     if let Some(script_name) = invocation.script {
         shell.source_non_interactive_env();
-        shell.executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
+        shell.set_script_name(&script_name);
         let content = std::fs::read_to_string(script_arg_to_host_path(&script_name))?;
         let code = shell.execute_script(&content)?;
         let code = shell.finish_with_exit_trap(code)?;
@@ -365,7 +365,7 @@ fn run_repl_command(args: &[String]) -> anyhow::Result<()> {
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
     if let Some(command_name) = args.get(3) {
-        shell.executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+        shell.set_script_name(command_name);
         shell.executor.set_positional_params(args[4..].to_vec());
     }
     shell.run_startup_rc();
@@ -413,7 +413,14 @@ fn run_stdin_script() -> anyhow::Result<()> {
             continue;
         }
 
-        let code = shell.execute_script(&script)?;
+        let code = match shell.stdin_current_shell_child(&script) {
+            Some(child) => {
+                let mut child_stdin = String::new();
+                let _ = read_unbuffered_line(&mut child_stdin)?;
+                shell.execute_stdin_current_shell_child(child, &child_stdin)?
+            }
+            None => shell.execute_script(&script)?,
+        };
         if code != 0 {
             let code = shell.finish_with_exit_trap(code)?;
             std::process::exit(code);
