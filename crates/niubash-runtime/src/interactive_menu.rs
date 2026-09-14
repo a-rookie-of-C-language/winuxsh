@@ -7,7 +7,7 @@ use std::io::{self, Write};
 
 use crossterm::{
     cursor::{self, MoveToColumn, MoveToRow},
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{self, Clear, ClearType},
 };
@@ -19,6 +19,8 @@ pub enum Selection {
     Confirmed(usize),
     /// User pressed ESC — caller should use the default.
     UseDefault,
+    /// User pressed Ctrl-C — caller should abort the whole flow.
+    Abort,
 }
 
 /// Run an interactive arrow-key menu. Returns `Selection::Confirmed(index)` or
@@ -62,6 +64,11 @@ pub fn interactive_choice(
             Ok(Event::Key(k)) => k,
             _ => continue,
         };
+        // Windows reports Press + Release for every keystroke; ignoring the
+        // release is required or each arrow press moves the selection twice.
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
         let modifiers = key.modifiers;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if !modifiers.contains(KeyModifiers::CONTROL) => {
@@ -81,8 +88,11 @@ pub fn interactive_choice(
             KeyCode::Enter => {
                 return Selection::Confirmed(selected);
             }
-            KeyCode::Esc | KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Esc => {
                 return Selection::UseDefault;
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                return Selection::Abort;
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(idx) = c.to_digit(10) {
