@@ -910,8 +910,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rubash"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d9fc6ffc0d83ae2af8315fdeadeb40e3989eb1b7ef404c828b7058e044827d7"
+source = "git+https://github.com/unixwin/rubash?rev=5e08f5dc68e37f367820a7969cd0975fd3f6fbd7#5e08f5dc68e37f367820a7969cd0975fd3f6fbd7"
 dependencies = [
  "ctrlc",
  "libc",

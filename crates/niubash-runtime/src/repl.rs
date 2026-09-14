@@ -1101,6 +1101,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     if let Some(notice) = crate::plugins::take_legacy_bundle_notice() {
         eprintln!("{}", notice);
     }
+    shell.borrow().warn_once_for_nonwritable_shell_root();
     let no_editing = shell.borrow().no_editing;
     if no_editing {
         return run_repl_without_line_editor(&mut shell.borrow_mut());
