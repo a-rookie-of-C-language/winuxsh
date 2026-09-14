@@ -1093,12 +1093,8 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
         let _ = crate::setup_wizard::run_wizard();
     }
 
-    let welcome = format!(
-        "Niubash {} \u{2014} bash-compatible shell for Windows. Type \u{2018}exit\u{2019} or press Ctrl+D to quit.",
-        env!("CARGO_PKG_VERSION")
-    );
+    let welcome = format!("Niubash {}", env!("CARGO_PKG_VERSION"));
     println!("{}", welcome);
-    println!();
 
     shell.borrow_mut().restore_last_working_dir_for_repl();
     shell.borrow_mut().run_startup_rc();

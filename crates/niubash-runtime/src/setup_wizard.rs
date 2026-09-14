@@ -275,7 +275,7 @@ fn pick_choice(label: &str, default_idx: usize, options: &[&str], help: &str) ->
     if crate::terminal::stdio_is_interactive() {
         match interactive_menu::interactive_choice(label, options, default_idx, help) {
             Selection::Confirmed(idx) => options[idx].to_string(),
-            Selection::UseDefault => options[default_idx].to_string(),
+            Selection::UseDefault | Selection::Abort => options[default_idx].to_string(),
         }
     } else {
         options[default_idx].to_string()
