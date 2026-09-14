@@ -45,3 +45,9 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Temporary override for unixwin/niubash#94: the /tmp-per-user-temp fix lives
+# in rubash upstream. Drop this patch once a rubash crates.io release >= the
+# pinned commit ships and the `rubash = "..."` requirement is bumped instead.
+[patch.crates-io]
+rubash = { git = "https://github.com/unixwin/rubash", rev = "5e08f5dc68e37f367820a7969cd0975fd3f6fbd7" }
