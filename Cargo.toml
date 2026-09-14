@@ -53,4 +53,4 @@ panic = "abort"
 # requirement is bumped instead. After unixwin/rubash#104 merges, move `rev`
 # to a master commit so the pin does not depend on the PR branch surviving.
 [patch.crates-io]
-rubash = { git = "https://github.com/unixwin/rubash", rev = "b9d641ae30061ae5578c3816da2b994d849cde33" }
+rubash = { git = "https://github.com/unixwin/rubash", rev = "0e9d2e5dd077764234714eb3e316461302909906" }
