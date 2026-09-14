@@ -23,7 +23,6 @@ use windows_sys::Win32::Networking::WinHttp::{
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
 const DEFAULT_REPO: &str = "unixwin/niubash";
 const USER_AGENT: &str = concat!("niubash/", env!("CARGO_PKG_VERSION"));
 const HTTP_TIMEOUT_MS: i32 = 30_000;
@@ -300,10 +299,11 @@ fn download_asset(repo: &str, tag: &str, asset: &GitHubAsset) -> Result<PathBuf>
 
     let bytes = http_get_bytes(&asset.browser_download_url).with_context(|| {
         format!(
-            "download {}/{} from {}",
+            "download {}/{} from {} ({})",
             repo,
             asset.name,
-            tag.trim_start_matches('v')
+            tag.trim_start_matches('v'),
+            asset.browser_download_url,
         )
     })?;
     std::fs::write(&path, bytes)
@@ -320,7 +320,15 @@ fn download_first_available_asset(
     for asset in assets {
         match download_asset(repo, tag, asset) {
             Ok(path) => return Ok(path),
-            Err(err) => errors.push(format!("{}: {err}", asset.name)),
+            Err(err) => {
+                let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+                let detail = if chain.len() > 1 {
+                    chain.join(": ")
+                } else {
+                    chain.first().cloned().unwrap_or_default()
+                };
+                errors.push(format!("{}: {detail}", asset.name));
+            }
         }
     }
 
@@ -796,7 +804,29 @@ fn response_error_detail(body: &[u8]) -> String {
 #[cfg(windows)]
 fn winhttp_error(action: &str) -> anyhow::Error {
     let code = unsafe { GetLastError() };
-    anyhow::anyhow!("{action} failed with Windows error {code}")
+    let message = format_winhttp_message(code);
+    anyhow::anyhow!("{action} failed with Windows error {code}: {message}")
+}
+
+#[cfg(windows)]
+fn format_winhttp_message(code: u32) -> String {
+    match code {
+        12002 => "the request has timed out".to_string(),
+        12005 => "the request was invalid".to_string(),
+        12007 => "the server name could not be resolved (DNS/proxy failure)".to_string(),
+        12017 => "the request was canceled".to_string(),
+        12029 => "the connection to the server failed".to_string(),
+        12030 => "the connection was prematurely closed".to_string(),
+        12031 => "the connection was reset".to_string(),
+        12044 => "client certificate is required (proxy or server)".to_string(),
+        12157 => "the secure channel transaction failed (TLS/proxy MITM)".to_string(),
+        12169 => "the server certificate is invalid (proxy MITM or cert error)".to_string(),
+        12172 => "the server certificate was revoked".to_string(),
+        12038 => "the URL scheme is not supported".to_string(),
+        12019 => "the handle is not in the correct state".to_string(),
+        87 => "the parameter is incorrect".to_string(),
+        _ => String::new(),
+    }
 }
 
 #[cfg(windows)]
