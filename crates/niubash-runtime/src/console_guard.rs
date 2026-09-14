@@ -41,6 +41,16 @@ pub fn prefer_utf8_code_page() {
     platform::prefer_utf8_code_page();
 }
 
+/// Force-enable ANSI VT processing on the stdout/stderr console handles.
+/// Legacy conhost — the default terminal on Windows 10 — starts new
+/// processes without `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, so every escape
+/// sequence prints literally until something opts in. Call once at startup
+/// so early output like the setup wizard logo renders correctly; handles
+/// that are not consoles are skipped.
+pub fn enable_vt_output() {
+    platform::enable_vt_output();
+}
+
 /// Restore the baseline console modes and re-show the cursor. Safe to call
 /// when handles are redirected (non-console handles are skipped).
 pub fn restore(baseline: &ConsoleBaseline) {
@@ -73,6 +83,14 @@ mod platform {
         unsafe {
             let _ = SetConsoleCP(UTF8_CODE_PAGE);
             let _ = SetConsoleOutputCP(UTF8_CODE_PAGE);
+        }
+    }
+
+    pub fn enable_vt_output() {
+        for handle_id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if let Some(mode) = console_mode(handle_id) {
+                set_console_mode(handle_id, ensure_vt_bits(mode));
+            }
         }
     }
 
@@ -147,6 +165,7 @@ mod platform {
         fn capture_and_restore_is_safe_and_idempotent() {
             let baseline = capture();
             prefer_utf8_code_page();
+            enable_vt_output();
             restore(&baseline);
             restore(&baseline);
         }
@@ -167,6 +186,8 @@ mod platform {
 
     pub fn prefer_utf8_code_page() {}
 
+    pub fn enable_vt_output() {}
+
     pub fn restore(_baseline: &ConsoleBaseline) {}
 }
 
@@ -178,6 +199,7 @@ mod tests {
     #[test]
     fn capture_and_restore_is_safe_and_idempotent() {
         let baseline = capture();
+        enable_vt_output();
         restore(&baseline);
         restore(&baseline);
     }
