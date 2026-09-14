@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "niubash"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "niubash-runtime"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "colored",
