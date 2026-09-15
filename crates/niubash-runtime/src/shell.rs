@@ -699,7 +699,7 @@ impl Shell {
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
+        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref(), &self.executor);
 
         let mut printed_command_not_found_hints = false;
         let code = if self.native_plugin_enabled("zoxide")
@@ -921,6 +921,17 @@ impl Shell {
         self.update_completion_state();
         self.sync_prompt_from_plugin_env();
         self.run_greeting_hooks();
+    }
+
+    /// Warn once per shell root when the resolved winuxcmd install tree is
+    /// not user-writable (unixwin/niubash#94). Called only from the
+    /// interactive REPL so `niu -c` and script runs stay quiet and
+    /// deterministic.
+    pub fn warn_once_for_nonwritable_shell_root(&self) {
+        let Some(root) = &self.shell_root else {
+            return;
+        };
+        warn_once_for_nonwritable_root(root, &self.home_dir);
     }
 
     /// Source the non-interactive environment file if one is configured.
@@ -2382,7 +2393,7 @@ impl Shell {
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
+        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref(), &self.executor);
         if ast.commands.len() != 1 {
             return;
         }
@@ -2639,7 +2650,7 @@ impl Shell {
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
+        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref(), &self.executor);
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
         let execution = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
@@ -3654,33 +3665,49 @@ fn normalize_winuxcmd_slash_drive_args(ast: &mut Ast) {
 /// arguments that are explicit virtual-root paths with a sub-path. It never
 /// touches slash-drive paths (`/c/...`), tilde (`~`), or bare directory
 /// arguments such as a lone `/tmp`.
-fn rewrite_virtual_root_args(ast: &mut Ast, shell_root: Option<&Path>) {
+fn rewrite_virtual_root_args(ast: &mut Ast, shell_root: Option<&Path>, executor: &Executor) {
     let Some(root) = shell_root else {
         return;
     };
     if !cfg!(windows) {
         return;
     }
+    // /tmp and /var/tmp are per-user temp namespaces in rubash even when a
+    // shell root is configured (unixwin/niubash#94); resolve their backing
+    // directories once per rewrite pass so every rewritten argument agrees
+    // with where rubash redirections actually create the files.
+    let tmp_base = virtual_tmp_host_base(executor);
+    let var_tmp_base = crate::path_utils::host_var_tmp_dir();
     for command in &mut ast.commands {
-        rewrite_virtual_root_command(command, root);
+        rewrite_virtual_root_command(command, root, &tmp_base, &var_tmp_base);
     }
 }
 
-fn rewrite_virtual_root_command(command: &mut rubash::parser::CommandNode, root: &Path) {
+fn rewrite_virtual_root_command(
+    command: &mut rubash::parser::CommandNode,
+    root: &Path,
+    tmp_base: &Path,
+    var_tmp_base: &Path,
+) {
     if let Some(and_or_list) = &mut command.and_or_list {
         for command in &mut and_or_list.commands {
-            rewrite_virtual_root_command(command, root);
+            rewrite_virtual_root_command(command, root, tmp_base, var_tmp_base);
         }
     }
     // Never rewrite the command name itself.
     for word in command.words.iter_mut().skip(1) {
-        if let Some(host_path) = virtual_root_arg_to_host_path(word, root) {
+        if let Some(host_path) = virtual_root_arg_to_host_path(word, root, tmp_base, var_tmp_base) {
             *word = host_path;
         }
     }
 }
 
-fn virtual_root_arg_to_host_path(value: &str, root: &Path) -> Option<String> {
+fn virtual_root_arg_to_host_path(
+    value: &str,
+    root: &Path,
+    tmp_base: &Path,
+    var_tmp_base: &Path,
+) -> Option<String> {
     let normalized = value.replace('\\', "/");
     let Some(rest) = normalized.strip_prefix('/') else {
         return None;
@@ -3699,8 +3726,39 @@ fn virtual_root_arg_to_host_path(value: &str, root: &Path) -> Option<String> {
     if !sub.starts_with('/') {
         return None;
     }
-    let host = root.join(rest).to_string_lossy().replace('/', "\\");
-    Some(host)
+    // /tmp and /var/tmp live in the per-user temp namespace, not below the
+    // install root, so they stay writable for Program Files-style installs.
+    let host = if first == "tmp" {
+        tmp_base.join(&rest[first.len() + 1..])
+    } else if rest == "var/tmp" {
+        var_tmp_base.to_path_buf()
+    } else if let Some(var_rest) = rest.strip_prefix("var/tmp/") {
+        var_tmp_base.join(var_rest)
+    } else {
+        root.join(rest)
+    };
+    Some(host.to_string_lossy().replace('/', "\\"))
+}
+
+/// Backing directory for the virtual `/tmp` when rewriting external-command
+/// arguments. Mirrors rubash's Windows resolution order: the executor TMPDIR
+/// wins unless it is empty or spells the virtual `/tmp` itself; the process
+/// temp dir is the fallback so resolution can never recurse.
+fn virtual_tmp_host_base(executor: &Executor) -> PathBuf {
+    if let Some(tmpdir) = executor.get_env("TMPDIR") {
+        let normalized = tmpdir.replace('\\', "/");
+        let normalized = normalized.trim_end_matches('/');
+        if !normalized.is_empty() && normalized != "/tmp" && !normalized.starts_with("/tmp/") {
+            // A virtual TMPDIR below /var/tmp resolves against the
+            // temp-backed var/tmp base, same as rubash.
+            if normalized == "/var/tmp" || normalized.starts_with("/var/tmp/") {
+                let rest = normalized["/var/tmp".len()..].trim_start_matches('/');
+                return crate::path_utils::host_var_tmp_dir().join(rest);
+            }
+            return executor.resolve_shell_path(tmpdir);
+        }
+    }
+    std::env::temp_dir()
 }
 
 fn normalize_winuxcmd_slash_drive_command(command: &mut rubash::parser::CommandNode) {
@@ -4890,18 +4948,71 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
         return Ok(None);
     };
 
-    for relative in [
-        "bin",
-        "usr/bin",
-        "usr/local/bin",
-        "etc",
-        "var",
-        "tmp",
-        "dev",
-    ] {
-        std::fs::create_dir_all(root.join(relative))?;
+    // Best-effort only: a root below a non-user-writable install dir (e.g.
+    // C:\Program Files\Niubash) cannot accept new directories, and that must
+    // not abort shell startup (unixwin/niubash#94). "tmp" is intentionally
+    // absent: /tmp resolves to the per-user temp dir, not the install tree.
+    for relative in ["bin", "usr/bin", "usr/local/bin", "etc", "var", "dev"] {
+        if let Err(error) = std::fs::create_dir_all(root.join(relative)) {
+            log::debug!(
+                "shell root dir {} not creatable (read-only root?): {}",
+                root.join(relative).display(),
+                error
+            );
+        }
     }
     Ok(Some(root))
+}
+
+/// True when the current user can create entries below the shell root.
+/// Probed by creating and removing a unique marker directory; a
+/// Program Files-style install root fails this probe.
+fn shell_root_user_writable(root: &Path) -> bool {
+    let probe = root.join(format!(".niu-write-probe-{}", std::process::id()));
+    if std::fs::create_dir(&probe).is_ok() {
+        let _ = std::fs::remove_dir(&probe);
+        return true;
+    }
+    false
+}
+
+/// Warn once per shell root when the resolved winuxcmd install tree is not
+/// user-writable (unixwin/niubash#94): /tmp and /var/tmp keep working from
+/// the per-user temp dir, but wpm package installs and command-link rebuilds
+/// still need write access to the root and will fail. A marker file records
+/// the warned root so the diagnostic is not repeated on every interactive
+/// launch.
+fn warn_once_for_nonwritable_root(root: &Path, home_dir: &Path) {
+    if !cfg!(windows) || shell_root_user_writable(root) {
+        return;
+    }
+    let marker = home_dir
+        .join(".niubash")
+        .join("nonwritable-shell-root-warned");
+    if std::fs::read_to_string(&marker)
+        .map(|seen| seen.trim() == root.to_string_lossy().trim())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    eprintln!(
+        "niubash: warning: shell root '{}' is not writable by this user.",
+        root.display()
+    );
+    eprintln!(
+        "  /tmp and /var/tmp now live in your per-user temp directory, but \
+         'wpm install/update' and command-link rebuilds still target the \
+         install root and will fail with permission errors."
+    );
+    eprintln!(
+        "  Fix: reinstall Niubash to a per-user location such as \
+         %LOCALAPPDATA%\\Programs\\Niubash \
+         (https://github.com/unixwin/niubash/issues/94)."
+    );
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, root.to_string_lossy().as_bytes());
 }
 
 fn is_slash_drive_path(value: &str) -> bool {
@@ -8272,10 +8383,12 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             return;
         }
         let root = Path::new("C:/niubash-root");
+        let tmp_base = Path::new("C:/Users/test/AppData/Local/Temp");
+        let var_tmp_base = tmp_base.join("var").join("tmp");
         let cases = [
             (
                 "/tmp/opencode/repro.sh",
-                "C:\\niubash-root\\tmp\\opencode\\repro.sh",
+                "C:\\Users\\test\\AppData\\Local\\Temp\\opencode\\repro.sh",
             ),
             ("/etc/passwd", "C:\\niubash-root\\etc\\passwd"),
             (
@@ -8283,13 +8396,17 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
                 "C:\\niubash-root\\usr\\local\\bin\\tool",
             ),
             ("/var/log/x.log", "C:\\niubash-root\\var\\log\\x.log"),
+            (
+                "/var/tmp/y.log",
+                "C:\\Users\\test\\AppData\\Local\\Temp\\var\\tmp\\y.log",
+            ),
             ("/bin/sh", "C:\\niubash-root\\bin\\sh"),
             ("/opt/app/run", "C:\\niubash-root\\opt\\app\\run"),
             ("/dev/null", "C:\\niubash-root\\dev\\null"),
             ("/home/alice/file", "C:\\niubash-root\\home\\alice\\file"),
         ];
         for (input, expected) in cases {
-            let got = virtual_root_arg_to_host_path(input, root);
+            let got = virtual_root_arg_to_host_path(input, root, tmp_base, &var_tmp_base);
             assert_eq!(got.as_deref(), Some(expected), "input: {input}");
         }
     }
@@ -8300,18 +8417,33 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
             return;
         }
         let root = Path::new("C:/niubash-root");
+        let tmp_base = Path::new("C:/Users/test/AppData/Local/Temp");
+        let var_tmp_base = tmp_base.join("var").join("tmp");
         // Slash-drive paths are handled elsewhere and must NOT be rewritten here.
-        assert_eq!(virtual_root_arg_to_host_path("/c/Users/me/x", root), None);
-        // A bare directory (no sub-path) must NOT be rewritten.
-        assert_eq!(virtual_root_arg_to_host_path("/tmp", root), None);
-        // Tilde is resolved by the external process environment.
-        assert_eq!(virtual_root_arg_to_host_path("~/x.sh", root), None);
-        // Unknown virtual-ish prefixes are left untouched.
-        assert_eq!(virtual_root_arg_to_host_path("/foo/bar", root), None);
-        // The command name position is handled by the caller (skip(1)).
         assert_eq!(
-            virtual_root_arg_to_host_path("/tmp/x", root),
-            Some("C:\\niubash-root\\tmp\\x".to_string())
+            virtual_root_arg_to_host_path("/c/Users/me/x", root, tmp_base, &var_tmp_base),
+            None
+        );
+        // A bare directory (no sub-path) must NOT be rewritten.
+        assert_eq!(
+            virtual_root_arg_to_host_path("/tmp", root, tmp_base, &var_tmp_base),
+            None
+        );
+        // Tilde is resolved by the external process environment.
+        assert_eq!(
+            virtual_root_arg_to_host_path("~/x.sh", root, tmp_base, &var_tmp_base),
+            None
+        );
+        // Unknown virtual-ish prefixes are left untouched.
+        assert_eq!(
+            virtual_root_arg_to_host_path("/foo/bar", root, tmp_base, &var_tmp_base),
+            None
+        );
+        // /tmp/x resolves into the per-user temp base, not <root>/tmp
+        // (unixwin/niubash#94).
+        assert_eq!(
+            virtual_root_arg_to_host_path("/tmp/x", root, tmp_base, &var_tmp_base),
+            Some("C:\\Users\\test\\AppData\\Local\\Temp\\x".to_string())
         );
     }
 
@@ -8324,18 +8456,19 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
         let _cwd_guard = CwdGuard::capture();
         let root = std::env::temp_dir().join("niubash-test-root");
         let _ = std::fs::create_dir_all(&root);
+        let executor = Executor::new();
 
         // Mirrors the reported failure: an external bash.exe given a Niubash
-        // virtual /tmp path. The path must become a real host path under root.
+        // virtual /tmp path. The path must become the same host path rubash
+        // uses for redirections: the per-user temp dir, not <root>/tmp.
         let line = r#"D:/Git/bin/bash.exe /tmp/opencode/repro.sh --flag /etc/config"#;
         let tokens = tokenize(line);
         let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, Some(&root));
+        rewrite_virtual_root_args(&mut ast, Some(&root), &executor);
 
         let words = &ast.commands[0].words;
         assert_eq!(words[0], "D:/Git/bin/bash.exe", "command name untouched");
-        let expected_tmp = root
-            .join("tmp")
+        let expected_tmp = virtual_tmp_host_base(&executor)
             .join("opencode")
             .join("repro.sh")
             .to_string_lossy()
@@ -8358,11 +8491,48 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
         }
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
+        let executor = Executor::new();
         let line = r#"bash.exe /tmp/x.sh"#;
         let tokens = tokenize(line);
         let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, None);
+        rewrite_virtual_root_args(&mut ast, None, &executor);
         // No shell_root -> arguments are left exactly as written.
         assert_eq!(ast.commands[0].words[1], "/tmp/x.sh");
+    }
+
+    #[test]
+    fn virtual_tmp_host_base_prefers_executor_tmpdir() {
+        if !cfg!(windows) {
+            return;
+        }
+        // Executor::new() mutates process env (removes __RUBASH_* markers),
+        // so serialize against the other env-touching tests.
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let mut executor = Executor::new();
+        let custom = std::env::temp_dir().join("niubash-tmpdir-pref");
+        executor.set_env("TMPDIR", &custom.to_string_lossy());
+        assert_eq!(virtual_tmp_host_base(&executor), custom);
+        // A TMPDIR spelling the virtual /tmp falls back to the process temp
+        // dir instead of recursing.
+        executor.set_env("TMPDIR", "/tmp");
+        assert_eq!(virtual_tmp_host_base(&executor), std::env::temp_dir());
+        executor.set_env("TMPDIR", "/tmp/sub");
+        assert_eq!(virtual_tmp_host_base(&executor), std::env::temp_dir());
+    }
+
+    #[test]
+    fn shell_root_user_writable_detects_unwritable_root() {
+        if !cfg!(windows) {
+            return;
+        }
+        let dir = std::env::temp_dir().join("niubash-writable-root-probe");
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(shell_root_user_writable(&dir));
+        // A "root" below a regular file can never accept children, so the
+        // probe reports it as non-writable.
+        let file = dir.join("file.txt");
+        std::fs::write(&file, b"").unwrap();
+        assert!(!shell_root_user_writable(&file.join("sub")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

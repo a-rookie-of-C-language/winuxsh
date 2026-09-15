@@ -600,8 +600,19 @@ fn resolve_logical_shell_path(word: &str) -> Option<PathBuf> {
         });
     }
     let rest = normalized.strip_prefix('/')?;
+    // /tmp and /var/tmp are per-user temp namespaces, not install-tree dirs
+    // (unixwin/niubash#94).
+    if rest == "tmp" || rest.starts_with("tmp/") {
+        return Some(crate::path_utils::host_tmp_dir().join(rest[3..].trim_start_matches('/')));
+    }
+    if rest == "var/tmp" || rest.starts_with("var/tmp/") {
+        return Some(
+            crate::path_utils::host_var_tmp_dir()
+                .join(rest["var/tmp".len()..].trim_start_matches('/')),
+        );
+    }
     match rest.split('/').next() {
-        Some("bin" | "dev" | "etc" | "opt" | "tmp" | "usr" | "var") => Some(root.join(rest)),
+        Some("bin" | "dev" | "etc" | "opt" | "usr" | "var") => Some(root.join(rest)),
         _ => None,
     }
 }
