@@ -283,6 +283,7 @@ fn print_locale_strings(input: &str, po: bool) {
                         content.push(inner);
                         j = after + inner.len_utf8();
                     } else {
+                        content.push(ch);
                         j = after;
                     }
                     continue;
