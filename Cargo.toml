@@ -47,10 +47,10 @@ codegen-units = 1
 panic = "abort"
 
 # Temporary override for unixwin/niubash#94 and unixwin/niubash#92: the
-# /tmp-per-user-temp fix and the comsub fragment byte-fidelity fix both live
+# /tmp-per-user-temp fix and the comsub/stdin byte-fidelity fixes all live
 # in rubash upstream (unixwin/rubash#104). Drop this patch once a rubash
 # crates.io release >= the pinned commit ships and the `rubash = "..."`
 # requirement is bumped instead. After unixwin/rubash#104 merges, move `rev`
 # to a master commit so the pin does not depend on the PR branch surviving.
 [patch.crates-io]
-rubash = { git = "https://github.com/unixwin/rubash", rev = "0e9d2e5dd077764234714eb3e316461302909906" }
+rubash = { git = "https://github.com/unixwin/rubash", rev = "fe1657863d8b2a4d78ae5a41e15025890d3adf86" }
