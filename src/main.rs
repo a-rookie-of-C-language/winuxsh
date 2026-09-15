@@ -273,17 +273,26 @@ fn print_locale_strings(input: &str, po: bool) {
         if bytes[i] == b'$' && bytes[i + 1] == b'"' {
             let mut j = i + 2;
             let mut content = String::new();
+            // Push whole chars, not `byte as char` widened bytes, so
+            // multibyte $"" text stays UTF-8-correct in the dump.
             while j < bytes.len() {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    content.push(bytes[j + 1] as char);
-                    j += 2;
+                let ch = input[j..].chars().next().expect("j is a boundary");
+                if ch == '\\' {
+                    let after = j + 1;
+                    if let Some(inner) = input.get(after..).and_then(|s| s.chars().next()) {
+                        content.push(inner);
+                        j = after + inner.len_utf8();
+                    } else {
+                        content.push(ch);
+                        j = after;
+                    }
                     continue;
                 }
-                if bytes[j] == b'"' {
+                if ch == '"' {
                     break;
                 }
-                content.push(bytes[j] as char);
-                j += 1;
+                content.push(ch);
+                j += ch.len_utf8();
             }
             if po {
                 println!("msgid \"{}\"", content);
@@ -439,6 +448,12 @@ fn run_stdin_script() -> anyhow::Result<()> {
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
     let mut stdin = std::io::stdin().lock();
     let mut bytes = [0_u8; 1];
+    // Accumulate raw bytes and decode once per line: `byte as char` would
+    // Latin-1-encode multibyte script source (e.g. `中文` became
+    // `ä¸­æ–‡`). `bytes_to_shell_text` keeps valid UTF-8 and preserves
+    // undecodable bytes as raw-byte markers. A `b'\n'` can never sit inside
+    // a UTF-8 sequence, so the line split is char-boundary safe.
+    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
 
     loop {
@@ -446,13 +461,14 @@ fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
             0 => break,
             count => {
                 read += count;
-                output.push(bytes[0] as char);
+                line.push(bytes[0]);
                 if bytes[0] == b'\n' {
                     break;
                 }
             }
         }
     }
+    output.push_str(&rubash::executor::bytes_to_shell_text(&line));
 
     Ok(read)
 }
