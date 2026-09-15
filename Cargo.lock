@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "niubash"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "niubash-runtime"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "colored",
@@ -909,8 +909,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rubash"
-version = "1.1.0"
-source = "git+https://github.com/unixwin/rubash?rev=fe1657863d8b2a4d78ae5a41e15025890d3adf86#fe1657863d8b2a4d78ae5a41e15025890d3adf86"
+version = "1.2.0"
+source = "git+https://github.com/unixwin/rubash.git?branch=master#b4cbcadc7c1a2576d318da8d52cb492e40325f73"
 dependencies = [
  "ctrlc",
  "libc",
