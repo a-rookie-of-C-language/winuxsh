@@ -2,6 +2,21 @@
 
 All notable changes to Niubash are documented in this file.
 
+## [1.1.3] - 2026-09-16
+
+### Fixes
+
+- **`ln -s` with `./` / `../` targets produced links that Explorer could not open**.
+  winuxcmd stored the link text verbatim; NT only resolves reparse-point targets
+  with backslash separators, so any forward slash (`./bds`, `../x`, `dir/file`)
+  failed native resolution with "The filename, directory name, or volume label
+  syntax is incorrect" (WinuxCmd #1101, fixed in v1.0.8, niubash #109)
+- **`niu -lc 'cmd'` (and any bundled short option containing `-l`/`-i`) failed**
+  with `-l: invalid option`; bundled short options now expand correctly
+  (`-lc`, `-cl`, `-ilc`, `-ic`) (rubash, PR #112)
+- `niu -c -l`, `niu -c` argument handling and `$(type -t)` stdout leak from
+  the v1.1.2 issue batch (#106/#107/#108, rubash PR #111)
+
 ## [1.1.0] - 2026-09-12
 
 ### Highlights
