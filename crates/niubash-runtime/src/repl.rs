@@ -16,7 +16,7 @@ use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
     ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu,
     MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Vi,
+    ReedlineMenu, Signal, ValidationResult, Validator, Vi,
 };
 
 const COMPLETION_MENU: &str = "completion_menu";
@@ -137,6 +137,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     )));
 
     let mut editor = Reedline::create()
+        .with_validator(Box::new(ReplValidator))
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
             shell_ref.history_ignore_space_prefixed,
@@ -585,6 +586,23 @@ fn parse_plain_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     Some((KeyModifiers::NONE, KeyCode::Char(ch)))
 }
 
+/// Lets Enter grow an unfinished command into a multi-line buffer instead of
+/// submitting it. Reedline submits only once `validate` reports Complete, so
+/// a pasted or typed `cmd \` / unclosed quote / open `if..fi` block stays
+/// editable — arrows move between lines — until the last line closes it.
+/// The REPL-side `PendingReplInput` collector remains as a fallback.
+struct ReplValidator;
+
+impl Validator for ReplValidator {
+    fn validate(&self, line: &str) -> ValidationResult {
+        if is_repl_input_complete(line) {
+            ValidationResult::Complete
+        } else {
+            ValidationResult::Incomplete
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PendingReplInput {
     lines: Vec<String>,
@@ -618,7 +636,10 @@ impl PendingReplInput {
     }
 
     fn is_multiline(&self) -> bool {
-        self.lines.len() > 1
+        // With the reedline validator a complete multi-line buffer arrives as
+        // a single entry containing '\n'; the fallback collector still joins
+        // per-line reads into multiple entries.
+        self.lines.len() > 1 || self.script().contains('\n')
     }
 }
 
@@ -1374,6 +1395,34 @@ mod tests {
         assert!(!is_repl_input_complete("hello() {"));
         assert!(is_repl_input_complete("hello() {\n  echo hi\n}"));
         assert!(is_repl_input_complete("{ echo hi; }"));
+    }
+
+    #[test]
+    fn repl_validator_holds_incomplete_input_in_the_buffer() {
+        // Enter on an unfinished command must not submit: the validator keeps
+        // the buffer open so multi-line input stays editable (arrows work
+        // across lines) until the last line completes it.
+        let validator = ReplValidator;
+        assert!(matches!(
+            validator.validate("echo \"unterminated"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("echo one \\"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("if true; then"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("echo done"),
+            ValidationResult::Complete
+        ));
+        assert!(matches!(
+            validator.validate("echo one \\\n  two"),
+            ValidationResult::Complete
+        ));
     }
 
     #[test]
