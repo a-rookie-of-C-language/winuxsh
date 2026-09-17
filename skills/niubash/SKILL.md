@@ -1,6 +1,6 @@
 ---
 name: niubash-native-codex
-description: Native Niubash execution guidance for Codex running as a first-class Niubash citizen in the unixwin/niubash environment. Use when Codex handles Niubash shell tasks, .niubashrc edits, oh-my-niu bundles, .winux scripts, command installation, PATH/alias setup, shell debugging, GNU Bash-compatible shell behavior, or any Windows-host task where commands should run directly inside the current Niubash session instead of through PowerShell, pwsh, cmd.exe, WSL, Git Bash, -C/-c launch wrappers, or /c-style path assumptions.
+description: Native Niubash execution guidance for Codex running as a first-class Niubash citizen in the unixwin/niubash environment. Use when Codex handles Niubash shell tasks, .niubashrc edits, oh-my-niu bundles, .niu scripts (legacy .winux), command installation, PATH/alias setup, shell debugging, GNU Bash-compatible shell behavior, or any Windows-host task where commands should run directly inside the current Niubash session instead of through PowerShell, pwsh, cmd.exe, WSL, Git Bash, -C/-c launch wrappers, or /c-style path assumptions.
 ---
 
 # Niubash Native Codex
@@ -63,8 +63,9 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 - Mental model: **WPM is the package manager** (it downloads and links
   GNU/POSIX command packages such as `rg`, `fd`, `bat`, `jq`, `node`),
   while **WinuxCmd is the command-link runtime** that owns the real
-  `/usr/bin` tree and routes those commands. `niubash --self-update`
-  updates Niubash itself and is separate from `wpm` package updates.
+  `/usr/bin` tree and routes those commands. `niu --self-update`
+  (or `self-update` inside the REPL) updates Niubash itself and is
+  separate from `wpm` package updates.
 - For a specific tool, prefer `command -v name`, `which name`, or
   `type name` to confirm it resolves before using it.
 
@@ -76,6 +77,9 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 - Before relying on an advanced bash feature — `fc`, `coproc`, exotic
   redirects, `mapfile`/`readarray` edge cases, `compgen`/`complete`, deep
   parameter expansion, or `BASH_REMATCH` — test it **directly in the current Niubash session** (not via `niu -c` nesting, which adds its own quoting layer). If it diverges, fall back to a simpler POSIX form, or invoke a real `bash` if one is on PATH (`command -v bash`).
+- Fixed upstream in rubash (niubash v1.1.4): escaped double-quote loss
+  (#99), subshell cwd/env leakage into the parent shell (#100), and CRLF
+  line endings breaking lexing (#106). Do not build workarounds for these.
 - Known gap families observed in practice: `fc -l` self-exclusion, pipeline
   stdin handoff edge cases (a `\x1e` record separator can leak into stdout
   on some pipelines), and external-tool quoting artifacts from WinuxCmd
@@ -110,13 +114,15 @@ description: Native Niubash execution guidance for Codex running as a first-clas
 
 ## Niubash Configuration
 
-- Treat `C:/Users/Administrator/.niubashrc` as the primary interactive rc file unless `$HOME` points elsewhere.
+- Treat `C:/Users/Administrator/.niubashrc` as the primary interactive rc file unless `$HOME` points elsewhere. Fallback chain: `~/.winuxshrc` (migrated once into `~/.niubashrc` on first startup) then `~/.winshrc` (legacy, read only when `~/.niubashrc` is absent).
 - Use normal Niubash/GNU Bash-compatible syntax in rc files: `export NAME=value`, `alias name='command'`, arrays such as `NIU_PLUGINS=(prompt-core git)`, and `. "$file"` for sourcing.
 - Prefer Niubash-local PATH additions in `.niubashrc` for shell-only tools or app bins instead of expanding the Windows global/user PATH. This conserves Windows PATH length and keeps shell-specific setup out of global process state.
 - Add PATH entries idempotently with a helper that checks `[ -d "$dir" ]` and avoids duplicates before `PATH="$dir;$PATH"`.
 - Keep rc edits idempotent. Remove or avoid duplicate self-appending blocks such as `printf ... >> ~/.niubashrc` inside the rc file.
-- Place user customizations in `.niubashrc` or `$HOME/.niubash/custom` rather than editing bundled files under `AppData/Local/Programs/Niubash` unless the user is intentionally modifying the installed bundle.
-- For oh-my-niu, source `oh-my-niu.winux` and use `.winux` plugin files for shell-mutating behavior.
+- Place user customizations in `.niubashrc` or `$HOME/.niubash/custom` rather than editing bundled files under `AppData/Local/Programs/Niubash` (newer installs; older machines may use `Programs/Winuxsh`) unless the user is intentionally modifying the installed bundle.
+- For oh-my-niu, source `oh-my-niu.niu` and use `.niu` plugin files for shell-mutating behavior. `.winux` files are the retired pre-rename naming; a `.winux` reference in an rc file or bundle indicates stale state, not the current convention.
+- Keep shell files (`~/.niubashrc`, `.niu`, `.winux`, `.sh`) in LF line endings. The engine tolerates CRLF since v1.1.4, but LF is the canonical form — do not let an editor or `git config core.autocrlf` convert shell files to CRLF.
+- `NIU_COMPLETION_STYLE` selects the Tab completion menu: `ide` (default, VS Code-style popup), `column` (zsh-style grid), `list` (fish-style vertical list), `inline` (bash menu-complete).
 
 ## Codex Invocation
 

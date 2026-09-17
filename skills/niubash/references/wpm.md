@@ -21,7 +21,7 @@ wpm list               # full catalog with install state
 
 WPM is the package manager for GNU/POSIX command packages (`rg`, `fd`,
 `bat`, `jq`, `node`, ...); WinuxCmd owns the real `/usr/bin` tree that
-routes them. `niubash --self-update` updates Niubash and is separate from
+routes them. `niu --self-update` updates Niubash and is separate from
 `wpm` updates.
 
 Check the active command before changing anything:
@@ -48,5 +48,5 @@ If the package exists but its hard links are missing:
 wpm links rebuild --force
 ```
 
-For access-denied or locked-file errors, request approved elevation. `niubash
+For access-denied or locked-file errors, request approved elevation. `niu
 --self-update` updates Niubash and is separate from WPM updates.
