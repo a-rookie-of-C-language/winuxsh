@@ -9,8 +9,9 @@ fn main() {
     embed_windows_icon();
 }
 
-/// Locate the `rubash` checkout that `Cargo.toml` pulls in as a path
-/// dependency.
+/// Locate a sibling `rubash` checkout. Only consulted when rubash is a path
+/// dependency; while it is a `git = "..."` dependency nothing here is compiled
+/// and `Cargo.lock` decides the revision.
 fn rubash_checkout_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
     let sibling = manifest_dir.parent()?.join("rubash");
@@ -19,16 +20,20 @@ fn rubash_checkout_dir() -> Option<PathBuf> {
 
 /// Embed the rubash revision that is actually compiled into this binary.
 ///
-/// `rubash` is a path dependency, so `Cargo.lock` carries no `source =` line
-/// for it and the old lookup always fell through to the literal string
-/// "master" — every niubash build printed the same revision no matter which
-/// rubash commit was linked, and a release could not be traced back to its
-/// engine.
+/// `Cargo.lock` is the only source that names the commit Cargo resolves for a
+/// `git = "..."` dependency, so it decides. It used to be the fallback, which
+/// let a sibling `../rubash` checkout win even though nothing in the build
+/// reads that tree: a developer whose local rubash sat on an unrelated commit
+/// saw its HEAD printed in the version banner, and the reported revision did
+/// not reach the binary at all.
+///
+/// The checkout stays as the fallback for the path-dependency case, where the
+/// lock carries no `source =` line and the local tree really is the build.
 fn emit_rubash_revision() {
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let revision = rubash_revision_from_checkout()
-        .or_else(rubash_revision_from_lock)
+    let revision = rubash_revision_from_lock()
+        .or_else(rubash_revision_from_checkout)
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=NIU_RUBASH_REV={revision}");
@@ -37,7 +42,8 @@ fn emit_rubash_revision() {
 /// Ask the sibling checkout for the commit being compiled, marking it dirty
 /// when the tree carries uncommitted changes. The dirty marker matters more
 /// than the hash here: a tree with uncommitted edits is not reproducible, and
-/// the version banner is the only place a user can see that.
+/// the version banner is the only place a user can see that. This describes
+/// the build only while rubash is a path dependency.
 fn rubash_revision_from_checkout() -> Option<String> {
     let Some(dir) = rubash_checkout_dir() else {
         return None;
@@ -110,8 +116,8 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 /// `git = "..."` dependencies record their revision in `Cargo.lock`; a path
-/// dependency does not. Kept so the value stays correct if rubash ever moves
-/// back to a git dependency.
+/// dependency does not. This is the authoritative lookup while rubash is a git
+/// dependency, because the lock names the commit Cargo actually compiles.
 fn rubash_revision_from_lock() -> Option<String> {
     let lock = fs::read_to_string("Cargo.lock").ok()?;
     let mut in_rubash = false;
@@ -130,10 +136,9 @@ fn rubash_revision_from_lock() -> Option<String> {
 
         if in_rubash && trimmed.starts_with("source = ") {
             let source = trimmed.trim_start_matches("source = ").trim_matches('"');
-            return source
-                .rsplit_once('#')
-                .map(|(_, rev)| rev.to_string())
-                .or_else(|| Some("unknown".to_string()));
+            let rev = source.rsplit_once('#').map_or("unknown", |(_, rev)| rev);
+            // Match the 12-character form the checkout path reports.
+            return Some(rev.chars().take(12).collect());
         }
     }
 
