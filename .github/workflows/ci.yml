@@ -20,8 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
 
-      - name: Checkout rubash path dependency
-        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
+      # rubash is a git branch dependency resolved from Cargo.lock; no sibling
+      # checkout is needed here. (The old --recurse-submodules clone pulled
+      # third_party/bash from git.savannah.gnu.org and timed out repeatedly.)
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1.11

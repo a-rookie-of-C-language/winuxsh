@@ -47,8 +47,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout rubash path dependency
-        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
+      # rubash is a git branch dependency resolved from Cargo.lock; no sibling
+      # checkout is needed. (The old --recurse-submodules clone pulled
+      # third_party/bash from git.savannah.gnu.org and timed out repeatedly,
+      # stalling the release build for hours.)
 
       - name: Checkout oh-my-niu bundle
         run: git clone --depth 1 https://github.com/unixwin/oh-my-niu.git ../oh-my-niu
@@ -106,25 +108,33 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.rust_target }}
 
-      # rubash is a path dependency, so `cargo update -p rubash` cannot pin it:
-      # there is no registry entry to update, and the step silently did nothing.
-      # The revision the binary actually contains is resolved here and embedded
-      # at build time by build.rs, so `niu --version` reports it.
+      # rubash is a git branch dependency: the revision Cargo.lock records is
+      # what cargo compiles and what build.rs embeds into `niu --version`
+      # (its sibling-checkout lookup is skipped because nothing clones
+      # ../rubash anymore). Resolve the pinned revision from the lockfile so
+      # the release notes always match the binary actually built.
       - name: Pin rubash revision
         id: rubash
         shell: pwsh
         run: |
-          if (-not (Test-Path -LiteralPath ..\rubash)) {
-            throw "rubash checkout missing at ..\rubash"
+          $revision = $null
+          $inRubash = $false
+          foreach ($line in (Get-Content -LiteralPath Cargo.lock)) {
+            $trimmed = $line.Trim()
+            if ($trimmed -eq '[[package]]') { $inRubash = $false; continue }
+            if ($trimmed -eq 'name = "rubash"') { $inRubash = $true; continue }
+            if ($inRubash -and $trimmed.StartsWith('source = "git+')) {
+              $hashIndex = $trimmed.LastIndexOf('#')
+              if ($hashIndex -ge 0) {
+                $revision = $trimmed.Substring($hashIndex + 1).TrimEnd('"')
+              }
+              break
+            }
           }
-          $revision = (git -C ..\rubash rev-parse --short=12 HEAD).Trim()
           if ([string]::IsNullOrWhiteSpace($revision)) {
-            throw "could not resolve rubash revision"
+            throw "could not resolve rubash revision from Cargo.lock"
           }
-          $dirty = git -C ..\rubash status --porcelain
-          if (-not [string]::IsNullOrWhiteSpace($dirty)) {
-            throw "rubash checkout is dirty; a release must pin a committed revision`n$dirty"
-          }
+          $revision = $revision.Substring(0, [Math]::Min(12, $revision.Length))
           Write-Host "rubash revision: $revision"
           "revision=$revision" >> $env:GITHUB_OUTPUT
 
@@ -281,9 +291,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout rubash path dependency
-        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
-
       - name: Resolve release inputs
         id: release
         shell: pwsh
@@ -309,11 +316,10 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      # Publishing needs version-annotated path deps so cargo can swap the
-      # path for a registry dependency. The rubash dep carries no version yet
-      # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
-      # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
-      # published.
+      # Publishing needs a registry-resolvable dependency: `cargo publish`
+      # refuses a bare git dependency without a version field. The rubash dep
+      # carries no version yet because rubash is not on crates.io; re-add
+      # `version = "..."` alongside the git source once it is published.
       - name: Publish niubash-runtime to crates.io
         run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
 
