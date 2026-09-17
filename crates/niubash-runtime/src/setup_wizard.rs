@@ -463,7 +463,7 @@ fi
 
 if [ -z "${{NIUBASH:-}}" ]; then
   for __niubash_bundle in "$HOME/.oh-my-niu" "$HOME/.niubash/oh-my-niu" "$HOME/.niubash/bundles/oh-my-niu"/* "$NIU_APP_BUNDLE_PATH"; do
-    if [ -f "$__niubash_bundle/oh-my-niu.winux" ]; then
+    if [ -f "$__niubash_bundle/oh-my-niu.niu" ] || [ -f "$__niubash_bundle/oh-my-niu.winux" ]; then
       NIUBASH="$__niubash_bundle"
       export NIUBASH
       break
@@ -471,7 +471,9 @@ if [ -z "${{NIUBASH:-}}" ]; then
   done
 fi
 
-if [ -f "$NIUBASH/oh-my-niu.winux" ]; then
+if [ -f "$NIUBASH/oh-my-niu.niu" ]; then
+  . "$NIUBASH/oh-my-niu.niu"
+elif [ -f "$NIUBASH/oh-my-niu.winux" ]; then
   . "$NIUBASH/oh-my-niu.winux"
 fi
 
@@ -671,7 +673,8 @@ mod tests {
         assert!(rc.contains("NIU_DISABLE_DEFAULT_PLUGINS=1"));
         assert!(rc.contains("NIU_PLUGINS=(prompt-core git)"));
         assert!(rc.contains("\"$NIU_APP_BUNDLE_PATH\""));
-        assert!(rc.contains(". \"$NIUBASH/oh-my-niu.winux\""));
+        assert!(rc.contains(". \"$NIUBASH/oh-my-niu.niu\""));
+        assert!(rc.contains("elif [ -f \"$NIUBASH/oh-my-niu.winux\" ]"));
         assert!(rc.contains("niubash_prompt_use_template '{cwd} ' '{time} '"));
         assert!(!rc.contains("[plugins]"));
         assert!(!rc.contains("[shell]"));
