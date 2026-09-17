@@ -182,16 +182,42 @@ jobs:
           "asset=$($asset.name)" >> $env:GITHUB_OUTPUT
           "exe=$($winuxcmdExe.FullName)" >> $env:GITHUB_OUTPUT
 
+      # `awk` is not a WinuxCmd built-in; without this package the bundle has
+      # no awk and `wpm install awk` used to install GoAWK, which silently
+      # drops GNU extensions (niubash#123). There is no windows-arm64 GAWK
+      # artifact in wpm-artifacts yet, so arm64 bundles keep the previous
+      # behavior (no bundled awk) until one exists.
+      - name: Download GAWK package
+        id: gawk
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $gawkVersion = "5.4.1"
+          $expectedSha256 = "25373ae83ec539dbe8b4208e1b4c1afa891f902df1a19138ecda5451ccded4b6"
+          $url = "https://github.com/unixwin/wpm-artifacts/releases/download/gawk-$gawkVersion/gawk-$gawkVersion-win-${{ matrix.arch }}.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP "gawk-$gawkVersion-win-${{ matrix.arch }}.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          $actualSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "GAWK archive sha256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          "zip=$zipPath" >> $env:GITHUB_OUTPUT
+
       - name: Package release zip
         shell: pwsh
         run: |
-          ./scripts/package-release.ps1 `
-            -Version "${{ steps.release.outputs.version }}" `
-            -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
-            -OhMyNiubashBundlePath "..\oh-my-niu" `
-            -Configuration release `
-            -Target "${{ matrix.rust_target }}" `
-            -Arch "${{ matrix.arch }}"
+          $packageArgs = @{
+            Version = "${{ steps.release.outputs.version }}"
+            WinuxCmdPath = "${{ steps.winuxcmd.outputs.exe }}"
+            OhMyNiubashBundlePath = "..\oh-my-niu"
+            Configuration = "release"
+            Target = "${{ matrix.rust_target }}"
+            Arch = "${{ matrix.arch }}"
+          }
+          if ("${{ steps.gawk.outputs.zip }}") {
+            $packageArgs.GawkZipPath = "${{ steps.gawk.outputs.zip }}"
+          }
+          ./scripts/package-release.ps1 @packageArgs
 
       - name: Install Inno Setup
         shell: pwsh
