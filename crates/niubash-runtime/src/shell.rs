@@ -893,6 +893,9 @@ impl Shell {
         let primary_rc = rc_path.as_ref().is_some_and(|path| {
             path.file_name().and_then(|name| name.to_str()) == Some(NIU_RC_FILE)
         });
+        if primary_rc {
+            fixup_rc_bundle_entry_point(&self.home_dir);
+        }
         if !primary_rc {
             self.run_source_plugin_startup_scripts();
         }
@@ -4892,6 +4895,25 @@ fn compatible_shell_path_from_env() -> Option<PathBuf> {
 /// One-time migration: rewrite a pre-rename `~/.winuxshrc` into
 /// `~/.niubashrc` with the `NIU_*` environment prefix. The original file is
 /// kept untouched; the rewrite is silent and idempotent.
+/// Rewrite retired `oh-my-*.winux` bundle entry references inside an existing
+/// `~/.niubashrc` to the current `oh-my-niu.niu` entry point. Wizard-generated
+/// rc files from 1.1.x probe only `.winux`, which keeps sourcing a stale
+/// leftover entry file on installs that still carry one; the rename is applied
+/// in place so the current entry wins. Runs before the rc is read, and writes
+/// back only when the content actually changes.
+fn fixup_rc_bundle_entry_point(home_dir: &Path) {
+    let path = home_dir.join(NIU_RC_FILE);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let fixed = content
+        .replace("oh-my-winuxsh.winux", "oh-my-niu.niu")
+        .replace("oh-my-niu.winux", "oh-my-niu.niu");
+    if fixed != content {
+        let _ = std::fs::write(&path, fixed);
+    }
+}
+
 fn migrate_legacy_winuxsh_rc(home_dir: &Path) {
     let source = home_dir.join(NIU_COMPAT_RC_FILE);
     let target = home_dir.join(NIU_RC_FILE);
@@ -6007,6 +6029,36 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
             std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap(),
             "export NIU_THEME=custom\n"
         );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn primary_rc_fixup_rewrites_retired_winux_bundle_entry() {
+        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
+        let _cwd_guard = CwdGuard::capture();
+        let temp = unique_temp_dir("niubash-rc-entry-fixup");
+        let home = temp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(NIU_RC_FILE),
+            r#"
+if [ -f "$NIUBASH/oh-my-niu.winux" ]; then
+  . "$NIUBASH/oh-my-niu.winux"
+fi
+[ -f "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux" ] && . "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux"
+"#,
+        )
+        .unwrap();
+
+        let mut shell = test_shell(HookConfig::default());
+        shell.home_dir = home.clone();
+        shell.run_startup_rc();
+
+        let fixed = std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap();
+        assert!(fixed.contains("oh-my-niu.niu"));
+        assert!(!fixed.contains("oh-my-niu.winux"));
+        assert!(!fixed.contains("oh-my-winuxsh.winux"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
