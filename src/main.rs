@@ -208,6 +208,14 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
+    // GNU `bash -i` forces interactive_shell even for -c and script
+    // runs (shell.c:540 forced_interactive -> init_interactive, and
+    // init_interactive_script for `bash -i script`), so expand_aliases
+    // follows -i too. The no-command REPL path below calls
+    // enter_interactive(), which sets the same shopt.
+    if invocation.interactive {
+        shell.executor.set_shopt_option("expand_aliases", true);
+    }
 
     if let Some(command) = invocation.command {
         shell.source_non_interactive_env();
@@ -1150,6 +1158,9 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
         line.len()
     };
     let mut shell = niubash_runtime::Shell::new()?;
+    // The probe emulates the interactive surface, so the startup rc must
+    // be sourced under the same shopt state as the real REPL.
+    shell.enter_interactive();
     shell.run_startup_rc();
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);
