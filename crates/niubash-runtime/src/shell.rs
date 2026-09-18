@@ -285,9 +285,11 @@ impl Shell {
         if let Ok(exe) = std::env::current_exe() {
             executor.export_env("BASH", &exe.to_string_lossy().replace('\\', "/"));
         }
-        // Niubash always presents an interactive shell, so aliases loaded
-        // from ~/.niubashrc must expand without requiring a user shopt line.
-        executor.set_shopt_option("expand_aliases", true);
+        // GNU bash defaults expand_aliases on only for interactive shells
+        // (shell.c init_interactive()/init_interactive_script()); -c,
+        // script-file, and stdin runs keep the engine default (off).
+        // enter_interactive() enables it for the REPL entry points.
+        executor.set_shopt_option("expand_aliases", false);
         executor.set_external_file_builtins_enabled(false);
         if let Some(root) = &shell_root {
             executor.set_shell_root(root);
@@ -647,6 +649,11 @@ impl Shell {
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
         self.set_script_name("niu");
+        // GNU init_interactive (shell.c): interactive shells default
+        // expand_aliases on so ~/.niubashrc aliases expand without a
+        // user shopt line. Non-interactive entry points never call
+        // this, keeping the GNU off default for scripts and -c.
+        self.executor.set_shopt_option("expand_aliases", true);
     }
 
     /// Route a one-command AST to an easter egg when this shell is
