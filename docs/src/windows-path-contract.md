@@ -30,7 +30,6 @@ C:/Users/Administrator/AppData/Local/Programs/Niubash/winuxcmd/
   usr/local/bin/
   etc/
   var/
-  tmp/
   dev/
   .wpm/
 ```
@@ -48,8 +47,16 @@ lexically below it:
 /usr/bin/tool -> <root>/usr/bin/tool
 /bin/tool    -> <root>/bin/tool
 /etc/config  -> <root>/etc/config
-/tmp/file    -> <root>/tmp/file
 ```
+
+`/tmp` is deliberately NOT part of this tree: it is a per-user temporary
+namespace resolved to the real Windows temp directory (`TMPDIR`, else
+`%TEMP%`), so it stays writable under any install location
+(unixwin/niubash#94). `/var/tmp` resolves beside it as
+`<real temp>/var/tmp`. External command arguments are translated by the
+Rubash executor with the same rules — including `/mnt/X` drive spellings
+and `/dev/null` — so there is exactly one path-semantics owner and no
+host-side AST rewrite.
 
 Command lookup and native child `PATH` use these real directories directly.
 Rubash does not merge a second provider directory, and WinuxCmd coreutils do

@@ -467,6 +467,15 @@ fn has_required_command_links(dir: &Path) -> bool {
         .all(|name| dir.join(name).is_file())
 }
 
+/// True when the resolved winuxcmd install already has its command links
+/// (`ls.exe`, `cat.exe`, …) in place. Used by the setup wizard's preflight
+/// check; activation itself runs automatically at shell startup.
+pub fn command_links_ready() -> bool {
+    find_winuxcmd()
+        .and_then(|exe| exe.parent().map(|dir| has_required_command_links(dir)))
+        .unwrap_or(false)
+}
+
 /// Run `winuxcmd.exe --version` and return the first line of stdout.
 pub fn version() -> Option<String> {
     let exe = find_winuxcmd()?;

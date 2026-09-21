@@ -47,10 +47,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # rubash is a git branch dependency resolved from Cargo.lock; no sibling
-      # checkout is needed. (The old --recurse-submodules clone pulled
-      # third_party/bash from git.savannah.gnu.org and timed out repeatedly,
-      # stalling the release build for hours.)
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/unixwin/rubash.git ../rubash
 
       - name: Checkout oh-my-niu bundle
         run: git clone --depth 1 https://github.com/unixwin/oh-my-niu.git ../oh-my-niu
@@ -108,33 +106,25 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.rust_target }}
 
-      # rubash is a git branch dependency: the revision Cargo.lock records is
-      # what cargo compiles and what build.rs embeds into `niu --version`
-      # (its sibling-checkout lookup is skipped because nothing clones
-      # ../rubash anymore). Resolve the pinned revision from the lockfile so
-      # the release notes always match the binary actually built.
+      # rubash is a path dependency, so `cargo update -p rubash` cannot pin it:
+      # there is no registry entry to update, and the step silently did nothing.
+      # The revision the binary actually contains is resolved here and embedded
+      # at build time by build.rs, so `niu --version` reports it.
       - name: Pin rubash revision
         id: rubash
         shell: pwsh
         run: |
-          $revision = $null
-          $inRubash = $false
-          foreach ($line in (Get-Content -LiteralPath Cargo.lock)) {
-            $trimmed = $line.Trim()
-            if ($trimmed -eq '[[package]]') { $inRubash = $false; continue }
-            if ($trimmed -eq 'name = "rubash"') { $inRubash = $true; continue }
-            if ($inRubash -and $trimmed.StartsWith('source = "git+')) {
-              $hashIndex = $trimmed.LastIndexOf('#')
-              if ($hashIndex -ge 0) {
-                $revision = $trimmed.Substring($hashIndex + 1).TrimEnd('"')
-              }
-              break
-            }
+          if (-not (Test-Path -LiteralPath ..\rubash)) {
+            throw "rubash checkout missing at ..\rubash"
           }
+          $revision = (git -C ..\rubash rev-parse --short=12 HEAD).Trim()
           if ([string]::IsNullOrWhiteSpace($revision)) {
-            throw "could not resolve rubash revision from Cargo.lock"
+            throw "could not resolve rubash revision"
           }
-          $revision = $revision.Substring(0, [Math]::Min(12, $revision.Length))
+          $dirty = git -C ..\rubash status --porcelain
+          if (-not [string]::IsNullOrWhiteSpace($dirty)) {
+            throw "rubash checkout is dirty; a release must pin a committed revision`n$dirty"
+          }
           Write-Host "rubash revision: $revision"
           "revision=$revision" >> $env:GITHUB_OUTPUT
 
@@ -182,42 +172,16 @@ jobs:
           "asset=$($asset.name)" >> $env:GITHUB_OUTPUT
           "exe=$($winuxcmdExe.FullName)" >> $env:GITHUB_OUTPUT
 
-      # `awk` is not a WinuxCmd built-in; without this package the bundle has
-      # no awk and `wpm install awk` used to install GoAWK, which silently
-      # drops GNU extensions (niubash#123). Only a win-x64 GAWK artifact
-      # exists in wpm-artifacts; on arm64 it still runs correctly under
-      # Windows x64 emulation (Prism), so both legs bundle the x64 build
-      # until a native arm64 artifact is published.
-      - name: Download GAWK package
-        id: gawk
-        shell: pwsh
-        run: |
-          $gawkVersion = "5.4.1"
-          $expectedSha256 = "25373ae83ec539dbe8b4208e1b4c1afa891f902df1a19138ecda5451ccded4b6"
-          $url = "https://github.com/unixwin/wpm-artifacts/releases/download/gawk-$gawkVersion/gawk-$gawkVersion-win-x64.zip"
-          $zipPath = Join-Path $env:RUNNER_TEMP "gawk-$gawkVersion-win-${{ matrix.arch }}.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
-          $actualSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualSha256 -ne $expectedSha256) {
-            throw "GAWK archive sha256 mismatch: expected $expectedSha256, got $actualSha256"
-          }
-          "zip=$zipPath" >> $env:GITHUB_OUTPUT
-
       - name: Package release zip
         shell: pwsh
         run: |
-          $packageArgs = @{
-            Version = "${{ steps.release.outputs.version }}"
-            WinuxCmdPath = "${{ steps.winuxcmd.outputs.exe }}"
-            OhMyNiubashBundlePath = "..\oh-my-niu"
-            Configuration = "release"
-            Target = "${{ matrix.rust_target }}"
-            Arch = "${{ matrix.arch }}"
-          }
-          if ("${{ steps.gawk.outputs.zip }}") {
-            $packageArgs.GawkZipPath = "${{ steps.gawk.outputs.zip }}"
-          }
-          ./scripts/package-release.ps1 @packageArgs
+          ./scripts/package-release.ps1 `
+            -Version "${{ steps.release.outputs.version }}" `
+            -WinuxCmdPath "${{ steps.winuxcmd.outputs.exe }}" `
+            -OhMyNiubashBundlePath "..\oh-my-niu" `
+            -Configuration release `
+            -Target "${{ matrix.rust_target }}" `
+            -Arch "${{ matrix.arch }}"
 
       - name: Install Inno Setup
         shell: pwsh
@@ -317,6 +281,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout rubash path dependency
+        run: git clone --depth 1 https://github.com/unixwin/rubash.git ../rubash
+
       - name: Resolve release inputs
         id: release
         shell: pwsh
@@ -342,10 +309,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      # Publishing needs a registry-resolvable dependency: `cargo publish`
-      # refuses a bare git dependency without a version field. The rubash dep
-      # carries no version yet because rubash is not on crates.io; re-add
-      # `version = "..."` alongside the git source once it is published.
+      # Publishing needs version-annotated path deps so cargo can swap the
+      # path for a registry dependency. The rubash dep carries no version yet
+      # because rubash 1.0.0 is not on crates.io; `cargo publish` refuses a
+      # bare path dependency. Re-add version = "1.0.0" once rubash 1.0.0 is
+      # published.
       - name: Publish niubash-runtime to crates.io
         run: cargo publish --locked -p niubash-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
 

@@ -130,7 +130,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(&args[2..]),
-        "setup" | "configure" => niubash_runtime::setup_wizard::rerun_wizard(),
+        "setup" | "configure" => match setup_preset_arg(&args[2..]) {
+            Some(name) => niubash_runtime::setup_wizard::apply_preset(&name),
+            None => niubash_runtime::setup_wizard::rerun_wizard(),
+        },
+        "font" => niubash_runtime::fonts::run_font_command(),
+        "doctor" => niubash_runtime::doctor::run_doctor(),
         "plugin" => run_plugin_command(args),
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
@@ -208,14 +213,6 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
-    // GNU `bash -i` forces interactive_shell even for -c and script
-    // runs (shell.c:540 forced_interactive -> init_interactive, and
-    // init_interactive_script for `bash -i script`), so expand_aliases
-    // follows -i too. The no-command REPL path below calls
-    // enter_interactive(), which sets the same shopt.
-    if invocation.interactive {
-        shell.executor.set_shopt_option("expand_aliases", true);
-    }
 
     if let Some(command) = invocation.command {
         shell.source_non_interactive_env();
@@ -281,26 +278,17 @@ fn print_locale_strings(input: &str, po: bool) {
         if bytes[i] == b'$' && bytes[i + 1] == b'"' {
             let mut j = i + 2;
             let mut content = String::new();
-            // Push whole chars, not `byte as char` widened bytes, so
-            // multibyte $"" text stays UTF-8-correct in the dump.
             while j < bytes.len() {
-                let ch = input[j..].chars().next().expect("j is a boundary");
-                if ch == '\\' {
-                    let after = j + 1;
-                    if let Some(inner) = input.get(after..).and_then(|s| s.chars().next()) {
-                        content.push(inner);
-                        j = after + inner.len_utf8();
-                    } else {
-                        content.push(ch);
-                        j = after;
-                    }
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    content.push(bytes[j + 1] as char);
+                    j += 2;
                     continue;
                 }
-                if ch == '"' {
+                if bytes[j] == b'"' {
                     break;
                 }
-                content.push(ch);
-                j += ch.len_utf8();
+                content.push(bytes[j] as char);
+                j += 1;
             }
             if po {
                 println!("msgid \"{}\"", content);
@@ -456,12 +444,6 @@ fn run_stdin_script() -> anyhow::Result<()> {
 fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
     let mut stdin = std::io::stdin().lock();
     let mut bytes = [0_u8; 1];
-    // Accumulate raw bytes and decode once per line: `byte as char` would
-    // Latin-1-encode multibyte script source (e.g. `中文` became
-    // `ä¸­æ–‡`). `bytes_to_shell_text` keeps valid UTF-8 and preserves
-    // undecodable bytes as raw-byte markers. A `b'\n'` can never sit inside
-    // a UTF-8 sequence, so the line split is char-boundary safe.
-    let mut line: Vec<u8> = Vec::new();
     let mut read = 0;
 
     loop {
@@ -469,14 +451,13 @@ fn read_unbuffered_line(output: &mut String) -> std::io::Result<usize> {
             0 => break,
             count => {
                 read += count;
-                line.push(bytes[0]);
+                output.push(bytes[0] as char);
                 if bytes[0] == b'\n' {
                     break;
                 }
             }
         }
     }
-    output.push_str(&rubash::executor::bytes_to_shell_text(&line));
 
     Ok(read)
 }
@@ -572,7 +553,9 @@ fn print_usage() {
     println!("        niu -c <cmd>         Run a command then exit");
     println!("        niu -C <cmd>         Run one REPL-style command then exit");
     println!("        niu setup           Re-run prompt/plugin setup");
-    println!("        niu <script> [args]   Run a script file");
+    println!("        niu font            Install a Nerd Font for icon-rich themes");
+    println!("        niu doctor          Health-check the installation");
+    println!("        niu <script> [args]  Run a script file");
     println!();
     println!("Options:");
     println!("  -h, --help                Show this help");
@@ -607,8 +590,6 @@ fn print_usage() {
     println!("  plugin use <name>         Activate a trusted third-party bundle");
     println!("  plugin remove <name>      Remove a third-party bundle");
     println!();
-    println!();
-    println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
     println!("Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc");
@@ -624,6 +605,8 @@ fn print_usage() {
         "                          NIU_ENV takes precedence). Unset by default, keeping -c fast."
     );
     println!("  BASH_ENV=<file>         GNU bash compatible: same as NIU_ENV, lower precedence.");
+    println!("  NIU_LANG=<lang>         Setup wizard language (zh / en). Falls back to the");
+    println!("                          Windows UI language, then LC_ALL/LANG.");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -682,6 +665,8 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "trust" => run_plugin_trust_command(&args[3..]),
         "use" => run_plugin_use_command(&args[3..]),
         "remove" => run_plugin_remove_command(&args[3..]),
+        "enable" => run_plugin_enable_command(&args[3..]),
+        "disable" => run_plugin_disable_command(&args[3..]),
         unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
     }
 }
@@ -747,6 +732,73 @@ fn run_plugin_remove_command(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_plugin_enable_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin enable requires a plugin name");
+    };
+    // Validate the pack exists in the active inventory so the user gets a
+    // clear error instead of silently writing a bogus name into ~/.niubashrc.
+    let inventory = niubash_runtime::plugins::active_plugin_inventory();
+    if !inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "unknown plugin '{}'; run `niu plugin list` to see available packs",
+            name
+        );
+    }
+    let path = niubash_runtime::plugins::enable_pack_in_rc(name)?;
+    println!(
+        "{} '{}' in {}",
+        niubash_runtime::text_style::green("Enabled"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
+    println!("restart niu (or reload ~/.niubashrc) for the change to take effect");
+    Ok(())
+}
+
+fn run_plugin_disable_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin disable requires a plugin name");
+    };
+    let inventory = niubash_runtime::plugins::active_plugin_inventory();
+    if !inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "unknown plugin '{}'; run `niu plugin list` to see available packs",
+            name
+        );
+    }
+    let is_default = inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name) && pack.default);
+    let path = niubash_runtime::plugins::disable_pack_in_rc(name, &inventory)?;
+    println!(
+        "{} '{}' in {}",
+        niubash_runtime::text_style::green("Disabled"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
+    if is_default {
+        println!(
+            "{}",
+            niubash_runtime::text_style::dim(
+                "'{}' is on by default; the rc was rewritten with NIU_DISABLE_DEFAULT_PLUGINS=1 \
+                 and the remaining active packs listed in NIU_PLUGINS."
+            )
+        );
+    }
+    println!("restart niu (or reload ~/.niubashrc) for the change to take effect");
+    Ok(())
+}
+
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
     let json = args.iter().any(|arg| arg == "--json");
     let verbose = args.iter().any(|arg| arg == "--verbose");
@@ -782,7 +834,7 @@ fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
-    let (query, json) = parse_plugin_search_args(args)?;
+    let (query, json, verbose) = parse_plugin_search_args(args)?;
     if json {
         println!(
             "{}",
@@ -791,18 +843,29 @@ fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
     } else {
         println!(
             "{}",
-            niubash_runtime::plugins::plugin_search_text(query.as_deref())
+            niubash_runtime::plugins::plugin_search_text(query.as_deref(), verbose)
         );
     }
     Ok(())
 }
 
 fn run_plugin_themes_command(args: &[String]) -> anyhow::Result<()> {
-    let json = parse_plugin_json_flag(args)?;
+    let mut json = false;
+    let mut verbose = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--verbose" => verbose = true,
+            unknown => anyhow::bail!("unknown plugin option '{}'", unknown),
+        }
+    }
     if json {
         println!("{}", niubash_runtime::plugins::plugin_theme_catalog_json()?);
     } else {
-        println!("{}", niubash_runtime::plugins::plugin_theme_catalog_text());
+        println!(
+            "{}",
+            niubash_runtime::plugins::plugin_theme_catalog_text(verbose)
+        );
     }
     Ok(())
 }
@@ -1059,12 +1122,14 @@ fn parse_plugin_json_flag(args: &[String]) -> anyhow::Result<bool> {
     Ok(json)
 }
 
-fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, bool)> {
+fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, bool, bool)> {
     let mut query = None;
     let mut json = false;
+    let mut verbose = false;
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
+            "--verbose" => verbose = true,
             value if value.starts_with("-") => {
                 anyhow::bail!("unknown plugin search option {}", value)
             }
@@ -1076,17 +1141,19 @@ fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, 
             }
         }
     }
-    Ok((query, json))
+    Ok((query, json, verbose))
 }
 
 fn print_plugin_usage() {
     println!("Usage:  niu plugin <command>");
     println!();
     println!("Commands:");
-    println!("  list [--json]             List official Niubash plugins");
-    println!("  info <name> [--json]      Inspect one official Niubash plugin");
-    println!("  search [query] [--json]   Discover official plugins");
-    println!("  themes [--json]           List user and bundle themes");
+    println!("  list [--json] [--verbose] List official Niubash plugins (active state)");
+    println!("  info <name> [--json] [--verbose]  Inspect one plugin");
+    println!("  search [query] [--json] [--verbose]  Discover plugins");
+    println!("  themes [--json] [--verbose]  List user and bundle themes");
+    println!("  enable <name>             Enable a plugin in ~/.niubashrc");
+    println!("  disable <name>            Disable a plugin in ~/.niubashrc");
     println!("  bundle status [--json]    Inspect official bundle install state");
     println!("  doctor [--json] [--verbose]  Diagnose plugin configuration health");
     println!("  review <name> [--json]    Review plugin permissions before enabling");
@@ -1099,6 +1166,21 @@ fn print_plugin_usage() {
     println!("                            Roll back to the previous bundle");
     println!("  install <name>           Install official plugin from active bundle");
     println!("  uninstall <name>         Uninstall official plugin from active bundle");
+}
+
+/// Parse `--preset <name>` / `--preset=<name>` from `niu setup` arguments.
+/// Unknown flags are ignored so the interactive wizard keeps working.
+fn setup_preset_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--preset" {
+            return iter.next().cloned();
+        }
+        if let Some(name) = arg.strip_prefix("--preset=") {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
@@ -1119,6 +1201,7 @@ fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
         &commandline,
         icon.as_deref(),
         set_default,
+        None,
     )?;
 
     if !quiet {
@@ -1158,9 +1241,6 @@ fn print_completion_probe(args: &[String]) -> anyhow::Result<()> {
         line.len()
     };
     let mut shell = niubash_runtime::Shell::new()?;
-    // The probe emulates the interactive surface, so the startup rc must
-    // be sourced under the same shopt state as the real REPL.
-    shell.enter_interactive();
     shell.run_startup_rc();
     for suggestion in shell.completion_probe(line, cursor_pos) {
         println!("{}", suggestion);

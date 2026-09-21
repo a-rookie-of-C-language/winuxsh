@@ -81,6 +81,13 @@ PowerShell machine every generated command is a roll of the dice.
 
 ## The path philosophy: native in, native out
 
+If your mental model says every Unix-flavored shell on Windows must contain
+a path-translation layer — because every one you've met so far did — that
+is the model running on precedent, not a fact about this product. In
+niubash, **the Windows-native path is the first-class citizen**: not the
+target of a conversion, but the representation the shell actually thinks
+in.
+
 Windows-native binaries don't speak the MSYS dialect. Here is Git Bash,
 in the wild, failing at exactly the things Niubash does without thinking:
 
@@ -94,15 +101,23 @@ What just happened, command by command:
 | `cmd /c dir /c/Windows/...` | `cmd.exe` rejects the MSYS path (exit 1) | native path, native tools, no guessing |
 | `git grep "/fn main"` | MSYS rewrites `/fn` into a Windows path — the pattern silently dies | `/` is just a character, not a path to convert |
 
+### The escape hatches are the confession
+
 MSYS "solves" paths by guessing: it heuristically rewrites `/c/foo` into
 `C:\foo`, and famously mangles innocent arguments along the way — the
 notorious case of `git grep "/pattern"` silently becoming
-`git grep "C:\...\pattern"` is why MSYS2 still ships `MSYS2_ARG_CONV_EXCL`
-as an escape hatch. Every native tool call is a game of path roulette.
+`git grep "C:\...\pattern"`. A heuristic that always guesses right does not
+exist, which is precisely why Git for Windows ships `MSYS_NO_PATHCONV` and
+MSYS2 ships `MSYS2_ARG_CONV_EXCL`: an off switch for path conversion is a
+documented admission that the conversion layer breaks real commands. Under
+MSYS, every native tool call is a game of path roulette, and the house
+provides the abort switch next to the wheel.
 
-Niubash is the only Windows shell that doesn't translate anything — because
-it speaks both dialects itself and hands every process its own native
-language:
+Niubash has no such switch, because there is no such layer. The
+Windows-native path is not a format niubash converts *into* — it is the
+shell's internal representation. POSIX-style (`/c/...`, `/usr/bin`),
+WSL-style (`/mnt/c/...`), and Windows-style (`C:\...`) are input spellings
+that all resolve to that one native reality:
 
 ```text
 ❯ cd /c/Users/you/repo     # MSYS-style input: understood
@@ -114,5 +129,28 @@ C:\Users\you\repo            # native binaries get native cwd
 C:/Program Files
 ```
 
-Input in any dialect. Output always native. Zero guessing, zero conversion
-roulette — for your fingers, and for your agent.
+Input in any dialect. Output always native. One representation, zero
+guessing, nothing to disable — for your fingers, and for your agent.
+
+## The verdict
+
+Every incumbent made a bet with the tools of its decade: CMD froze,
+PowerShell bet on a brand-new language, WSL bet on virtualization, and
+MSYS2/Cygwin bet on emulation. For the actual problem — *running Bash on
+Windows, next to native Windows programs* — three of those bets pay out
+nothing, and the fourth is structurally guaranteed to leak: translating
+between two path worlds is a guessing game, and guesswork embedded in
+infrastructure surfaces at the worst possible moment. The escape hatches
+(`MSYS_NO_PATHCONV`, `MSYS2_ARG_CONV_EXCL`) are the incumbents' own
+documentation of that fact.
+
+The correct architecture is not a better emulator. It is no emulator: a
+native implementation where the Windows path is the only representation
+that exists, where Bash is implemented as a language — and proven against
+GNU Bash's own test suite, 86/86 — and where native programs are called as
+what they are: native. That is what niubash ships, and it is why the
+emulation stack's failure modes are not "reduced" here. They are
+categorically absent.
+
+Emulation was the previous century's approximation of this architecture.
+Niubash is the architecture.

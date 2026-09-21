@@ -16,14 +16,45 @@ pub fn install_niubash_profile(
     commandline: &Path,
     icon: Option<&Path>,
     set_default: bool,
+    font_face: Option<&str>,
 ) -> Result<ProfileInstallSummary> {
-    install_niubash_profile_in_settings(commandline, icon, set_default, candidate_settings_paths())
+    install_niubash_profile_in_settings(
+        commandline,
+        icon,
+        set_default,
+        font_face,
+        candidate_settings_paths(),
+    )
+}
+
+/// Set `font.face` on an existing Niubash profile without creating one.
+/// Settings files without the profile are left untouched.
+pub fn set_niubash_profile_font(face: &str) -> Result<ProfileInstallSummary> {
+    let mut summary = ProfileInstallSummary::default();
+    for settings_path in candidate_settings_paths() {
+        if !settings_path.is_file() {
+            summary.skipped.push(settings_path);
+            continue;
+        }
+        let mut root = read_settings_or_default(&settings_path)?;
+        if !niubash_profile_exists(&root) {
+            summary.skipped.push(settings_path);
+            continue;
+        }
+        set_profile_font(&mut root, face);
+        let formatted = serde_json::to_string_pretty(&root)?;
+        fs::write(&settings_path, format!("{formatted}\n"))
+            .with_context(|| format!("write {}", settings_path.display()))?;
+        summary.updated.push(settings_path);
+    }
+    Ok(summary)
 }
 
 pub fn install_niubash_profile_in_settings<I>(
     commandline: &Path,
     icon: Option<&Path>,
     set_default: bool,
+    font_face: Option<&str>,
     settings_paths: I,
 ) -> Result<ProfileInstallSummary>
 where
@@ -40,7 +71,7 @@ where
         }
 
         let mut root = read_settings_or_default(&settings_path)?;
-        upsert_profile(&mut root, commandline, icon, set_default);
+        upsert_profile(&mut root, commandline, icon, set_default, font_face);
         let formatted = serde_json::to_string_pretty(&root)?;
         if let Some(parent) = settings_path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -105,8 +136,14 @@ fn default_settings() -> Value {
     })
 }
 
-fn upsert_profile(root: &mut Value, commandline: &Path, icon: Option<&Path>, set_default: bool) {
-    let profile = niubash_profile(commandline, icon);
+fn upsert_profile(
+    root: &mut Value,
+    commandline: &Path,
+    icon: Option<&Path>,
+    set_default: bool,
+    font_face: Option<&str>,
+) {
+    let profile = niubash_profile(commandline, icon, font_face);
 
     {
         let list = profiles_list_mut(root);
@@ -133,7 +170,7 @@ fn upsert_profile(root: &mut Value, commandline: &Path, icon: Option<&Path>, set
     }
 }
 
-fn niubash_profile(commandline: &Path, icon: Option<&Path>) -> Value {
+fn niubash_profile(commandline: &Path, icon: Option<&Path>, font_face: Option<&str>) -> Value {
     let mut profile = json!({
         "guid": NIU_PROFILE_GUID,
         "name": PROFILE_NAME,
@@ -148,8 +185,44 @@ fn niubash_profile(commandline: &Path, icon: Option<&Path>) -> Value {
             .expect("profile is an object")
             .insert("icon".to_string(), json!(icon.to_string_lossy()));
     }
+    if let Some(face) = font_face {
+        profile
+            .as_object_mut()
+            .expect("profile is an object")
+            .insert("font".to_string(), json!({ "face": face }));
+    }
 
     profile
+}
+
+fn niubash_profile_exists(root: &Value) -> bool {
+    profiles_list(root).into_iter().flatten().any(|profile| {
+        profile
+            .get("guid")
+            .and_then(Value::as_str)
+            .is_some_and(|guid| guid.eq_ignore_ascii_case(NIU_PROFILE_GUID))
+            || profile
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case(PROFILE_NAME))
+    })
+}
+
+fn set_profile_font(root: &mut Value, face: &str) {
+    let list = profiles_list_mut(root);
+    if let Some(existing) = list.iter_mut().find(|candidate| {
+        candidate
+            .get("guid")
+            .and_then(Value::as_str)
+            .is_some_and(|guid| guid.eq_ignore_ascii_case(NIU_PROFILE_GUID))
+            || candidate
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case(PROFILE_NAME))
+    }) {
+        let profile = ensure_object(existing);
+        profile.insert("font".to_string(), json!({ "face": face }));
+    }
 }
 
 fn merge_profile(existing: &mut Value, updates: Value) {
@@ -230,6 +303,7 @@ mod tests {
                 "C:/Users/me/AppData/Local/Programs/Niubash/assets/niubash-icon-256.png",
             )),
             false,
+            None,
             [settings.clone()],
         )
         .unwrap();
@@ -268,6 +342,7 @@ mod tests {
             Path::new("D:/Apps/Niubash/niu.exe"),
             None,
             true,
+            None,
             [settings.clone()],
         )
         .unwrap();
@@ -305,6 +380,7 @@ mod tests {
             Path::new("D:/Apps/Niubash/niu.exe"),
             None,
             false,
+            None,
             [settings.clone()],
         )
         .unwrap();

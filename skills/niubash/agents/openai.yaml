@@ -1,7 +1,7 @@
 interface:
-  display_name: "Niubash Native Codex"
-  short_description: "Run Codex directly inside native Niubash."
-  default_prompt: "Use $niubash-native-codex for native Niubash shell tasks."
+  display_name: "Niubash"
+  short_description: "Run Windows tasks natively in Niubash — bash syntax, no MSYS, no path conversion."
+  default_prompt: "Use the niubash skill for shell tasks in the Niubash environment."
 
 policy:
   allow_implicit_invocation: true

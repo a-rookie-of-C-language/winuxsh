@@ -27,8 +27,12 @@ C:\Program Files
   project's own test suite (**86/86 upstream tests green**).
 - **Windows-native.** One binary, one process. Native Windows paths
   (`C:\...` and `C:/...`), direct execution of `git.exe`, `node.exe`,
-  `cargo.exe`, `python.exe` — no VM, no emulation layer, no path conversion
-  roulette.
+  `cargo.exe`, `python.exe` — no VM, no emulation layer, and no
+  path-conversion machinery at all: the Windows-native path is the shell's
+  first-class representation, POSIX- and WSL-style spellings are understood
+  on input, and every process receives a native path. There is no
+  `MSYS_NO_PATHCONV` equivalent here because there is no converter to
+  disable.
 - **Unix commands included.** WinuxCmd ships `ls`, `cat`, `grep`, `find`,
   `test`, `printf`, and friends as Windows command links, with no separate
   installation.

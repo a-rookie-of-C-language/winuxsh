@@ -25,6 +25,25 @@
 [winuxcmd](https://github.com/unixwin/winuxcmd) 的
 真 Unix 命令、带 git 状态的 prompt，以及带权限模型的插件系统。
 
+**它是什么——不是什么。** niubash 是用 Rust 在 Windows 上原生实现的
+bash 兼容 shell：语言引擎（[rubash](https://github.com/unixwin/rubash)）是
+从零写的 Bash 解释器，随附的 Unix 命令都是原生 Windows 可执行文件。
+它**不是 MSYS2、不是 Cygwin、不是 Git Bash、也不是 WSL**——整个技术栈里
+没有 POSIX 模拟层，没有 `cygwin1.dll` / `msys-2.0.dll`，也没有任何路径
+转换机器。niubash 启动的每个进程都是普通的 Win32 进程；niubash 本体
+**不依赖 Python、Node.js 或任何语言运行时**（setup 向导可以通过 `wpm`
+可选安装一批现代 CLI 工具——那是便利，不是依赖）。
+
+**没有路径转换层——这是设计，不是优化。** MSYS 系 shell 活在一个
+Unix 外观的世界里，必须靠启发式规则翻译成 Windows 路径；而永远猜对的
+启发式不存在，所以它们都自带逃生舱（`MSYS_NO_PATHCONV`、
+`MSYS2_ARG_CONV_EXCL`），专供转换猜错时救场——**关闭开关本身就是
+"这层会出错"的自供状**。niubash 没有可关的开关：**Windows 原生路径就是
+shell 的第一等内部表示**。`/c/...`、`/mnt/c/...`、`C:\...` 都只是这一个
+事实的不同输入拼法；任何进程拿到的一定是 Windows 原生路径。原生
+Windows 程序不可能因为 shell 遇到路径问题——因为根本不存在那个
+"可能出错的翻译步骤"。
+
 **亮点**
 
 - **真·Bash** — `if`、`for`、`case`、`$(...)`、管道、heredoc、函数、数组，全都在。引擎是 [rubash](https://github.com/unixwin/rubash)，GNU Bash 官方测试套件 **86/86 全绿**。
@@ -84,7 +103,7 @@ NIU_PLUGINS=(prompt-core git common-aliases)
 export NIU_THEME NIU_THEME_PLUGIN
 
 # 官方插件发行版 oh-my-niu
-[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
+[ -f "$NIUBASH/oh-my-niu.niu" ] && . "$NIUBASH/oh-my-niu.niu"
 
 alias ll='ls -la'
 alias gst='git status'
@@ -155,16 +174,48 @@ ParserError: TerminatorExpectedAtEndOfString   ["a b","","c\"d","e\\f","---"]
 
 | | niubash | WSL | Git Bash | PowerShell | CMD |
 |---|---|---|---|---|---|
+| 实现方式 | 原生 Rust 引擎 + 原生命令 | VM 里的完整 Linux 发行版 | POSIX 模拟（`msys-2.0.dll`） | 原生 | 原生 |
 | Bash 语法 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| 原生 Windows 路径（无 `/mnt/c`） | ✅ | ❌ | ⚠️ 转换抽风 | ✅ | ✅ |
-| 直接调用 `git.exe` / `node.exe` | ✅ | ⚠️ 经 `/mnt/c` | ⚠️ 路径翻译 | ✅ | ✅ |
+| 原生 Windows 路径（无 `/mnt/c`） | ✅ | ❌ | ⚠️ 启发式转换，会改坏参数 | ✅ | ✅ |
+| 直接调用 `git.exe` / `node.exe` | ✅ | ⚠️ 经 `/mnt/c` | ⚠️ 路径翻译弄脏参数 | ✅ | ✅ |
 | 自带 Unix 命令（`ls`、`grep`、`find`） | ✅ | ✅ | ✅ | ❌ | ❌ |
 | agent 写的 Bash 直接能跑 | ✅ | ✅ | ⚠️ 参数改写 | ❌ | ❌ |
 | 冷启动到提示符 | **~170 ms** | 秒级 | ~1 s | ~280 ms | — |
 | 不装额外 OS、不开 VM | ✅ | ❌ | ✅ | ✅ | ✅ |
 | 主题 / git 提示 / 插件 | ✅ | — | ✅ | ⚠️ | ❌ |
 
-一个二进制。一个进程。没有发行版要打补丁，没有模拟层要哄。
+一个二进制。一个进程。没有发行版要打补丁，没有模拟层要哄。模拟层是
+上个世纪对正确架构的近似——正确架构是原生实现，Windows 路径是唯一
+存在的路径。这个架构，就在这里交付。
+
+### 最接近的同类：[brush](https://github.com/reubeno/brush)
+
+先给对手记一功：brush 开创了"用 Rust 重写 bash"这条路，而且走得比
+任何人都远——它是这个类别里诚实的参照系。正面交锋：
+
+| | niubash | brush |
+|---|---|---|
+| 路线 | Rust 重写 bash，Windows 原生 | Rust 重写 bash，跨平台 |
+| 兼容性验证 | 直接跑 **GNU Bash 官方上游测试套件**——门禁 86/86 全绿，全量 57/83 套件零差（输出逐字节一致） | 根本不跑 GNU 套件；验证靠自建 1700+ 用例语料、以 bash 为 oracle，约 125 个已知失败（[其官方参考](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)） |
+
+**同一张考卷、同一个考官——实测，不是口称。** 我们把 GNU Bash 的 83
+个上游测试套件用同一套桥接 harness（[`run-83.sh`](https://github.com/unixwin/rubash/blob/master/tests/gnu-compat/run-83.sh)、
+同样的 WSL GNU Bash 基线、同样的输出正规化、brush 用 release 构建）分别
+送考：**niubash 57/83 套件逐字节一致，brush 10/83**——另有 3 个套件
+brush 在 150 秒上限内没能跑完（2026-09-21 实测，brush v0.4.0）。
+
+为什么差距这么大？两个测试数量量的是不同的仪器。自建的约 1700 个精选
+单例检查回答的是"这个语法大概能不能跑"；GNU 的 83 个整行为套件重放的
+是 bash 自己的酷刑测试——trap、历史展开、POSIX 模式、奇异重定向——并且
+要求**逐字节一致**的输出。上面这座桥，就是"~1700 个测试"在官方仪器下
+买到的分数。而对脚本和 agent 来说，逐字节一致才是及格线："差不多"在
+输出接进下一条管道的那一刻就会碎掉。
+| Windows 上的 Unix 命令 | 自带：`ls`、`cat`、`grep`、`find`、`sed`……（[winuxcmd](https://github.com/unixwin/winuxcmd)） | 不附带——想用 `ls` 仍需另配外部工具 |
+| 路径模型 | Windows 原生路径第一等；`/c/…`、`/mnt/c/…` 是输入方言；不存在转换层 | 通用跨平台路径处理 |
+| 交互面 | IDE 式补全菜单、27 款主题、插件生态（oh-my-niu） | 语法高亮、自动建议、starship |
+
+同一个想法，不同的完成度。Brush 证明了这条路走得通；niubash 交付的是
+它的 Windows 原生完全体——引擎、命令、路径契约、生态，缺一不可。
 
 ## 架构
 
@@ -182,6 +233,14 @@ niu.exe
 
 ## 常见问题
 
+- **"niubash 是基于 MSYS2 / Cygwin 的吧？"** 不是。MSYS2 和 Cygwin 是 POSIX
+  模拟层：一个 Unix 风格的 DLL 运行时、一个假根文件系统、一套在最坏时机
+  改写你参数的启发式路径转换。niubash 一样都没有——Bash 兼容由语言引擎
+  （[rubash](https://github.com/unixwin/rubash)）实现，命令是原生 Windows
+  可执行文件，`C:\` / `C:/` 路径原样直出不翻译。这也解释了为什么 MSYS 世界
+  需要 `MSYS_NO_PATHCONV` 来关掉它的转换器，而 niubash 没有对应的开关——
+  没有转换器，自然无可关闭。（安装目录里的 `bash.exe` / `sh.exe` 只是把
+  启动转发给 `niu.exe` 的小垫片，不是 MSYS bash。）
 - **"这不就是又一个 Git Bash？"** 不是。Git Bash 在 Windows 上模拟 Unix：翻译路径、猜参数。niubash 是原生 Windows 进程，Bash 兼容发生在语言引擎（rubash）里，不在假文件系统里。
 - **"那我还要 WSL 干嘛？"** 各有各的用：真 Linux 内核、Linux Docker、Linux 专用工具链，它依然是把好手。至于剩下的 95%——你需要的不是 WSL，是 niubash。
 - **"为什么叫 niu？"** niu = 牛。短、好打、不粘键盘油。项目叫 niubash，二进制叫 `niu`，环境变量前缀 `NIU_`。Windows 上最"牛"的 bash，名字得对得起产品。

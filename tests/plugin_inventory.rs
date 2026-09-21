@@ -29,6 +29,35 @@ fn plugin_list_text_lists_official_packs() {
         stdout.contains("These are Niubash-native packs"),
         "{stdout}"
     );
+    // Default-on packs show the active marker; default-off packs show the
+    // dim dot. The human table does not print kind/execution/externalization
+    // jargon — that lives behind --verbose.
+    assert!(stdout.contains("git"), "{stdout}");
+    assert!(stdout.contains("zoxide"), "{stdout}");
+    assert!(stdout.contains("keybindings"), "{stdout}");
+    assert!(stdout.contains("themes"), "{stdout}");
+    assert!(stdout.contains("command-not-found"), "{stdout}");
+    assert!(
+        stdout.contains("Enable: niu plugin enable <name>"),
+        "{stdout}"
+    );
+    // Jargon must NOT appear in the default view.
+    assert!(
+        !stdout.contains("kind=builtin"),
+        "default list must hide developer jargon\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("execution=none_declarative"),
+        "default list must hide execution model\n{stdout}"
+    );
+}
+
+#[test]
+fn plugin_list_verbose_includes_developer_diagnostics() {
+    let output = run_niu(&["plugin", "list", "--verbose"]);
+    assert_success(&output, "plugin list verbose");
+    let stdout = stdout_text(&output);
+    // --verbose emits the one-line-per-pack diagnostics block.
     assert!(
         stdout.contains("- git kind=builtin category=devtools default=on"),
         "{stdout}"
@@ -171,17 +200,17 @@ fn plugin_search_text_discovers_matching_packs() {
     assert!(stdout.contains("Source: compiled_fallback"), "{stdout}");
     assert!(stdout.contains("Trust source: official_bundle"), "{stdout}");
     assert!(stdout.contains("Query: devtools"), "{stdout}");
-    assert!(
-        stdout.contains("- git kind=builtin category=devtools default=on"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("- docker kind=builtin category=devtools default=off"),
-        "{stdout}"
-    );
+    // Default search output shows pack names and summaries, not the
+    // kind=... execution=... jargon line.
+    assert!(stdout.contains("git"), "{stdout}");
+    assert!(stdout.contains("docker"), "{stdout}");
     assert!(
         !stdout.contains("- prompts kind=builtin category=ux"),
         "{stdout}"
+    );
+    assert!(
+        !stdout.contains("kind=builtin"),
+        "default search must hide developer jargon\n{stdout}"
     );
 }
 #[test]
@@ -212,6 +241,18 @@ fn plugin_themes_lists_user_and_bundle_sources_only() {
     let stdout = stdout_text(&text);
     assert!(stdout.contains("Niubash themes"), "{stdout}");
     assert!(!stdout.contains("builtin_fallback"), "{stdout}");
+    // Default output shows the clean "Bundle themes" section with the theme
+    // name and owner. The `- name source=...` jargon line is --verbose only.
+    assert!(stdout.contains("Bundle themes"), "{stdout}");
+    assert!(stdout.contains("testmarket"), "{stdout}");
+    assert!(stdout.contains("oh-my-niu@9.9.10"), "{stdout}");
+    assert!(
+        !stdout.contains("source=bundle"),
+        "default themes must hide source= jargon\n{stdout}"
+    );
+    let verbose = run_niu_with_env(&["plugin", "themes", "--verbose"], &envs);
+    assert_success(&verbose, "plugin themes verbose");
+    let stdout = stdout_text(&verbose);
     assert!(
         stdout.contains(
             "- testmarket source=bundle owner=oh-my-niu@9.9.10 bundle=oh-my-niu pack=themes"
@@ -246,7 +287,7 @@ fn plugin_themes_survive_missing_optional_legacy_pack() {
     let output = run_niu_with_env(&["plugin", "themes"], &[("NIU_PLUGIN_BUNDLE_PATH", bundle)]);
     assert_success(&output, "plugin themes with missing legacy pack");
     assert!(
-        stdout_text(&output).contains("testmarket source=bundle"),
+        stdout_text(&output).contains("testmarket"),
         "{}",
         stdout_text(&output)
     );
@@ -262,6 +303,12 @@ fn plugin_themes_marks_external_bundle_trust_source() {
     assert_success(&text, "plugin themes external text");
     let stdout = stdout_text(&text);
     assert!(stdout.contains("community-tools@9.9.10"), "{stdout}");
+    // The trust_source= jargon line is --verbose only; the default view shows
+    // the theme name and owner in the clean section.
+    assert!(stdout.contains("Bundle themes"), "{stdout}");
+    let verbose = run_niu_with_env(&["plugin", "themes", "--verbose"], &envs);
+    assert_success(&verbose, "plugin themes external verbose");
+    let stdout = stdout_text(&verbose);
     assert!(stdout.contains("trust_source=external_bundle"), "{stdout}");
     let json = run_niu_with_env(&["plugin", "themes", "--json"], &envs);
     assert_success(&json, "plugin themes external json");
@@ -283,11 +330,6 @@ fn plugin_info_text_describes_one_pack() {
     let stdout = stdout_text(&output);
     assert!(stdout.contains("Plugin: git"), "{stdout}");
     assert!(stdout.contains("Bundle: oh-my-niu"), "{stdout}");
-    assert!(stdout.contains("Execution model: host_builtin"), "{stdout}");
-    assert!(
-        stdout.contains("Externalization class: mixed_declarative_native"),
-        "{stdout}"
-    );
     assert!(
         stdout.contains("Permissions: cwd:read,process:run:git"),
         "{stdout}"
@@ -295,6 +337,17 @@ fn plugin_info_text_describes_one_pack() {
     assert!(stdout.contains("Required binaries: git"), "{stdout}");
     assert!(stdout.contains("  aliases: yes"), "{stdout}");
     assert!(stdout.contains("  completions: git"), "{stdout}");
+    // The runtime details block is present but uses the short key form.
+    assert!(stdout.contains("execution: host_builtin"), "{stdout}");
+    assert!(
+        stdout.contains("externalization: mixed_declarative_native"),
+        "{stdout}"
+    );
+    // The verbose-only readiness profile must not appear in the default view.
+    assert!(
+        !stdout.contains("Target runtime:"),
+        "default info must hide readiness profile\n{stdout}"
+    );
 }
 #[test]
 fn plugin_info_json_describes_one_pack() {
@@ -329,9 +382,23 @@ fn plugin_info_marks_command_not_found_provider_candidate() {
     let stdout = stdout_text(&text);
     assert!(stdout.contains("Plugin: command-not-found"), "{stdout}");
     assert!(
-        stdout.contains("Externalization class: pure_provider_candidate"),
+        stdout.contains("externalization: pure_provider_candidate"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("  providers: command-not-found"),
+        "{stdout}"
+    );
+    // The readiness profile (Target runtime, Missing host API, Shell-mutating,
+    // Fallback needed) is verbose-only in the new display.
+    assert!(
+        !stdout.contains("Target runtime:"),
+        "default info must hide readiness profile\n{stdout}"
+    );
+
+    let verbose = run_niu(&["plugin", "info", "command-not-found", "--verbose"]);
+    assert_success(&verbose, "plugin info command-not-found verbose");
+    let stdout = stdout_text(&verbose);
     assert!(
         stdout.contains("Target runtime: process_provider_available_builtin_until_migration"),
         "{stdout}"
@@ -342,10 +409,6 @@ fn plugin_info_marks_command_not_found_provider_candidate() {
     );
     assert!(stdout.contains("Shell-mutating: no"), "{stdout}");
     assert!(stdout.contains("Fallback needed: yes"), "{stdout}");
-    assert!(
-        stdout.contains("  providers: command-not-found"),
-        "{stdout}"
-    );
 
     let json = run_niu(&["plugin", "info", "command-not-found", "--json"]);
     assert_success(&json, "plugin info command-not-found json");
@@ -558,7 +621,7 @@ fn plugin_info_reads_installed_process_pack_contract() {
     let stdout = stdout_text(&output);
     assert!(stdout.contains("Plugin: process-echo"), "{stdout}");
     assert!(stdout.contains("Kind: process"), "{stdout}");
-    assert!(stdout.contains("Default: off"), "{stdout}");
+    assert!(stdout.contains("State: off (default off)"), "{stdout}");
     assert!(
         stdout.contains("Permissions: cwd:read,process:run:niubash-process-echo"),
         "{stdout}"
@@ -590,7 +653,7 @@ fn plugin_info_reads_installed_source_pack_contract() {
     let stdout = stdout_text(&output);
     assert!(stdout.contains("Plugin: source-test"), "{stdout}");
     assert!(stdout.contains("Kind: source"), "{stdout}");
-    assert!(stdout.contains("Execution model: shell_source"), "{stdout}");
+    assert!(stdout.contains("execution: shell_source"), "{stdout}");
     assert!(stdout.contains("Permissions: shell:source"), "{stdout}");
     assert!(stdout.contains("Source:"), "{stdout}");
     assert!(
@@ -640,7 +703,7 @@ fn plugin_inventory_reads_framework_plugin_directories() {
     assert_success(&keybindings, "plugin info framework keybindings bridge");
     let stdout = stdout_text(&keybindings);
     assert!(stdout.contains("Kind: bridge"), "{stdout}");
-    assert!(stdout.contains("Execution model: host_bridge"), "{stdout}");
+    assert!(stdout.contains("execution: host_bridge"), "{stdout}");
     let _ = fs::remove_dir_all(temp);
 }
 #[test]
