@@ -75,7 +75,8 @@ that owns the real `usr/bin` tree and command links, and
 - oh-my-niu bundles load from the rc via `oh-my-niu.niu` (legacy
   `oh-my-niu.winux` still honored). User plugins live in
   `~/.niubash/custom`; do not edit files inside the installed program
-  directory.
+  directory. Theme names, the pack catalog, and rc templates:
+  `references/prompt-plugins.md`.
 - `niu setup` re-runs the interactive wizard (theme, prompt, tools). The
   wizard follows `NIU_LANG` / the Windows UI language (zh supported).
 - `niu font` installs a Nerd Font for icon themes; `niu doctor` verifies the
