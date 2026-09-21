@@ -817,25 +817,7 @@ fn heredoc_input_complete(input: &str) -> bool {
     }
     rubash::lexer::tokenize(input)
         .into_iter()
-        .all(|token| !is_unterminated_heredoc_body_token(&token))
-}
-
-// Whether a token is a here-doc body that did not yet reach its delimiter.
-// rubash marks such bodies with a leading \x1f (and, for quoted here-docs,
-// the __RUBASH_HD1__ marker before it). This mirrors rubash's own
-// command_has_unterminated_heredoc check without depending on a private
-// lexer helper that is not part of the published API.
-fn is_unterminated_heredoc_body_token(token: &rubash::Token) -> bool {
-    use rubash::TokenKind;
-    if token.kind != TokenKind::HereDocBody {
-        return false;
-    }
-    const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
-    let body = token
-        .value
-        .strip_prefix(QUOTED_HEREDOC_MARKER)
-        .unwrap_or(&token.value);
-    body.starts_with('')
+        .all(|token| !token.is_unterminated_heredoc_body())
 }
 
 /// Pending here-doc body skip state for the REPL input scanner.

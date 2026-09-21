@@ -910,7 +910,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rubash"
 version = "1.2.0"
-source = "git+https://github.com/unixwin/rubash.git?branch=master#0fd42049c7514770fef6c3afcde4a50a5765e67b"
+source = "git+https://github.com/unixwin/rubash.git?branch=master#7e57003e02b8da66ceb7024090cd2dc9d9ed23ec"
 dependencies = [
  "ctrlc",
  "libc",
