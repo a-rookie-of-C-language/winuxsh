@@ -645,11 +645,15 @@ impl Shell {
     /// Mark this shell as interactive.
     ///
     /// Two consequences: easter eggs become routable, and rubash diagnostics
-    /// are prefixed with `niu` instead of the fallback engine name, which is
-    /// what bash does for errors at an interactive prompt.
+    /// are prefixed with the shell name (niu) without a line segment, which
+    /// is what bash does for errors at an interactive prompt (GNU error.c
+    /// report_prolog: interactive shells print only get_name_for_error()).
+    /// The name goes to __RUBASH_SHELL_NAME — NOT __RUBASH_SCRIPT_NAME,
+    /// which owns the script-path/$0 slot; polluting it here used to make
+    /// interactive diagnostics read "niu: line 1: ..." like a -c run.
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
-        self.set_script_name("niu");
+        self.executor.set_env("__RUBASH_SHELL_NAME", "niu");
         // GNU init_interactive (shell.c): interactive shells default
         // expand_aliases on so ~/.niubashrc aliases expand without a
         // user shopt line. Non-interactive entry points never call
