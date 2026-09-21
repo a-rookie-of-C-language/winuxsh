@@ -45,8 +45,8 @@ silently corrupt user data.
 
 | ID | Site | What it does |
 |---|---|---|
-| A1 | `rewrite_winuxcmd_command_shims_in_stage` (shell.rs ≈3592) | Strips `\x11` (CTLESC) from token `value`/`raw`. The code comment admits it: "Rubash keeps quoted glob-like characters behind an internal marker until execution. Niubash rewrites the AST before Rubash executes it, so restore those literals at this external-command boundary." |
-| A2 | `rewrite_parameter_pattern_words` (shell.rs ≈2845) | `word.strip_prefix('\x1d')` — decodes another internal marker to rewrite `${var#pat}` pattern words. |
+| A1 | `rewrite_winuxcmd_command_shims_in_stage` (shell.rs ≈3592) | **DELETED 2026-09-22.** The unconditional `\x11` strip was itself a bug — it turned `echo a\*b` into a live glob (`aXb aYb` before; literal `a*b` after). Tokens now keep carriers; host-side readers of `ast.words` decode through `rubash::decode_to_visible_text` (`decoded_words` helper + call sites). |
+| ~~A2~~ | `rewrite_parameter_pattern_words` (shell.rs ≈2845) | **DELETED in 4873627** (C1 merge wave) — `word.strip_prefix('\x1d')` gone. |
 
 ### B. Host-side AST/token rewriting passes — the issue-#117 family
 
@@ -55,10 +55,10 @@ current; the whitelist alone is hundreds of entries.
 
 | ID | Site | What it does | rubash coverage that should own it |
 |---|---|---|---|
-| B1 | `normalize_winuxcmd_slash_drive_args` + `WINUXCMD_PATH_COMMANDS` + `winuxcmd_path_translation_mask` (shell.rs ≈3669 / ≈3772 / ≈3817) | Rewrites `/c/...` args to `C:\...` for a whitelisted command set, with per-command argument masks: grep parses `-e/-f/-m/-A/-B/-C`, sed/awk each a set, **find has a mini find-expression parser in the host to guess which args are paths**. | `external_argument_path` in rubash path.rs translates drive-shaped args at the executor boundary with full quoting context and existence gating. |
-| B2 | `normalize_cd_windows_drive_args` (shell.rs ≈3115) | Normalizes `cd`'s tilde/drive/slash-drive args in the host. `cd` is a rubash builtin. | rubash `cd` builtin should normalize its own operands. |
+| B1 | `normalize_winuxcmd_slash_drive_args` + `WINUXCMD_PATH_COMMANDS` + `winuxcmd_path_translation_mask` (shell.rs ≈3669 / ≈3772 / ≈3817) | Rewrites `/c/...` args to `C:\...` for a whitelisted command set, with per-command argument masks: grep parses `-e/-f/-m/-A/-B/-C`, sed/awk each a set, **find has a mini find-expression parser in the host to guess which args are paths**. | `external_argument_path` in rubash path.rs translates drive-shaped args at the executor boundary with full quoting context and existence gating. **Precheck 2026-09-22: BLOCKED** — rubash translates `/c/...` unconditionally at argv, so `grep -e /c/pat file` would get `C:/pat` as the *pattern* (mask today protects -e/-f and positional pattern slots; reproduced via rubash.exe directly). `key=/c/val` forms (`dd of=/c/x`) also uncovered. Deletion needs an upstream arg-role story first; keep B1 until then. |
+| B2 | `normalize_cd_windows_drive_args` (shell.rs ≈3115) | Normalizes `cd`'s tilde/drive/slash-drive args in the host. `cd` is a rubash builtin. | rubash `cd` builtin should normalize its own operands. **Precheck 2026-09-22: BLOCKED** — bare rubash handles `cd /c/Users`, `cd "C:\Users"`, `cd ~`, but NOT bare `cd /d` (errors "No such file"), `cd /c` (lands `C:/c` not `C:/`), or `cd "C:"` (lands `C:/c`). Upstream the drive-spec operands first. |
 | B3 | `normalize_bare_windows_drive_commands` (shell.rs ≈3150) | `C:` as a bare command → rewritten to `cd C:/` by AST surgery (rebuilds `words`, `word_kinds`, `word_metadata`). | A dialect decision that belongs in rubash's command resolution. |
-| B4 | `normalize_parameter_pattern_operator_order` + `rewrite_parameter_pattern_words` (shell.rs ≈2903 / ≈2829) | Fixes `${var#pat}` operator ordering and pattern words host-side. Pure language semantics. | rubash parameter expansion. |
+| ~~B4~~ | `normalize_parameter_pattern_operator_order` + `rewrite_parameter_pattern_words` (shell.rs ≈2903 / ≈2829) | **DELETED in 4873627** (C1 merge wave) — engine owns `${var#pat}` operator order natively. | rubash parameter expansion (done). |
 | B5 | `rewrite_winuxcmd_command_shims` family (shell.rs ≈3486) | Token-level command-name → shim-path rewriting (duplicates rubash command lookup) + injects `--color=always` into terminal-bound grep stages by token splicing. | Shim routing: rubash command lookup. Grep color: an rc default alias. |
 
 ### C. Host text scanners duplicating lexer semantics — medium
@@ -91,13 +91,20 @@ raw `\x11` bytes. The correct order:
 
 1. **Phase 0 (rubash, upstream): decode-at-boundary.** Rubash guarantees
    (or exposes an API for) fully-decoded literal words at the external
-   command boundary. Then delete A1 and A2 in niubash.
+   command boundary. Then delete A1 and A2 in niubash. **DONE 2026-09-22:**
+   `rubash::decode_to_visible_text` landed (rubash 3de4e165); A1 strip
+   deleted, host word-readers decode through `decoded_words`; A2 was
+   already gone via 4873627.
 2. **Phase 1: delete B1** (mask + whitelist + the find mini-parser,
-   ~300+ lines) — rubash `external_argument_path` takes over. Precheck the
-   scenarios the mask was guarding (quoted glob-bearing /c/ args, grep
-   pattern positions) in the sandbox matrix.
+   ~300+ lines) — rubash `external_argument_path` takes over. **BLOCKED
+   2026-09-22:** precheck found rubash translates `/c/...` unconditionally
+   at argv, including grep/sed/awk pattern positions (`grep -e /c/pat`
+   → `C:/pat`) and misses `key=/c/val` forms. Needs an upstream arg-role
+   mechanism; re-run the sandbox matrix after that lands.
 3. **Phase 2: upstream B2 and B4** into rubash (cd operand normalization;
-   parameter-expansion operator order), then delete host passes.
+   parameter-expansion operator order), then delete host passes. B4 done
+   in 4873627; B2 blocked on rubash cd not handling bare `/x` or `X:`
+   drive specs (2026-09-22 precheck).
 4. **Phase 3: B3 and B5.** B3 is a dialect decision — move it into rubash
    command resolution as designed behavior. B5: let rubash's lookup own
    shim routing; replace grep color injection with a default rc alias.
@@ -146,10 +153,30 @@ output format: third_party/bash/locale.c:550 dump_translatable_strings,
 shell.c:507-509, parse.y locale_string. An empty placeholder branch
 `fix/c1-tokenizer-dump-strings` was created at 4873627 and deleted.
 
+Phase 0 API landed upstream (rubash master): `rubash::decode_to_visible_text(&str)
+-> String` — src/locale.rs, re-exported at crate root. Single-pass carrier
+decoder covering CTLESC, the C0 data carriers, word-level prefix markers
+(\x1b/\x1c/\x1d), ANSI-C PUA markers, the assignment DATA_* sentinels,
+raw-byte marker pairs, and conditional-pattern byte-chars. Hosts decode
+`token.value`/`token.raw` through it instead of hand-stripping markers;
+this is the prerequisite for deleting A1/A2.
+
+Registered C1 leftovers (not covered by the tokenizer merge):
+
+- **c16 — unclosed `$"` needs an EOF report.** GNU parse.y reports
+  unterminated quoted strings at EOF; the extraction path must surface the
+  same diagnostic rather than silently ending the string.
+- **c20 — nested rewriting inside `$"..."` needs a body serializer.** When
+  the string body contains `$(...)`/`${...}`, dump output must reproduce the
+  nested expansion verbatim — that requires the rubash AST→source
+  serializer (same prerequisite as C2 `pretty_print_script`).
+
 5. rubash's own bridge harness
    (`tests/gnu-compat/run-83.sh check`, ledger
-   `docs/COMPATIBILITY-STATUS.md` — 57 zero-diff / 26 DIFF / 733 lines as
-   of 2026-09-21) is the semantic reference; a brush run through the same
+   `docs/COMPATIBILITY-STATUS.md` — 55 zero-diff / 799 raw diff lines as
+   of 2026-09-22, after a seed-contamination recount; ~204 of those are
+   harness 40s-timeout truncations on `jobs`/`history`) is the semantic
+   reference; a brush run through the same
    harness lives in `target/issue-suites/results-brush/` (10/83) as a
    tooling example.
 

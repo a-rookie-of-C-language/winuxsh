@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reedline::Reedline;
 use rubash::{
+    decode_to_visible_text,
     executor::{Executor, HostExternalCommandOutput},
     lexer::tokenize,
     parser::parse,
@@ -569,7 +570,7 @@ impl Shell {
             return None;
         }
 
-        let script_name = cmd.words[1].clone();
+        let script_name = decode_to_visible_text(&cmd.words[1]);
         let script_path = self.executor.resolve_shell_path(&script_name);
         if !script_path.is_file() {
             return None;
@@ -578,7 +579,7 @@ impl Shell {
         Some(StdinCurrentShellChild {
             script_name,
             script_path,
-            positional_params: cmd.words[1..].to_vec(),
+            positional_params: decoded_words(&cmd.words[1..]),
         })
     }
 
@@ -663,14 +664,14 @@ impl Shell {
         if !self.interactive || commands.len() != 1 {
             return None;
         }
-        let words = &commands[0].words;
+        let words = decoded_words(&commands[0].words);
         let Some(head) = words.first() else {
             return None;
         };
         if !crate::easter_eggs::is_registered(head) {
             return None;
         }
-        crate::easter_eggs::dispatch(true, words).ok().flatten()
+        crate::easter_eggs::dispatch(true, &words).ok().flatten()
     }
 
     /// Execute a single input line via rubash. Returns the exit code.
@@ -713,7 +714,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "z")
         {
-            self.execute_native_zoxide(&ast.commands[0].words[1..])?
+            self.execute_native_zoxide(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_plugin_enabled("thefuck")
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -721,7 +722,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "fuck")
         {
-            self.execute_native_thefuck(&ast.commands[0].words[1..])?
+            self.execute_native_thefuck(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_selector_enabled()
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -729,7 +730,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "cdf" || command == "fzf-cd")
         {
-            self.execute_native_fzf_cd(&ast.commands[0].words[1..])?
+            self.execute_native_fzf_cd(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_plugin_enabled("last-working-dir")
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -1871,7 +1872,11 @@ impl Shell {
         let Some((pack_name, process)) = self.process_plugin_for_command(command_name) else {
             return Ok(None);
         };
-        let code = self.run_process_plugin_command(&pack_name, &process, &command.words[1..])?;
+        let code = self.run_process_plugin_command(
+            &pack_name,
+            &process,
+            &decoded_words(&command.words[1..]),
+        )?;
         Ok(Some(code))
     }
 
@@ -2342,11 +2347,12 @@ impl Shell {
         let Some(command) = single_command_word(ast) else {
             return;
         };
-        if resolve_native_command_path(command).is_some() {
+        let command = decode_to_visible_text(command);
+        if resolve_native_command_path(&command).is_some() {
             return;
         }
 
-        self.print_command_not_found_hints(command);
+        self.print_command_not_found_hints(&command);
     }
 
     fn print_command_not_found_hints(&self, command: &str) {
@@ -3142,14 +3148,6 @@ fn rewrite_winuxcmd_command_shims_in_stage(
         return;
     };
 
-    // Rubash keeps quoted glob-like characters behind an internal marker until
-    // execution. Niubash rewrites the AST before Rubash executes it, so restore
-    // those literals at this external-command boundary.
-    for token in &mut tokens[start..end] {
-        token.value = token.value.replace('\x11', "");
-        token.raw = token.raw.replace('\x11', "");
-    }
-
     match winuxcmd_command_shim(&tokens[command_index]) {
         Some(WinuxCmdShim::Exe { target }) => {
             tokens[command_index].value = target.to_string();
@@ -3171,6 +3169,18 @@ fn rewrite_winuxcmd_command_shims_in_stage(
             ),
         );
     }
+}
+
+/// Decode rubash transport words to user-visible text for host-side
+/// consumers that read `ast.words`/`token.value` directly (native plugins,
+/// process plugins, script dispatch). The executor decodes carriers at its
+/// own argv boundary; host code must use the public decoder instead of
+/// touching carrier bytes itself.
+fn decoded_words(words: &[String]) -> Vec<String> {
+    words
+        .iter()
+        .map(|word| decode_to_visible_text(word))
+        .collect()
 }
 
 fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
@@ -3698,7 +3708,10 @@ fn first_command_word(line: &str) -> Option<String> {
     if ast.commands.len() != 1 {
         return None;
     }
-    ast.commands[0].words.first().cloned()
+    ast.commands[0]
+        .words
+        .first()
+        .map(|word| decode_to_visible_text(word))
 }
 
 fn single_command_word(ast: &Ast) -> Option<&str> {
@@ -3714,7 +3727,7 @@ fn command_not_found_args(ast: &Ast, command: &str) -> Vec<String> {
     }
     let words = ast.commands[0].words.as_slice();
     match words {
-        [first, args @ ..] if first == command => args.to_vec(),
+        [first, args @ ..] if decode_to_visible_text(first) == command => decoded_words(args),
         _ => Vec::new(),
     }
 }
@@ -6342,6 +6355,22 @@ niubash_run_precmd_hooks() {
     }
 
     #[test]
+    fn shim_rewrite_preserves_quoted_glob_carriers() {
+        // Phase 0 (host-semantic-layer-elimination): the host must not strip
+        // rubash's \x11 quoted-glob carrier from token values — the executor
+        // decodes it at the argv boundary, and stripping it here made
+        // `echo a\*b` glob-expand. Host consumers decode via
+        // rubash::decode_to_visible_text instead.
+        let mut tokens = tokenize(r"grep a\*b file; echo c\?d");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].words[1].contains('\x11'));
+        assert!(ast.commands[1].words[1].contains('\x11'));
+        assert_eq!(decode_to_visible_text(&ast.commands[0].words[1]), "a*b");
+        assert_eq!(decode_to_visible_text(&ast.commands[1].words[1]), "c?d");
+    }
+
+    #[test]
     fn interactive_terminal_grep_colors_force_pipeline_final_stage() {
         if !cfg!(windows) {
             return;
@@ -6433,7 +6462,16 @@ niubash_run_precmd_hooks() {
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
-        assert_eq!(pipeline.stages[1].words, vec!["grep.exe", "-E", "a.+c"]);
+        // The `+` stays behind rubash's \x11 data carrier until the executor
+        // decodes it at the argv boundary; the host sees the transport form.
+        assert_eq!(
+            pipeline.stages[1].words,
+            vec!["grep.exe", "-E", "a.\u{11}+c"]
+        );
+        assert_eq!(
+            decode_to_visible_text(&pipeline.stages[1].words[2]),
+            "a.+c"
+        );
     }
 
     #[test]
