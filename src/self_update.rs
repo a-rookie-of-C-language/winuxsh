@@ -128,23 +128,33 @@ pub fn maybe_print_update_hint() {
         return;
     }
 
-    let result = resolve_latest_release(DEFAULT_REPO, UPDATE_CHECK_TIMEOUT_MS);
-    match result {
-        Ok(release) => {
-            let _ = write_update_check_stamp();
-            let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
-            if release_is_newer(&release.tag_name, &current_tag) {
-                eprintln!(
-                    "niubash: update available: {} (run 'self-update' in the REPL, or 'niu --self-update' outside it)",
-                    release.tag_name
-                );
+    // Never on the startup critical path: a pathological network (DNS black
+    // hole, WPAD proxy probes) can hold a WinHTTP request far past its
+    // nominal timeout, and every new window used to pay that before the
+    // first prompt appeared. Check on a background thread; the hint lands in
+    // the REPL's pending-notice queue and prints above a later prompt.
+    std::thread::Builder::new()
+        .name("niu-update-check".to_string())
+        .spawn(|| {
+            let result = resolve_latest_release(DEFAULT_REPO, UPDATE_CHECK_TIMEOUT_MS);
+            match result {
+                Ok(release) => {
+                    let _ = write_update_check_stamp();
+                    let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+                    if release_is_newer(&release.tag_name, &current_tag) {
+                        niubash_runtime::repl::set_pending_notice(format!(
+                            "niubash: update available: {} (run 'self-update' in the REPL, or 'niu --self-update' outside it)",
+                            release.tag_name
+                        ));
+                    }
+                }
+                Err(err) => {
+                    log::debug!("niubash update check failed: {err}");
+                    let _ = write_update_check_stamp();
+                }
             }
-        }
-        Err(err) => {
-            log::debug!("niubash update check failed: {err}");
-            let _ = write_update_check_stamp();
-        }
-    }
+        })
+        .ok();
 }
 
 fn parse_options(args: &[String]) -> Result<SelfUpdateOptions> {

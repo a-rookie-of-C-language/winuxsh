@@ -817,7 +817,25 @@ fn heredoc_input_complete(input: &str) -> bool {
     }
     rubash::lexer::tokenize(input)
         .into_iter()
-        .all(|token| !token.is_unterminated_heredoc_body())
+        .all(|token| !is_unterminated_heredoc_body_token(&token))
+}
+
+// Whether a token is a here-doc body that did not yet reach its delimiter.
+// rubash marks such bodies with a leading \x1f (and, for quoted here-docs,
+// the __RUBASH_HD1__ marker before it). This mirrors rubash's own
+// command_has_unterminated_heredoc check without depending on a private
+// lexer helper that is not part of the published API.
+fn is_unterminated_heredoc_body_token(token: &rubash::Token) -> bool {
+    use rubash::TokenKind;
+    if token.kind != TokenKind::HereDocBody {
+        return false;
+    }
+    const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
+    let body = token
+        .value
+        .strip_prefix(QUOTED_HEREDOC_MARKER)
+        .unwrap_or(&token.value);
+    body.starts_with('')
 }
 
 /// Pending here-doc body skip state for the REPL input scanner.
@@ -1080,6 +1098,39 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 
 /// Run the interactive REPL.
 ///
+/// Notices produced off the startup path (e.g. the background update check)
+/// wait here and print above the next prompt instead of blocking shell
+/// startup or garbling an active line edit.
+static PENDING_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Queue a line to be printed before the next prompt draws. Callable from
+/// any thread; used by the bin crate's background update check.
+pub fn set_pending_notice(text: String) {
+    if let Ok(mut queue) = PENDING_NOTICES.lock() {
+        queue.push(text);
+    }
+}
+
+fn drain_pending_notices() {
+    if let Ok(mut queue) = PENDING_NOTICES.lock() {
+        for line in queue.drain(..) {
+            println!("{line}");
+        }
+    }
+}
+
+/// One dim orientation line shown only on the very first interactive start,
+/// right after the setup wizard — it points at `about`, the in-shell tour.
+/// Follows the wizard language so a Chinese first run reads Chinese.
+fn print_first_run_hint() {
+    let hint = if crate::setup_wizard::wizard_lang_is_chinese() {
+        "\x1b[2m  输入 about 快速上手 · niu setup 重新配置 · 文档 github.com/unixwin/niubash\x1b[0m"
+    } else {
+        "\x1b[2m  Type `about` for a quick tour · `niu setup` to reconfigure · docs: github.com/unixwin/niubash\x1b[0m"
+    };
+    println!("{hint}");
+}
+
 /// Takes ownership of the shell and shares it with the completer through an
 /// `Rc<RefCell<Shell>>` bridge so shell-function completions can execute in
 /// the engine while the line editor is active. No borrow is held across
@@ -1091,20 +1142,27 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // exits with a broken console (e.g. ssh.exe on a failed auth) must not
     // leave the REPL drawing literal escape sequences with a hidden cursor.
     let console_baseline = crate::console_guard::capture();
-    // First-run setup wizard.
-    if crate::setup_wizard::is_first_run() {
+    // First-run setup wizard, then the `about` tour: the screen clears, shows
+    // what this shell is and where to go next, and waits for a keypress.
+    let first_run = crate::setup_wizard::is_first_run();
+    if first_run {
         let _ = crate::setup_wizard::run_wizard();
+        if crate::terminal::stdout_is_terminal() {
+            let _ = crate::easter_eggs::about_tour();
+        }
     }
 
     let welcome = format!("Niubash {}", env!("CARGO_PKG_VERSION"));
     println!("{}", welcome);
+    if first_run && crate::terminal::stdio_is_interactive() {
+        print_first_run_hint();
+    }
 
     shell.borrow_mut().restore_last_working_dir_for_repl();
     shell.borrow_mut().run_startup_rc();
     if let Some(notice) = crate::plugins::take_legacy_bundle_notice() {
         eprintln!("{}", notice);
     }
-    shell.borrow().warn_once_for_nonwritable_shell_root();
     let no_editing = shell.borrow().no_editing;
     if no_editing {
         return run_repl_without_line_editor(&mut shell.borrow_mut());
@@ -1120,6 +1178,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     loop {
         crate::console_guard::restore(&console_baseline);
         let signal = if pending.is_empty() {
+            drain_pending_notices();
             shell.borrow_mut().run_precmd_hooks();
             let prompt = shell.borrow().prompt.clone();
             line_editor.read_line(&prompt)

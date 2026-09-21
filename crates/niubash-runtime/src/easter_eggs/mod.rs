@@ -9,6 +9,7 @@
 
 mod about;
 mod cow;
+mod dino;
 mod matrix;
 mod party;
 mod snake;
@@ -17,7 +18,7 @@ mod typing;
 
 /// Every registered egg name. Keep sorted; used by docs and tests.
 const EGG_NAMES: &[&str] = &[
-    "about", "cow", "game", "games", "matrix", "party", "tic", "typing",
+    "about", "cow", "dino", "game", "games", "matrix", "party", "tic", "typing",
 ];
 
 const DIM: &str = "\x1b[90m";
@@ -25,6 +26,11 @@ const RESET: &str = "\x1b[0m";
 
 /// Games advertised by the `game` launcher: (name, invocation, blurb).
 pub(crate) const GAMES: &[(&str, &str, &str)] = &[
+    (
+        "dino",
+        "game dino",
+        "the runner: jump the cacti, duck the birds",
+    ),
     ("snake", "game snake", "eat the apples, do not eat yourself"),
     ("cow", "game cow", "the bull, animated"),
     ("typing", "game typing", "measure your words per minute"),
@@ -40,6 +46,11 @@ pub(crate) fn names() -> &'static [&'static str] {
 /// True when `command` is a registered egg name. Used to decide routing.
 pub(crate) fn is_registered(command: &str) -> bool {
     EGG_NAMES.contains(&command.to_ascii_lowercase().as_str())
+}
+
+/// The `about` screen, reusable as the post-setup first-run tour.
+pub(crate) fn about_tour() -> anyhow::Result<i32> {
+    about::run()
 }
 
 fn is_flag(word: &str) -> bool {
@@ -76,12 +87,14 @@ pub(crate) fn dispatch(interactive: bool, argv: &[String]) -> anyhow::Result<Opt
         "party" => Ok(Some(party::run()?)),
         "about" => Ok(Some(about::run()?)),
         "cow" => Ok(Some(cow::run()?)),
+        "dino" => Ok(Some(dino::run()?)),
         "typing" => Ok(Some(typing::run()?)),
         "tic" => Ok(Some(tic::run()?)),
         "game" | "games" => match argv.get(1) {
             Some(selection) if !is_flag(selection) => {
                 let wanted = selection.to_ascii_lowercase();
                 match wanted.as_str() {
+                    "dino" | "runner" | "r" => dino::run().map(Some),
                     "snake" => snake::run().map(Some),
                     "cow" => cow::run().map(Some),
                     "typing" | "t" | "wpm" => typing::run().map(Some),
@@ -109,7 +122,7 @@ fn list_games() -> anyhow::Result<i32> {
             "  \x1b[1;96m{invocation:<14}\x1b[0m {DIM}{blurb}{RESET}\n"
         )?;
     }
-    write!(out, "\n  {DIM}each one also works as a top-level command: `snake`, `cow`, `typing`, `tic`{RESET}\n")?;
+    write!(out, "\n  {DIM}each one also works as a top-level command: `dino`, `snake`, `cow`, `typing`, `tic`{RESET}\n")?;
     write!(
         out,
         "  {DIM}also hidden: `matrix`, `party`, `about`{RESET}\n"

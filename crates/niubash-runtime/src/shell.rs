@@ -704,7 +704,6 @@ impl Shell {
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref(), &self.executor);
 
         let mut printed_command_not_found_hints = false;
         let code = if self.native_plugin_enabled("zoxide")
@@ -896,9 +895,6 @@ impl Shell {
         let primary_rc = rc_path.as_ref().is_some_and(|path| {
             path.file_name().and_then(|name| name.to_str()) == Some(NIU_RC_FILE)
         });
-        if primary_rc {
-            fixup_rc_bundle_entry_point(&self.home_dir);
-        }
         if !primary_rc {
             self.run_source_plugin_startup_scripts();
         }
@@ -926,17 +922,6 @@ impl Shell {
         self.update_completion_state();
         self.sync_prompt_from_plugin_env();
         self.run_greeting_hooks();
-    }
-
-    /// Warn once per shell root when the resolved winuxcmd install tree is
-    /// not user-writable (unixwin/niubash#94). Called only from the
-    /// interactive REPL so `niu -c` and script runs stay quiet and
-    /// deterministic.
-    pub fn warn_once_for_nonwritable_shell_root(&self) {
-        let Some(root) = &self.shell_root else {
-            return;
-        };
-        warn_once_for_nonwritable_root(root, &self.home_dir);
     }
 
     /// Source the non-interactive environment file if one is configured.
@@ -1245,21 +1230,43 @@ impl Shell {
         self.run_source_plugin_scripts_for_hook("startup", &context);
     }
 
+    /// Source-pack dispatch re-sources each plugin entry file on every hook
+    /// event, so the file's top-level `niubash_add_*_hook` registration calls
+    /// run each time. Those functions come from the bundle's `lib/hooks.niu`,
+    /// which is normally pulled in by `oh-my-niu.niu` — in rc-less or custom
+    /// shells that entry point never ran and every dispatch spammed
+    /// "command not found" (and registered hooks could never run anyway).
+    /// Load the registry once per shell; fall back to the same no-op stubs
+    /// oh-my-niu.niu installs for bundles that ship no hooks lib.
+    fn ensure_source_plugin_hook_registry(&mut self, bundle_root: &Path) {
+        if self.framework_hook_defined("niubash_add_precmd_hook") {
+            return;
+        }
+        let hooks_lib = bundle_root.join("lib").join("hooks.niu");
+        let loaded = hooks_lib.is_file()
+            && self
+                .source_file_into_current_shell(&hooks_lib)
+                .map(|code| code == 0)
+                .unwrap_or(false);
+        if !loaded {
+            let _ = self.execute_script(
+                "for __niu_h in startup precmd preexec postcmd chpwd period \
+                 zshaddhistory zshexit greeting title trapdebug traperr trapint \
+                 trapwinch trapusr1 trapusr2 trappipe trapterm trapchld trapzerr; do \
+                 eval \"niubash_add_${__niu_h}_hook() { :; }; \
+                 niubash_run_${__niu_h}_hooks() { :; }\"; done; unset __niu_h",
+            );
+        }
+        self.framework_hook_probes
+            .insert("niubash_add_precmd_hook".to_string(), true);
+    }
+
     fn run_source_plugin_scripts_for_hook(&mut self, hook_name: &str, context: &[(&str, String)]) {
-        for source in crate::plugins::source_plugin_scripts_for_hook(&self.plugins, hook_name) {
-            let _script = match std::fs::read_to_string(&source.path) {
-                Ok(script) => script,
-                Err(err) => {
-                    log::warn!(
-                        "source plugin '{}' hook '{}' failed to read {}: {}",
-                        source.pack,
-                        hook_name,
-                        source.path.display(),
-                        err
-                    );
-                    continue;
-                }
-            };
+        let sources = crate::plugins::source_plugin_scripts_for_hook(&self.plugins, hook_name);
+        if let Some(first) = sources.first() {
+            self.ensure_source_plugin_hook_registry(&first.bundle_root.clone());
+        }
+        for source in sources {
             let plugin_dir = source
                 .path
                 .parent()
@@ -2573,7 +2580,6 @@ impl Shell {
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref(), &self.executor);
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
         let execution = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
@@ -3241,112 +3247,6 @@ fn normalize_winuxcmd_slash_drive_args(ast: &mut Ast) {
     for command in &mut ast.commands {
         normalize_winuxcmd_slash_drive_command(command);
     }
-}
-
-/// Rewrite Niubash virtual-root path arguments (e.g. `/tmp/...`, `/etc/...`)
-/// into real host paths under the configured `shell_root` before they reach an
-/// external process. Niubash understands these logical dirs internally, but
-/// foreign executables (Git Bash, Python, VS Code, ...) do not, so a bare
-/// `/tmp/x.sh` passed to them resolves against the wrong location.
-///
-/// This applies to every command (not only winuxcmd shims) and only rewrites
-/// arguments that are explicit virtual-root paths with a sub-path. It never
-/// touches slash-drive paths (`/c/...`), tilde (`~`), or bare directory
-/// arguments such as a lone `/tmp`.
-fn rewrite_virtual_root_args(ast: &mut Ast, shell_root: Option<&Path>, executor: &Executor) {
-    let Some(root) = shell_root else {
-        return;
-    };
-    if !cfg!(windows) {
-        return;
-    }
-    // /tmp and /var/tmp are per-user temp namespaces in rubash even when a
-    // shell root is configured (unixwin/niubash#94); resolve their backing
-    // directories once per rewrite pass so every rewritten argument agrees
-    // with where rubash redirections actually create the files.
-    let tmp_base = virtual_tmp_host_base(executor);
-    let var_tmp_base = crate::path_utils::host_var_tmp_dir();
-    for command in &mut ast.commands {
-        rewrite_virtual_root_command(command, root, &tmp_base, &var_tmp_base);
-    }
-}
-
-fn rewrite_virtual_root_command(
-    command: &mut rubash::parser::CommandNode,
-    root: &Path,
-    tmp_base: &Path,
-    var_tmp_base: &Path,
-) {
-    if let Some(and_or_list) = &mut command.and_or_list {
-        for command in &mut and_or_list.commands {
-            rewrite_virtual_root_command(command, root, tmp_base, var_tmp_base);
-        }
-    }
-    // Never rewrite the command name itself.
-    for word in command.words.iter_mut().skip(1) {
-        if let Some(host_path) = virtual_root_arg_to_host_path(word, root, tmp_base, var_tmp_base) {
-            *word = host_path;
-        }
-    }
-}
-
-fn virtual_root_arg_to_host_path(
-    value: &str,
-    root: &Path,
-    tmp_base: &Path,
-    var_tmp_base: &Path,
-) -> Option<String> {
-    let normalized = value.replace('\\', "/");
-    let Some(rest) = normalized.strip_prefix('/') else {
-        return None;
-    };
-    // Skip slash-drive paths (/c/..., /d/...) and bare tilde; those are handled
-    // elsewhere or by the external process environment.
-    if rest.is_empty() || rest.starts_with('~') {
-        return None;
-    }
-    let first = rest.split('/').next()?;
-    let sub = match first {
-        "tmp" | "bin" | "etc" | "var" | "usr" | "opt" | "dev" | "home" => &rest[first.len()..],
-        _ => return None,
-    };
-    // Require an explicit sub-path: rewrite `/tmp/x` but never a lone `/tmp`.
-    if !sub.starts_with('/') {
-        return None;
-    }
-    // /tmp and /var/tmp live in the per-user temp namespace, not below the
-    // install root, so they stay writable for Program Files-style installs.
-    let host = if first == "tmp" {
-        tmp_base.join(&rest[first.len() + 1..])
-    } else if rest == "var/tmp" {
-        var_tmp_base.to_path_buf()
-    } else if let Some(var_rest) = rest.strip_prefix("var/tmp/") {
-        var_tmp_base.join(var_rest)
-    } else {
-        root.join(rest)
-    };
-    Some(host.to_string_lossy().replace('/', "\\"))
-}
-
-/// Backing directory for the virtual `/tmp` when rewriting external-command
-/// arguments. Mirrors rubash's Windows resolution order: the executor TMPDIR
-/// wins unless it is empty or spells the virtual `/tmp` itself; the process
-/// temp dir is the fallback so resolution can never recurse.
-fn virtual_tmp_host_base(executor: &Executor) -> PathBuf {
-    if let Some(tmpdir) = executor.get_env("TMPDIR") {
-        let normalized = tmpdir.replace('\\', "/");
-        let normalized = normalized.trim_end_matches('/');
-        if !normalized.is_empty() && normalized != "/tmp" && !normalized.starts_with("/tmp/") {
-            // A virtual TMPDIR below /var/tmp resolves against the
-            // temp-backed var/tmp base, same as rubash.
-            if normalized == "/var/tmp" || normalized.starts_with("/var/tmp/") {
-                let rest = normalized["/var/tmp".len()..].trim_start_matches('/');
-                return crate::path_utils::host_var_tmp_dir().join(rest);
-            }
-            return executor.resolve_shell_path(tmpdir);
-        }
-    }
-    std::env::temp_dir()
 }
 
 fn normalize_winuxcmd_slash_drive_command(command: &mut rubash::parser::CommandNode) {
@@ -4336,25 +4236,6 @@ fn compatible_shell_path_from_env() -> Option<PathBuf> {
 /// One-time migration: rewrite a pre-rename `~/.winuxshrc` into
 /// `~/.niubashrc` with the `NIU_*` environment prefix. The original file is
 /// kept untouched; the rewrite is silent and idempotent.
-/// Rewrite retired `oh-my-*.winux` bundle entry references inside an existing
-/// `~/.niubashrc` to the current `oh-my-niu.niu` entry point. Wizard-generated
-/// rc files from 1.1.x probe only `.winux`, which keeps sourcing a stale
-/// leftover entry file on installs that still carry one; the rename is applied
-/// in place so the current entry wins. Runs before the rc is read, and writes
-/// back only when the content actually changes.
-fn fixup_rc_bundle_entry_point(home_dir: &Path) {
-    let path = home_dir.join(NIU_RC_FILE);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let fixed = content
-        .replace("oh-my-winuxsh.winux", "oh-my-niu.niu")
-        .replace("oh-my-niu.winux", "oh-my-niu.niu");
-    if fixed != content {
-        let _ = std::fs::write(&path, fixed);
-    }
-}
-
 fn migrate_legacy_winuxsh_rc(home_dir: &Path) {
     let source = home_dir.join(NIU_COMPAT_RC_FILE);
     let target = home_dir.join(NIU_RC_FILE);
@@ -4411,71 +4292,12 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
         return Ok(None);
     };
 
-    // Best-effort only: a root below a non-user-writable install dir (e.g.
-    // C:\Program Files\Niubash) cannot accept new directories, and that must
-    // not abort shell startup (unixwin/niubash#94). "tmp" is intentionally
-    // absent: /tmp resolves to the per-user temp dir, not the install tree.
+    // /tmp is intentionally absent: it is backed by the real Windows temp
+    // directory (unixwin/niubash#94), never by the install tree.
     for relative in ["bin", "usr/bin", "usr/local/bin", "etc", "var", "dev"] {
-        if let Err(error) = std::fs::create_dir_all(root.join(relative)) {
-            log::debug!(
-                "shell root dir {} not creatable (read-only root?): {}",
-                root.join(relative).display(),
-                error
-            );
-        }
+        std::fs::create_dir_all(root.join(relative))?;
     }
     Ok(Some(root))
-}
-
-/// True when the current user can create entries below the shell root.
-/// Probed by creating and removing a unique marker directory; a
-/// Program Files-style install root fails this probe.
-fn shell_root_user_writable(root: &Path) -> bool {
-    let probe = root.join(format!(".niu-write-probe-{}", std::process::id()));
-    if std::fs::create_dir(&probe).is_ok() {
-        let _ = std::fs::remove_dir(&probe);
-        return true;
-    }
-    false
-}
-
-/// Warn once per shell root when the resolved winuxcmd install tree is not
-/// user-writable (unixwin/niubash#94): /tmp and /var/tmp keep working from
-/// the per-user temp dir, but wpm package installs and command-link rebuilds
-/// still need write access to the root and will fail. A marker file records
-/// the warned root so the diagnostic is not repeated on every interactive
-/// launch.
-fn warn_once_for_nonwritable_root(root: &Path, home_dir: &Path) {
-    if !cfg!(windows) || shell_root_user_writable(root) {
-        return;
-    }
-    let marker = home_dir
-        .join(".niubash")
-        .join("nonwritable-shell-root-warned");
-    if std::fs::read_to_string(&marker)
-        .map(|seen| seen.trim() == root.to_string_lossy().trim())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    eprintln!(
-        "niubash: warning: shell root '{}' is not writable by this user.",
-        root.display()
-    );
-    eprintln!(
-        "  /tmp and /var/tmp now live in your per-user temp directory, but \
-         'wpm install/update' and command-link rebuilds still target the \
-         install root and will fail with permission errors."
-    );
-    eprintln!(
-        "  Fix: reinstall Niubash to a per-user location such as \
-         %LOCALAPPDATA%\\Programs\\Niubash \
-         (https://github.com/unixwin/niubash/issues/94)."
-    );
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&marker, root.to_string_lossy().as_bytes());
 }
 
 fn is_slash_drive_path(value: &str) -> bool {
@@ -5470,36 +5292,6 @@ export WINUXSH_OLD_PREFIX=kept-as-niu
             std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap(),
             "export NIU_THEME=custom\n"
         );
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn primary_rc_fixup_rewrites_retired_winux_bundle_entry() {
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let temp = unique_temp_dir("niubash-rc-entry-fixup");
-        let home = temp.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join(NIU_RC_FILE),
-            r#"
-if [ -f "$NIUBASH/oh-my-niu.winux" ]; then
-  . "$NIUBASH/oh-my-niu.winux"
-fi
-[ -f "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux" ] && . "$NIU_APP_BUNDLE_PATH/oh-my-winuxsh.winux"
-"#,
-        )
-        .unwrap();
-
-        let mut shell = test_shell(HookConfig::default());
-        shell.home_dir = home.clone();
-        shell.run_startup_rc();
-
-        let fixed = std::fs::read_to_string(home.join(NIU_RC_FILE)).unwrap();
-        assert!(fixed.contains("oh-my-niu.niu"));
-        assert!(!fixed.contains("oh-my-niu.winux"));
-        assert!(!fixed.contains("oh-my-winuxsh.winux"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -7854,164 +7646,5 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
     fn write_fake_cwd_probe(bin: &std::path::Path, log_path: &str) {
         let script = format!("@echo off\r\n>\"{}\" echo %CD%\r\nexit /b 0\r\n", log_path);
         std::fs::write(bin.join("cwdprobe.cmd"), script).unwrap();
-    }
-
-    #[test]
-    fn virtual_root_arg_to_host_path_rewrites_known_virtual_dirs() {
-        if !cfg!(windows) {
-            return;
-        }
-        let root = Path::new("C:/niubash-root");
-        let tmp_base = Path::new("C:/Users/test/AppData/Local/Temp");
-        let var_tmp_base = tmp_base.join("var").join("tmp");
-        let cases = [
-            (
-                "/tmp/opencode/repro.sh",
-                "C:\\Users\\test\\AppData\\Local\\Temp\\opencode\\repro.sh",
-            ),
-            ("/etc/passwd", "C:\\niubash-root\\etc\\passwd"),
-            (
-                "/usr/local/bin/tool",
-                "C:\\niubash-root\\usr\\local\\bin\\tool",
-            ),
-            ("/var/log/x.log", "C:\\niubash-root\\var\\log\\x.log"),
-            (
-                "/var/tmp/y.log",
-                "C:\\Users\\test\\AppData\\Local\\Temp\\var\\tmp\\y.log",
-            ),
-            ("/bin/sh", "C:\\niubash-root\\bin\\sh"),
-            ("/opt/app/run", "C:\\niubash-root\\opt\\app\\run"),
-            ("/dev/null", "C:\\niubash-root\\dev\\null"),
-            ("/home/alice/file", "C:\\niubash-root\\home\\alice\\file"),
-        ];
-        for (input, expected) in cases {
-            let got = virtual_root_arg_to_host_path(input, root, tmp_base, &var_tmp_base);
-            assert_eq!(got.as_deref(), Some(expected), "input: {input}");
-        }
-    }
-
-    #[test]
-    fn virtual_root_arg_to_host_path_skips_non_virtual_paths() {
-        if !cfg!(windows) {
-            return;
-        }
-        let root = Path::new("C:/niubash-root");
-        let tmp_base = Path::new("C:/Users/test/AppData/Local/Temp");
-        let var_tmp_base = tmp_base.join("var").join("tmp");
-        // Slash-drive paths are handled elsewhere and must NOT be rewritten here.
-        assert_eq!(
-            virtual_root_arg_to_host_path("/c/Users/me/x", root, tmp_base, &var_tmp_base),
-            None
-        );
-        // A bare directory (no sub-path) must NOT be rewritten.
-        assert_eq!(
-            virtual_root_arg_to_host_path("/tmp", root, tmp_base, &var_tmp_base),
-            None
-        );
-        // Tilde is resolved by the external process environment.
-        assert_eq!(
-            virtual_root_arg_to_host_path("~/x.sh", root, tmp_base, &var_tmp_base),
-            None
-        );
-        // Unknown virtual-ish prefixes are left untouched.
-        assert_eq!(
-            virtual_root_arg_to_host_path("/foo/bar", root, tmp_base, &var_tmp_base),
-            None
-        );
-        // /tmp/x resolves into the per-user temp base, not <root>/tmp
-        // (unixwin/niubash#94).
-        assert_eq!(
-            virtual_root_arg_to_host_path("/tmp/x", root, tmp_base, &var_tmp_base),
-            Some("C:\\Users\\test\\AppData\\Local\\Temp\\x".to_string())
-        );
-    }
-
-    #[test]
-    fn rewrite_virtual_root_args_rewrites_external_command_args() {
-        if !cfg!(windows) {
-            return;
-        }
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let root = std::env::temp_dir().join("niubash-test-root");
-        let _ = std::fs::create_dir_all(&root);
-        let executor = Executor::new();
-
-        // Mirrors the reported failure: an external bash.exe given a Niubash
-        // virtual /tmp path. The path must become the same host path rubash
-        // uses for redirections: the per-user temp dir, not <root>/tmp.
-        let line = r#"D:/Git/bin/bash.exe /tmp/opencode/repro.sh --flag /etc/config"#;
-        let tokens = tokenize(line);
-        let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, Some(&root), &executor);
-
-        let words = &ast.commands[0].words;
-        assert_eq!(words[0], "D:/Git/bin/bash.exe", "command name untouched");
-        let expected_tmp = virtual_tmp_host_base(&executor)
-            .join("opencode")
-            .join("repro.sh")
-            .to_string_lossy()
-            .replace('/', "\\");
-        assert_eq!(words[1], expected_tmp, "/tmp arg rewritten");
-        let expected_etc = root
-            .join("etc")
-            .join("config")
-            .to_string_lossy()
-            .replace('/', "\\");
-        assert_eq!(words[3], expected_etc, "/etc arg rewritten");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn rewrite_virtual_root_args_is_noop_without_shell_root() {
-        if !cfg!(windows) {
-            return;
-        }
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let executor = Executor::new();
-        let line = r#"bash.exe /tmp/x.sh"#;
-        let tokens = tokenize(line);
-        let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, None, &executor);
-        // No shell_root -> arguments are left exactly as written.
-        assert_eq!(ast.commands[0].words[1], "/tmp/x.sh");
-    }
-
-    #[test]
-    fn virtual_tmp_host_base_prefers_executor_tmpdir() {
-        if !cfg!(windows) {
-            return;
-        }
-        // Executor::new() mutates process env (removes __RUBASH_* markers),
-        // so serialize against the other env-touching tests.
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let mut executor = Executor::new();
-        let custom = std::env::temp_dir().join("niubash-tmpdir-pref");
-        executor.set_env("TMPDIR", &custom.to_string_lossy());
-        assert_eq!(virtual_tmp_host_base(&executor), custom);
-        // A TMPDIR spelling the virtual /tmp falls back to the process temp
-        // dir instead of recursing.
-        executor.set_env("TMPDIR", "/tmp");
-        assert_eq!(virtual_tmp_host_base(&executor), std::env::temp_dir());
-        executor.set_env("TMPDIR", "/tmp/sub");
-        assert_eq!(virtual_tmp_host_base(&executor), std::env::temp_dir());
-    }
-
-    #[test]
-    fn shell_root_user_writable_detects_unwritable_root() {
-        if !cfg!(windows) {
-            return;
-        }
-        let dir = std::env::temp_dir().join("niubash-writable-root-probe");
-        let _ = std::fs::create_dir_all(&dir);
-        assert!(shell_root_user_writable(&dir));
-        // A "root" below a regular file can never accept children, so the
-        // probe reports it as non-writable.
-        let file = dir.join("file.txt");
-        std::fs::write(&file, b"").unwrap();
-        assert!(!shell_root_user_writable(&file.join("sub")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

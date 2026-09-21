@@ -9,41 +9,67 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
-const FRAME_MS: u64 = 250;
-const TOTAL_FRAMES: usize = 13;
+const FRAME_MS: u64 = 220;
+const TOTAL_FRAMES: usize = 16;
+
+// Idle mostly, a blink now and then, a snort, and a moo to close.
+const SEQUENCE: &[usize] = &[0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 0, 3, 3, 0, 2];
 
 const BRAND: &str = "\x1b[38;5;214m";
 const DIM: &str = "\x1b[38;5;245m";
 const RESET: &str = "\x1b[0m";
 
-// The niubash bull in three poses: alert, blinking, and exhaling. Each
-// frame is padded to twelve columns so a clear-screen redraw never
-// leaves a ragged edge.
+// The niubash bull in four poses: idle, blink, a snort with steam, and a
+// moo. Every row is padded to eighteen columns so a clear-screen redraw
+// never leaves a ragged edge.
 const FRAMES: &[&[&str]] = &[
     &[
-        r"      ,-.  ,-. ",
-        r"     /   \/   \ ",
-        r"    |  o    o  | ",
-        r"    |    --    | ",
-        r"     \   __   / ",
-        r"      '------' ",
+        "   /\\        /\\   ",
+        "  /  \\______/  \\  ",
+        " /              \\ ",
+        "|  (o)      (o)  |",
+        "|       __       |",
+        " \\     (____)    /",
+        "  \\____________/  ",
+        "   '----------'   ",
+        "       |  |       ",
+        "      _)  (_      ",
     ],
     &[
-        r"      ,-.  ,-. ",
-        r"     /   \/   \ ",
-        r"    |  -    -  | ",
-        r"    |    --    | ",
-        r"     \   __   / ",
-        r"      '------' ",
+        "   /\\        /\\   ",
+        "  /  \\______/  \\  ",
+        " /              \\ ",
+        "|   -        -   |",
+        "|       __       |",
+        " \\     (____)    /",
+        "  \\____________/  ",
+        "   '----------'   ",
+        "       |  |       ",
+        "      _)  (_      ",
     ],
     &[
-        r"      ,-.  ,-. ",
-        r"     /   \/   \ ",
-        r"    |  o    o  | ",
-        r"    |    --    | ",
-        r"     \   __   / ",
-        r"      '------' ",
-        r"      ~   ~   ",
+        "   /\\        /\\   ",
+        "  /  \\______/  \\  ",
+        " /              \\ ",
+        "|  (o)      (o)  |",
+        "|       __       |",
+        " \\     (____)    /",
+        "  \\____________/  ",
+        "   '~'------'~'   ",
+        "       |  |       ",
+        "      _)  (_      ",
+    ],
+    &[
+        "   /\\        /\\   ",
+        "  /  \\______/  \\  ",
+        " /              \\ ",
+        "|  (o)      (o)  |",
+        "|       __       |",
+        " \\     (oo)     / ",
+        "  \\____)  (____/  ",
+        "   '----------'   ",
+        "       |  |       ",
+        "      _)  (_      ",
     ],
 ];
 
@@ -67,7 +93,7 @@ fn play(stdout: &mut io::Stdout) -> anyhow::Result<i32> {
     let start = std::time::Instant::now();
     let duration = Duration::from_millis(FRAME_MS * TOTAL_FRAMES as u64);
     for frame in 0..TOTAL_FRAMES {
-        draw(stdout, frame, false)?;
+        draw(stdout, SEQUENCE[frame % SEQUENCE.len()], false)?;
         if event::poll(Duration::from_millis(FRAME_MS / 4))? {
             if let Event::Key(key) = event::read()? {
                 if matches!(
@@ -85,7 +111,7 @@ fn play(stdout: &mut io::Stdout) -> anyhow::Result<i32> {
     }
 
     // One last breath, then hand the screen back to the REPL.
-    draw(stdout, 2, true)?;
+    draw(stdout, 3, true)?;
     let elapsed = start.elapsed();
     if elapsed < duration {
         thread::sleep(duration.saturating_sub(elapsed));

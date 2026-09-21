@@ -46,44 +46,6 @@ pub(crate) fn shell_path_to_host_path(value: &str) -> String {
     value.to_string()
 }
 
-/// Backing directory for the shell-visible `/tmp` on the host filesystem.
-/// Mirrors rubash's Windows resolution for host-side readers that do not own
-/// the executor (completion, syntax highlighting): process TMPDIR, then TEMP,
-/// then TMP; a value that is empty or spells the virtual `/tmp` itself falls
-/// back to the OS temp dir (unixwin/niubash#94).
-pub(crate) fn host_tmp_dir() -> PathBuf {
-    for name in ["TMPDIR", "TEMP", "TMP"] {
-        if let Ok(value) = std::env::var(name) {
-            let normalized = value.replace('\\', "/");
-            let normalized = normalized.trim_end_matches('/');
-            if !normalized.is_empty() && normalized != "/tmp" && !normalized.starts_with("/tmp/") {
-                return PathBuf::from(value);
-            }
-        }
-    }
-    std::env::temp_dir()
-}
-
-/// Backing directory for the shell-visible `/var/tmp`. Kept under a `var/tmp`
-/// child of the same temp source rubash uses (`safe_temp_dir_string()`:
-/// process TMPDIR, TEMP, TMP, then the current-dir `target` fallback) so it
-/// cannot collide with `/tmp` or with unrelated %TEMP% contents
-/// (unixwin/niubash#94).
-pub(crate) fn host_var_tmp_dir() -> PathBuf {
-    for name in ["TMPDIR", "TEMP", "TMP"] {
-        if let Ok(value) = std::env::var(name) {
-            if !value.is_empty() && !value.contains('\0') {
-                return PathBuf::from(value).join("var").join("tmp");
-            }
-        }
-    }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("target")
-        .join("var")
-        .join("tmp")
-}
-
 pub(crate) fn normalize_existing_host_path(path: PathBuf) -> PathBuf {
     let Ok(canonical) = std::fs::canonicalize(&path) else {
         return path;

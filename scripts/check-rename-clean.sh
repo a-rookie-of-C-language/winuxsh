@@ -11,9 +11,6 @@
 #   - winuxshrc                  : legacy rc fallback chain and migration docs
 #   - min_winuxsh / migrate_legacy_winuxsh_rc / kept-as-niu :
 #                                  intentional compat shims for the rename
-#   - Programs/Winuxsh           : the legacy install directory, kept in the
-#                                  niubash skill guidance so an agent recognises
-#                                  machines that still carry the old path
 #   - Cargo.lock                 : regenerated; verified separately below
 #
 # The allowlist is applied with a POSIX case glob (lowercased line) instead of
@@ -50,7 +47,7 @@ if [ -n "$hits" ]; then
         total=$((total + 1))
         lower=$(printf '%s' "$line" | tr 'A-Z' 'a-z')
         case "$lower" in
-            *oh-my-winuxsh*|*winuxsh_unsupported_device*|*winuxsh_shell*|*winuxsh_root*|*winuxshrc*|*min_winuxsh*|*migrate_legacy_winuxsh_rc*|*programs/winuxsh*|*replace\(*|*check-rename-clean.sh*|*kept-as-niu*|*migrated.contains*)
+            *oh-my-winuxsh*|*winuxsh_unsupported_device*|*winuxsh_shell*|*winuxsh_root*|*winuxshrc*|*min_winuxsh*|*migrate_legacy_winuxsh_rc*|*replace\(*|*check-rename-clean.sh*|*kept-as-niu*|*migrated.contains*)
                 allowed_count=$((allowed_count + 1))
                 ;;
             *)

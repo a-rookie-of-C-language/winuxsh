@@ -4,10 +4,11 @@
 //! `SideBySideLayout` for logo-left / wizard-right rendering.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
 use crossterm::{
-    cursor::{self, MoveToColumn, MoveToRow},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    cursor::{self, MoveDown, MoveToColumn, MoveUp},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{self, Clear, ClearType},
 };
@@ -23,8 +24,64 @@ pub enum Selection {
     Abort,
 }
 
-/// Run an interactive arrow-key menu. Returns `Selection::Confirmed(index)` or
-/// `Selection::UseDefault` on ESC / Ctrl-C.
+/// What a key press should do to the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    /// Highlight a different option.
+    MoveTo(usize),
+    /// Confirm the highlighted option.
+    Confirm,
+    /// Take the caller-provided default (ESC).
+    UseDefault,
+    /// Abort the whole flow (Ctrl-C).
+    Abort,
+    /// Do nothing.
+    Ignore,
+}
+
+/// Map a key event to a menu action.
+///
+/// Windows emits `Press`, `Repeat`, and `Release` key events; Unix terminals
+/// only report presses. Release events must be ignored or every key is handled
+/// twice and a key-up left in the input queue can confirm the *next* menu.
+fn key_action(key: &KeyEvent, selected: usize, len: usize) -> MenuAction {
+    if key.kind == KeyEventKind::Release {
+        return MenuAction::Ignore;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => MenuAction::MoveTo(selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => {
+            MenuAction::MoveTo((selected + 1).min(len.saturating_sub(1)))
+        }
+        KeyCode::Enter => MenuAction::Confirm,
+        KeyCode::Esc => MenuAction::UseDefault,
+        KeyCode::Char('c') if ctrl => MenuAction::Abort,
+        KeyCode::Char(c) if c.is_ascii_digit() => match c.to_digit(10) {
+            Some(idx) if idx >= 1 && idx as usize <= len => MenuAction::MoveTo(idx as usize - 1),
+            _ => MenuAction::Ignore,
+        },
+        _ => MenuAction::Ignore,
+    }
+}
+
+const MENU_HINT_EN: &str =
+    "\x1b[2m↑↓ navigate  1-9 jump  Enter confirm  Esc defaults  Ctrl+C quit\x1b[0m";
+const MENU_HINT_ZH: &str =
+    "\x1b[2m↑↓ 移动  1-9 跳转  Enter 确认  Esc 全部用默认  Ctrl+C 退出\x1b[0m";
+
+/// The menu's own hint line follows the wizard language so a Chinese wizard
+/// never shows an English footer.
+fn menu_hint() -> &'static str {
+    if crate::setup_wizard::wizard_lang_is_chinese() {
+        MENU_HINT_ZH
+    } else {
+        MENU_HINT_EN
+    }
+}
+
+/// Run an interactive arrow-key menu. Returns `Selection::Confirmed(index)` on
+/// Enter, `Selection::UseDefault` on ESC, `Selection::Abort` on Ctrl-C.
 ///
 /// `label` is printed once above the options. `help` is shown below the options
 /// when non-empty. `default_idx` highlights the pre-selected option and is
@@ -35,127 +92,248 @@ pub fn interactive_choice(
     default_idx: usize,
     help: &str,
 ) -> Selection {
+    interactive_choice_ex(label, options, default_idx, help, None)
+}
+
+/// Like [`interactive_choice`], plus an optional live preview rendered below
+/// the menu and refreshed whenever the highlight moves. `preview` maps an
+/// option index to the lines to display.
+pub fn interactive_choice_ex(
+    label: &str,
+    options: &[&str],
+    default_idx: usize,
+    help: &str,
+    preview: Option<&dyn Fn(usize) -> Vec<String>>,
+) -> Selection {
     let _raw = RawMode::enter();
 
     let mut selected = default_idx.min(options.len().saturating_sub(1));
+
+    // Fixed preview area height so in-place redraws never shift rows.
+    let preview_height = preview
+        .map(|pv| {
+            options
+                .iter()
+                .enumerate()
+                .map(|(i, _)| pv(i).len())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    // A menu taller than the viewport cannot be repainted in place — the
+    // initial MoveUp clamps at the top row and every row after that lands
+    // on the wrong line. Cap the option rows to a sliding window around
+    // the selection instead, keeping the block height constant.
+    let chrome = help.lines().count() + preview_height + 9;
+    let max_opts = (term_height() as usize)
+        .saturating_sub(chrome)
+        .max(5)
+        .min(options.len());
 
     // Initial render
     println!();
     println!("  {}", label);
     if !help.is_empty() {
         for line in help.lines() {
-            println!("  {}", line);
+            println!("  {}", clip_line(line, term_width() as usize - 4));
         }
     }
     println!();
-    render_options(options, selected);
-    if !help.is_empty() {
-        println!();
-        println!("  \x1b[2m↑↓ navigate  Enter confirm  ESC default\x1b[0m");
+    io::stdout().flush().ok();
+    render_options(options, selected, max_opts);
+
+    println!();
+    println!("  {}", menu_hint());
+    println!();
+    io::stdout().flush().ok();
+
+    if let Some(pv) = preview {
+        for line in pv(selected) {
+            println!("  {}", clip_line(&line, term_width() as usize - 4));
+        }
+        for _ in pv(selected).len()..preview_height {
+            println!();
+        }
     }
     println!();
     io::stdout().flush().ok();
 
-    let start_row = cursor::position().map(|p| p.1).unwrap_or(0);
-    let menu_top = start_row - options.len() as u16 - if help.is_empty() { 0 } else { 2 };
+    // Row where the cursor rests: one blank line below the preview area.
+    // Used only to clamp MoveUp so tiny terminals cannot overshoot.
+    let rest_row = cursor::position().map(|p| p.1).unwrap_or(u16::MAX);
+
+    // Drop input queued before this menu was drawn so a stale key event can't
+    // instantly confirm it (e.g. an Enter pressed at the previous prompt).
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        if event::read().is_err() {
+            break;
+        }
+    }
 
     loop {
         let key = match event::read() {
             Ok(Event::Key(k)) => k,
-            _ => continue,
+            Ok(_) => continue,
+            // Persistent read failure (e.g. input went away): take the default
+            // rather than spinning forever.
+            Err(_) => return Selection::UseDefault,
         };
-        // Windows reports Press + Release for every keystroke; ignoring the
-        // release is required or each arrow press moves the selection twice.
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        let modifiers = key.modifiers;
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let old = selected;
-                selected = selected.saturating_sub(1);
-                if old != selected {
-                    redraw_option(options, old, selected, menu_top);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                let old = selected;
-                selected = (selected + 1).min(options.len() - 1);
-                if old != selected {
-                    redraw_option(options, old, selected, menu_top);
-                }
-            }
-            KeyCode::Enter => {
-                return Selection::Confirmed(selected);
-            }
-            KeyCode::Esc => {
-                return Selection::UseDefault;
-            }
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                return Selection::Abort;
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                if let Some(idx) = c.to_digit(10) {
-                    let idx = idx as usize;
-                    if idx >= 1 && idx <= options.len() {
-                        let old = selected;
-                        selected = idx - 1;
-                        if old != selected {
-                            redraw_option(options, old, selected, menu_top);
-                        }
-                    }
-                }
+        match key_action(&key, selected, options.len()) {
+            MenuAction::Confirm => return Selection::Confirmed(selected),
+            MenuAction::UseDefault => return Selection::UseDefault,
+            MenuAction::Abort => return Selection::Abort,
+            MenuAction::MoveTo(new) if new != selected => {
+                selected = new;
+                let lines = preview.map(|pv| pv(selected));
+                redraw_menu(
+                    options,
+                    selected,
+                    lines.as_deref(),
+                    preview_height,
+                    rest_row,
+                    max_opts,
+                );
             }
             _ => {}
         }
     }
 }
 
-/// Render all options, highlighting `selected`.
-fn render_options(options: &[&str], selected: usize) {
-    for (i, opt) in options.iter().enumerate() {
-        print_option(i, *opt, i == selected);
+/// Visible option window for long menus: `[start, end)`, `end - start ==
+/// max_visible` (or `len` when the whole list fits).
+fn window_bounds(len: usize, selected: usize, max_visible: usize) -> (usize, usize) {
+    if len <= max_visible {
+        return (0, len);
     }
+    let start = selected
+        .saturating_sub(max_visible / 2)
+        .min(len - max_visible);
+    (start, start + max_visible)
 }
 
-/// Print a single option line. `highlight` applies inverse colors.
-fn print_option(idx: usize, opt: &str, highlight: bool) {
-    if highlight {
-        print!("  \x1b[7m ◆ {}) {:<20} \x1b[0m", idx + 1, opt);
-    } else {
-        print!("    {}) {:<20} ", idx + 1, opt);
-    }
-    println!();
-}
-
-/// Redraw only two option lines (old and new selection) to minimize flicker.
-fn redraw_option(options: &[&str], old: usize, new: usize, menu_top: u16) {
+/// Render the option window, highlighting `selected`. Scrolled-off ends are
+/// marked with dim `↑ N more` / `↓ N more` rows so the block height stays
+/// `max_visible` regardless of scroll position.
+fn render_options(options: &[&str], selected: usize, max_visible: usize) {
     let mut stdout = io::stdout();
+    let (start, end) = window_bounds(options.len(), selected, max_visible);
+    for row in start..end {
+        write_option_row(&mut stdout, options, row, selected, start, end);
+        println!();
+    }
+}
 
-    // Redraw old selection (unhighlighted)
-    let old_row = menu_top + old as u16;
-    let _ = execute!(
-        stdout,
-        MoveToRow(old_row),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine)
-    );
-    print_option(old, options[old], false);
+/// Write one row of the option window: either an option line or a scroll
+/// indicator. Never emits a newline.
+fn write_option_row(
+    stdout: &mut impl io::Write,
+    options: &[&str],
+    row: usize,
+    selected: usize,
+    start: usize,
+    end: usize,
+) {
+    if row == start && start > 0 {
+        let _ = write!(stdout, "  \x1b[2m  ↑ {} more\x1b[0m", start);
+    } else if row == end - 1 && end < options.len() {
+        let _ = write!(
+            stdout,
+            "  \x1b[2m  ↓ {} more\x1b[0m",
+            options.len() - (end - 1)
+        );
+    } else {
+        write_option(stdout, row, options[row], row == selected);
+    }
+}
 
-    // Redraw new selection (highlighted)
-    let new_row = menu_top + new as u16;
-    let _ = execute!(
-        stdout,
-        MoveToRow(new_row),
-        MoveToColumn(0),
-        Clear(ClearType::CurrentLine)
-    );
-    print_option(new, options[new], true);
+/// Write one option line clipped to the terminal width — never emits a
+/// newline, so it is safe mid-redraw at the bottom of the screen.
+fn write_option(stdout: &mut impl io::Write, idx: usize, opt: &str, highlight: bool) {
+    let text = clip_line(opt, (term_width() as usize).saturating_sub(10));
+    let _ = if highlight {
+        write!(stdout, "  \x1b[7m ◆ {}) {:<20} \x1b[0m", idx + 1, text)
+    } else {
+        write!(stdout, "    {}) {:<20} ", idx + 1, text)
+    };
+}
 
-    // Move cursor below menu to avoid visual artifacts
-    let below = menu_top + options.len() as u16;
-    let _ = execute!(stdout, MoveToRow(below), MoveToColumn(0));
+/// Repaint the option rows plus the preview area using only relative cursor
+/// moves (`MoveUp`/`MoveDown`) and newline-free writes. Absolute row
+/// addressing breaks when the menu is drawn at the bottom of the screen —
+/// each `println!` scrolls the buffer and every recorded row goes stale —
+/// and long lines that wrap do the same. `rest_row` clamps the initial
+/// MoveUp so a menu taller than the viewport cannot overshoot the top.
+fn redraw_menu(
+    options: &[&str],
+    selected: usize,
+    preview_lines: Option<&[String]>,
+    preview_height: usize,
+    rest_row: u16,
+    max_opts: usize,
+) {
+    let mut stdout = io::stdout();
+    // Rows from the first visible option row to the rest position: window +
+    // blank + hint + blank + preview rows + trailing blank.
+    let top_to_rest = (max_opts + preview_height + 4) as u16;
+    let _ = execute!(stdout, MoveUp(top_to_rest.min(rest_row)), MoveToColumn(0));
+    let (start, end) = window_bounds(options.len(), selected, max_opts);
+    for row in start..end {
+        let _ = execute!(stdout, Clear(ClearType::CurrentLine));
+        write_option_row(&mut stdout, options, row, selected, start, end);
+        let _ = execute!(stdout, MoveDown(1), MoveToColumn(0));
+    }
+    // Skip the blank line, hint row, and blank line between options and
+    // the preview area.
+    let _ = execute!(stdout, MoveDown(3), MoveToColumn(0));
+    for j in 0..preview_height {
+        let _ = execute!(stdout, Clear(ClearType::CurrentLine));
+        if let Some(line) = preview_lines.and_then(|l| l.get(j)) {
+            let _ = write!(
+                stdout,
+                "  {}",
+                clip_line(line, (term_width() as usize).saturating_sub(4))
+            );
+        }
+        let _ = execute!(stdout, MoveDown(1), MoveToColumn(0));
+    }
+    // Land back on the rest row (trailing blank below the preview).
+    let _ = execute!(stdout, MoveDown(1), MoveToColumn(0));
     stdout.flush().ok();
+}
+
+/// Truncate `s` to at most `max` visible display columns, passing ANSI escape
+/// sequences through untouched and appending a reset when anything was cut.
+/// Wide glyphs (CJK, emoji) count as two columns so Chinese text clips at the
+/// same physical edge as ASCII.
+fn clip_line(s: &str, max: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut visible = 0usize;
+    let mut cut = false;
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            out.push(ch);
+            for c in chars.by_ref() {
+                out.push(c);
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        let width = char_width(ch);
+        if visible + width > max {
+            cut = true;
+            break;
+        }
+        visible += width;
+        out.push(ch);
+    }
+    if cut {
+        out.push_str("\x1b[0m");
+    }
+    out
 }
 
 /// Get terminal width. Falls back to 80 if detection fails.
@@ -208,7 +386,8 @@ pub fn print_side_by_side(logo_lines: &[String], content_lines: &[String], min_w
     }
 }
 
-/// Estimate visible width of a string, ignoring ANSI escape sequences.
+/// Estimate visible width of a string in terminal columns, ignoring ANSI
+/// escape sequences. Wide glyphs (CJK, emoji) count as two columns.
 fn strip_ansi_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_escape = false;
@@ -223,9 +402,84 @@ fn strip_ansi_width(s: &str) -> usize {
             }
             continue;
         }
-        width += 1;
+        width += char_width(ch);
     }
     width
+}
+
+/// Display width of one character in terminal columns: 2 for East Asian wide
+/// and fullwidth glyphs plus emoji, 1 otherwise. Covers the ranges that
+/// actually appear in wizard text; unlisted code points fall back to 1.
+pub(crate) fn char_width(ch: char) -> usize {
+    let c = ch as u32;
+    let wide = matches!(c,
+        0x1100..=0x115F // Hangul Jamo
+            | 0x2E80..=0x303E // CJK radicals, Kangxi, CJK punctuation
+            | 0x3041..=0x33FF // Hiragana, Katakana, CJK compat, wide punct
+            | 0x3400..=0x4DBF // CJK Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xA000..=0xA4CF // Yi
+            | 0xAC00..=0xD7A3 // Hangul syllables
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFE30..=0xFE4F // CJK compatibility forms
+            | 0xFF00..=0xFF60 // Fullwidth forms
+            | 0xFFE0..=0xFFE6
+            | 0x1F004 | 0x1F0CF
+            | 0x1F18E | 0x1F191..=0x1F19A
+            | 0x1F200..=0x1F320 // Enclosed ideographs, emoji
+            | 0x1F32D..=0x1F335
+            | 0x1F337..=0x1F37C
+            | 0x1F37E..=0x1F393
+            | 0x1F3A0..=0x1F3CA
+            | 0x1F3CF..=0x1F3D3
+            | 0x1F3E0..=0x1F3F0
+            | 0x1F3F4
+            | 0x1F3F8..=0x1F43E
+            | 0x1F440
+            | 0x1F442..=0x1F4FC
+            | 0x1F4FF..=0x1F53D
+            | 0x1F54B..=0x1F54E
+            | 0x1F550..=0x1F567
+            | 0x1F57A
+            | 0x1F595..=0x1F596
+            | 0x1F5A4
+            | 0x1F5FB..=0x1F64F
+            | 0x1F680..=0x1F6C5
+            | 0x1F6CC
+            | 0x1F6D0..=0x1F6D2
+            | 0x1F6EB..=0x1F6EC
+            | 0x1F910..=0x1F93E
+            | 0x1F940..=0x1F970
+            | 0x1F973..=0x1F976
+            | 0x1F97A
+            | 0x1F97C..=0x1F9A2
+            | 0x1F9B0..=0x1F9B9
+            | 0x1F9C0..=0x1F9C2
+            | 0x1F9D0..=0x1F9FF
+            | 0x20024..=0x20042 // Heavy width variants used by logos
+    );
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
+/// Terminal display width of a string, ANSI escapes excluded.
+pub(crate) fn display_width(s: &str) -> usize {
+    strip_ansi_width(s)
+}
+
+/// Pad `s` with spaces to `width` display columns (no-op when already wider).
+/// Format specs like `{:<14}` pad by character count and misalign columns
+/// once CJK text is involved; wizard label columns use this instead.
+pub(crate) fn pad_display(s: &str, width: usize) -> String {
+    let len = display_width(s);
+    if len >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - len))
+    }
 }
 
 /// RAII guard for crossterm raw mode.
@@ -245,5 +499,96 @@ impl Drop for RawMode {
         let mut stdout = io::stdout();
         let _ = execute!(stdout, cursor::Show);
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn release_events_are_ignored() {
+        // Windows reports Press + Release for every keystroke; handling both
+        // would move the cursor twice and let a key-up confirm the next menu.
+        for kind in [KeyEventKind::Release] {
+            let ev = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+            assert_eq!(key_action(&ev, 0, 3), MenuAction::Ignore);
+            let ev = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, kind);
+            assert_eq!(key_action(&ev, 0, 3), MenuAction::Ignore);
+        }
+    }
+
+    #[test]
+    fn arrow_press_moves_once() {
+        assert_eq!(key_action(&key(KeyCode::Down), 0, 3), MenuAction::MoveTo(1));
+        assert_eq!(key_action(&key(KeyCode::Up), 2, 3), MenuAction::MoveTo(1));
+        // Holding a key repeats it; repeats should still navigate.
+        let ev = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(key_action(&ev, 0, 3), MenuAction::MoveTo(1));
+    }
+
+    #[test]
+    fn arrows_clamp_at_edges() {
+        assert_eq!(key_action(&key(KeyCode::Up), 0, 3), MenuAction::MoveTo(0));
+        assert_eq!(key_action(&key(KeyCode::Down), 2, 3), MenuAction::MoveTo(2));
+    }
+
+    #[test]
+    fn enter_confirms_and_esc_uses_default() {
+        assert_eq!(key_action(&key(KeyCode::Enter), 1, 3), MenuAction::Confirm);
+        assert_eq!(key_action(&key(KeyCode::Esc), 1, 3), MenuAction::UseDefault);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(key_action(&ctrl_c, 1, 3), MenuAction::Abort);
+    }
+
+    #[test]
+    fn digits_jump_to_option() {
+        assert_eq!(
+            key_action(&key(KeyCode::Char('2')), 0, 3),
+            MenuAction::MoveTo(1)
+        );
+        assert_eq!(
+            key_action(&key(KeyCode::Char('9')), 0, 3),
+            MenuAction::Ignore
+        );
+        assert_eq!(
+            key_action(&key(KeyCode::Char('0')), 0, 3),
+            MenuAction::Ignore
+        );
+    }
+
+    #[test]
+    fn wide_glyphs_count_two_columns() {
+        assert_eq!(char_width('a'), 1);
+        assert_eq!(char_width('│'), 1);
+        assert_eq!(char_width('中'), 2);
+        assert_eq!(char_width('，'), 2);
+        assert_eq!(char_width('Ａ'), 2);
+        assert_eq!(display_width("中文ab"), 6);
+        assert_eq!(display_width("\x1b[7m中文\x1b[0m"), 4);
+    }
+
+    #[test]
+    fn clip_line_uses_display_width() {
+        // Five ASCII chars fit in five columns; three CJK chars do not.
+        assert_eq!(clip_line("abcde", 5), "abcde");
+        // "中文a" fills all five columns exactly; the trailing "bc" is cut,
+        // so a reset is appended to close any open styling.
+        assert_eq!(clip_line("中文abc", 5), "中文a\x1b[0m");
+        // A wide glyph that would straddle the limit is cut whole.
+        assert_eq!(clip_line("ab中c", 3), "ab\x1b[0m");
+        // ANSI sequences never consume budget.
+        assert_eq!(clip_line("\x1b[7m中文\x1b[0m", 4), "\x1b[7m中文\x1b[0m");
+    }
+
+    #[test]
+    fn pad_display_aligns_mixed_scripts() {
+        assert_eq!(pad_display("中文", 6), "中文  ");
+        assert_eq!(pad_display("abc", 2), "abc");
+        assert_eq!(display_width(&pad_display("中文ab", 10)), 10);
     }
 }

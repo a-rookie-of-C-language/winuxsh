@@ -7,7 +7,6 @@ param(
     [string]$BashShimPath,
     [string]$ShShimPath,
     [string]$OhMyNiubashBundlePath,
-    [string]$GawkZipPath,
     [switch]$SkipOhMyNiubashBundle,
     [switch]$AllowPathWinuxCmd
 )
@@ -190,7 +189,6 @@ try {
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\usr\bin") | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "winuxcmd\usr\local\bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-Null
 
     Copy-Item -LiteralPath $niubashExe -Destination (Join-Path $stageDir "niu.exe") -Force
@@ -200,44 +198,6 @@ try {
     Copy-Item -LiteralPath $bashShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\bash.exe") -Force
     Copy-Item -LiteralPath $shShimExe -Destination (Join-Path $stageDir "winuxcmd\bin\sh.exe") -Force
     Copy-Item -LiteralPath $activationScript -Destination (Join-Path $stageDir "winuxcmd\usr\bin\activate-winuxcmd.sh") -Force
-
-    # Bundle GNU Awk as real binaries under usr\local\bin. `awk` is not a
-    # WinuxCmd built-in -- historically the bundle shipped no awk at all and
-    # users got GoAWK via `wpm install awk`, which silently lacks GNU
-    # extensions like FPAT/IGNORECASE (niubash#123). usr\local\bin precedes
-    # usr\bin on the niubash-injected PATH, `wpm links rebuild` never touches
-    # it, and the files are not wpm-managed, so `wpm install/remove awk`
-    # (which targets usr\bin) cannot strand the system without an awk.
-    if ($GawkZipPath) {
-        if (-not (Test-Path -LiteralPath $GawkZipPath)) {
-            throw "GAWK package not found at $GawkZipPath"
-        }
-        $gawkExtractDir = Join-Path $env:TEMP ("gawk-" + [guid]::NewGuid().ToString("N"))
-        try {
-            Expand-Archive -LiteralPath $GawkZipPath -DestinationPath $gawkExtractDir -Force
-            $gawkBinDir = Join-Path $gawkExtractDir "bin"
-            $gawkFiles = @(
-                "awk.exe", "gawk.exe",
-                "libgmp-10.dll", "libmpfr-6.dll", "libncurses6.dll",
-                "libgcc_s_dw2-1.dll", "libreadline8.dll"
-            )
-            $gawkDestDir = Join-Path $stageDir "winuxcmd\usr\local\bin"
-            foreach ($gawkFile in $gawkFiles) {
-                $gawkSource = Join-Path $gawkBinDir $gawkFile
-                if (-not (Test-Path -LiteralPath $gawkSource)) {
-                    throw "GAWK package is missing bin\${gawkFile}: $GawkZipPath"
-                }
-                Copy-Item -LiteralPath $gawkSource -Destination $gawkDestDir -Force
-            }
-        }
-        finally {
-            Remove-Item -LiteralPath $gawkExtractDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-    else {
-        Write-Warning "No -GawkZipPath given; the bundle's 'awk' will resolve to the WinuxCmd built-in GoAWK (niubash#123)."
-    }
-
     foreach ($iconFile in $iconFiles) {
         Copy-Item -LiteralPath $iconFile -Destination (Join-Path $stageDir "assets") -Force
     }
