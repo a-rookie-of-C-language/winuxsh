@@ -248,11 +248,12 @@ impl Shell {
         }
         let mut executor = Executor::new();
         crate::startup_trace::tick("executor created");
-        // Reedline is the interactive history owner. Keep Rubash's Bash
-        // history machinery disabled in the host shell so HISTFILE cannot
-        // create a second, competing history stream.
-        executor.set_shell_option("history", false);
-        executor.unset_env("HISTFILE");
+        // Script-mode history data plane stays with the engine: set -H,
+        // fc, and the history builtin must behave in scripts exactly as
+        // they do under rubash/GNU (errors10.sub: `history abcde` -> rc 2).
+        // Reedline is the interactive history owner; enter_interactive()
+        // turns the engine's machinery back off on the REPL path so
+        // HISTFILE cannot create a second, competing history stream.
         // Niubash delegates Windows elevation to external providers such as the
         // WPM gsudo package. The experimental Rubash builtin is opt-in only.
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
@@ -291,7 +292,15 @@ impl Shell {
         // script-file, and stdin runs keep the engine default (off).
         // enter_interactive() enables it for the REPL entry points.
         executor.set_shopt_option("expand_aliases", false);
-        executor.set_external_file_builtins_enabled(false);
+        // P1 spawn takeover: leave the engine's external-file builtins (cat,
+        // /bin/cat, mkdir, ...) at the rubash default (enabled) so script
+        // suites under a POSIX PATH (=/usr/bin:/bin) resolve commands through
+        // the engine's own external_command machinery exactly like rubash;
+        // disabling it here used to force every such spawn through the
+        // host command-not-found handler (rc=127).
+        if let Some(root) = &shell_root {
+            executor.set_shell_root(root);
+        }
         if let Some(root) = &shell_root {
             executor.set_shell_root(root);
         }
@@ -659,6 +668,11 @@ impl Shell {
         // user shopt line. Non-interactive entry points never call
         // this, keeping the GNU off default for scripts and -c.
         self.executor.set_shopt_option("expand_aliases", true);
+        // Reedline owns interactive history (see the construction-site note):
+        // disable the engine's Bash history machinery only on the REPL path
+        // so HISTFILE cannot create a second, competing history stream.
+        self.executor.set_shell_option("history", false);
+        self.executor.unset_env("HISTFILE");
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -2578,7 +2592,19 @@ impl Shell {
             return Ok(0);
         }
 
-        self.disable_rubash_history_storage();
+        // P2: keep the engine's history data plane active for scripts so
+        // `set -H`/`set -o history`, fc, and the history builtin behave as
+        // under rubash/GNU. The interactive path still disables it in
+        // enter_interactive() (reedline owns REPL history).
+        //
+        // SINKING LIST (engine PR required): scripts that turn history
+        // expansion on (histexp.tests `set -H`) additionally need the
+        // engine's GNU line-group reader (script_driver.rs
+        // run_script_with_history, per-group `!!`/`!str` expansion and
+        // recording). That module is not in rubash's public API at the
+        // pinned dependency (3aa37b3d); once published, this host must
+        // route scripts matching script_uses_history/script_uses_aliases
+        // through it exactly like rubash's main.rs:774.
         let script = normalize_native_windows_path_literals(script);
         let mut tokens = tokenize(&script);
         if tokens.is_empty() {
@@ -2942,8 +2968,104 @@ fn execute_niubash_host_external_command(
         return None;
     }
 
+    // P1 spawn takeover: the engine invokes this handler BEFORE its own
+    // find_user_command PATH scan (external_inner.rs execute_external_inner).
+    // When the engine can still resolve the name (POSIX absolute forms like
+    // /bin/cat, shell-PATH entries backed by the shell root, or
+    // dispatcher-owned WinuxCmd commands), we must fall through so the
+    // engine performs the spawn; emitting the 127 surface here would shadow
+    // a command the engine can run (GNU findcmd.c: search_for_command
+    // decides not-found, not a host pre-filter).
+    if engine_can_resolve_external(command, env) {
+        if std::env::var("NIU_DEBUG_SPAWN").as_deref() == Ok("1") {
+            eprintln!("[niu-debug] fall-through engine resolve: {command:?}");
+        }
+        return None;
+    }
+    if std::env::var("NIU_DEBUG_SPAWN").as_deref() == Ok("1") {
+        eprintln!("[niu-debug] handler 127 for {command:?}");
+    }
+
     command_not_found_host_external_output(command, args, env, plugins)
 }
+
+/// Mirror of the engine's `find_user_command` (executor/path.rs) admission
+/// test, built only from public rubash APIs. Conservative: returns true when
+/// uncertain so the engine keeps the final word.
+fn engine_can_resolve_external(command: &str, env: &HashMap<String, String>) -> bool {
+    // Path-containing names go through the engine's absolute-resolution path
+    // (shell_path_to_windows + WinuxCmd absolute mapping); it owns the
+    // verdict, so never preempt.
+    if command.contains('/') || command.contains('\\') {
+        return true;
+    }
+
+    // Bare names: scan the shell PATH with the engine's own entry mapping.
+    if let Some(path) = env.get("PATH") {
+        for entry in split_shell_path_list(path) {
+            for dir in Executor::resolve_shell_path_process_entries_from_env(&entry, env) {
+                let base = dir.join(command);
+                if base.is_file() {
+                    return true;
+                }
+                for ext in executable_extension_candidates(env) {
+                    if base.with_extension(&ext).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // The engine may resolve bare names through the single WinuxCmd
+    // dispatcher executable (find_winuxcmd_dispatcher + winuxcmd_has_command);
+    // dispatcher-owned names must fall through to it.
+    winuxcmd_dispatcher_commands().contains(&command.to_string())
+        // ...or through its emulated external-file builtins
+        // (executor/external_file_builtins.rs), which run before
+        // find_user_command in execute_external_inner.
+        || matches!(
+            command,
+            "pwd" | "printf" | "mkdir" | "touch" | "chmod" | "cp" | "rm" | "rmdir" | "cat"
+                | "sed" | "mkfifo" | "tty"
+        )
+}
+
+/// Executable extensions the engine probes (path.rs executable_extensions):
+/// PATHEXT first, then the default Windows set plus ps1.
+fn executable_extension_candidates(env: &HashMap<String, String>) -> Vec<String> {
+    let pathext_from_env = std::env::var("PATHEXT").ok();
+    let mut exts: Vec<String> = env
+        .get("PATHEXT")
+        .or(pathext_from_env.as_ref())
+        .map(|value| {
+            value
+                .split(';')
+                .filter_map(|ext| {
+                    ext.trim()
+                        .trim_start_matches('.')
+                        .split_whitespace()
+                        .next()
+                })
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!(".{}", ext.to_ascii_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for ext in [".exe", ".com", ".bat", ".cmd", ".ps1"] {
+        if !exts.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)) {
+            exts.push(ext.to_string());
+        }
+    }
+    exts
+}
+
+/// Dispatcher-owned command names, resolved once per process.
+fn winuxcmd_dispatcher_commands() -> &'static Vec<String> {
+    static COMMANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(crate::winuxcmd::list_commands)
+}
+
 
 fn command_not_found_host_external_output(
     command: &str,
