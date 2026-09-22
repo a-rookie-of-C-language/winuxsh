@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reedline::Reedline;
 use rubash::{
+    decode_to_visible_text,
     executor::{Executor, HostExternalCommandOutput},
     lexer::tokenize,
     parser::parse,
@@ -247,11 +248,12 @@ impl Shell {
         }
         let mut executor = Executor::new();
         crate::startup_trace::tick("executor created");
-        // Reedline is the interactive history owner. Keep Rubash's Bash
-        // history machinery disabled in the host shell so HISTFILE cannot
-        // create a second, competing history stream.
-        executor.set_shell_option("history", false);
-        executor.unset_env("HISTFILE");
+        // Script-mode history data plane stays with the engine: set -H,
+        // fc, and the history builtin must behave in scripts exactly as
+        // they do under rubash/GNU (errors10.sub: `history abcde` -> rc 2).
+        // Reedline is the interactive history owner; enter_interactive()
+        // turns the engine's machinery back off on the REPL path so
+        // HISTFILE cannot create a second, competing history stream.
         // Niubash delegates Windows elevation to external providers such as the
         // WPM gsudo package. The experimental Rubash builtin is opt-in only.
         if std::env::var("NIU_ENABLE_RUBASH_SUDO").as_deref() != Ok("1") {
@@ -285,10 +287,20 @@ impl Shell {
         if let Ok(exe) = std::env::current_exe() {
             executor.export_env("BASH", &exe.to_string_lossy().replace('\\', "/"));
         }
-        // Niubash always presents an interactive shell, so aliases loaded
-        // from ~/.niubashrc must expand without requiring a user shopt line.
-        executor.set_shopt_option("expand_aliases", true);
-        executor.set_external_file_builtins_enabled(false);
+        // GNU bash defaults expand_aliases on only for interactive shells
+        // (shell.c init_interactive()/init_interactive_script()); -c,
+        // script-file, and stdin runs keep the engine default (off).
+        // enter_interactive() enables it for the REPL entry points.
+        executor.set_shopt_option("expand_aliases", false);
+        // P1 spawn takeover: leave the engine's external-file builtins (cat,
+        // /bin/cat, mkdir, ...) at the rubash default (enabled) so script
+        // suites under a POSIX PATH (=/usr/bin:/bin) resolve commands through
+        // the engine's own external_command machinery exactly like rubash;
+        // disabling it here used to force every such spawn through the
+        // host command-not-found handler (rc=127).
+        if let Some(root) = &shell_root {
+            executor.set_shell_root(root);
+        }
         if let Some(root) = &shell_root {
             executor.set_shell_root(root);
         }
@@ -323,13 +335,17 @@ impl Shell {
             }
         }
 
-        // Official Niubash builtin alias packs. Managed aliases take
-        // precedence, and canonical plugin state gates each pack.
+        // P4: the builtin alias packs (git/docker/kubectl/npm conveniences)
+        // are NOT applied here. They must not leak into non-interactive
+        // runs, where GNU bash scripts would observe them through
+        // BASH_ALIASES (assoc.tests). enter_interactive() installs them on
+        // the REPL path only. User-INSTALLED plugin bundles do apply here:
+        // they are explicit user state, like config aliases.
         for pack_name in ["git", "docker", "kubectl", "npm"] {
             if !plugin_state.is_enabled(pack_name) {
                 continue;
             }
-            let Some(pack_aliases) = crate::plugins::plugin_aliases(pack_name) else {
+            let Some(pack_aliases) = crate::plugins::installed_bundle_aliases(pack_name) else {
                 continue;
             };
             for (name, value) in pack_aliases {
@@ -342,7 +358,7 @@ impl Shell {
             }
         }
 
-        crate::startup_trace::tick("aliases + builtin packs");
+        crate::startup_trace::tick("aliases");
 
         // 6. Prompt + theme. Choose backend based on `prompt_style`:
         //    "segments"  -> new p10k-style segment engine
@@ -567,7 +583,7 @@ impl Shell {
             return None;
         }
 
-        let script_name = cmd.words[1].clone();
+        let script_name = decode_to_visible_text(&cmd.words[1]);
         let script_path = self.executor.resolve_shell_path(&script_name);
         if !script_path.is_file() {
             return None;
@@ -576,7 +592,7 @@ impl Shell {
         Some(StdinCurrentShellChild {
             script_name,
             script_path,
-            positional_params: cmd.words[1..].to_vec(),
+            positional_params: decoded_words(&cmd.words[1..]),
         })
     }
 
@@ -642,11 +658,46 @@ impl Shell {
     /// Mark this shell as interactive.
     ///
     /// Two consequences: easter eggs become routable, and rubash diagnostics
-    /// are prefixed with `niu` instead of the fallback engine name, which is
-    /// what bash does for errors at an interactive prompt.
+    /// are prefixed with the shell name (niu) without a line segment, which
+    /// is what bash does for errors at an interactive prompt (GNU error.c
+    /// report_prolog: interactive shells print only get_name_for_error()).
+    /// The name goes to __RUBASH_SHELL_NAME — NOT __RUBASH_SCRIPT_NAME,
+    /// which owns the script-path/$0 slot; polluting it here used to make
+    /// interactive diagnostics read "niu: line 1: ..." like a -c run.
     pub fn enter_interactive(&mut self) {
         self.interactive = true;
-        self.set_script_name("niu");
+        self.executor.set_env("__RUBASH_SHELL_NAME", "niu");
+        // GNU init_interactive (shell.c): interactive shells default
+        // expand_aliases on so ~/.niubashrc aliases expand without a
+        // user shopt line. Non-interactive entry points never call
+        // this, keeping the GNU off default for scripts and -c.
+        self.executor.set_shopt_option("expand_aliases", true);
+        // Reedline owns interactive history (see the construction-site note):
+        // disable the engine's Bash history machinery only on the REPL path
+        // so HISTFILE cannot create a second, competing history stream.
+        self.executor.set_shell_option("history", false);
+        self.executor.unset_env("HISTFILE");
+        // P4: install the builtin alias packs here (interactive only). GNU
+        // alias tables in a script run must stay product-clean, and
+        // BASH_ALIASES must not observe the git/docker/kubectl/npm
+        // conveniences outside the REPL.
+        let plugin_state = self.plugins.clone();
+        for pack_name in ["git", "docker", "kubectl", "npm"] {
+            if !plugin_state.is_enabled(pack_name) {
+                continue;
+            }
+            let Some(pack_aliases) = crate::plugins::plugin_aliases(pack_name) else {
+                continue;
+            };
+            for (name, value) in pack_aliases {
+                if self.aliases.contains_key(&name) {
+                    continue;
+                }
+                if apply_alias(&mut self.executor, &name, &value) {
+                    self.aliases.insert(name, value);
+                }
+            }
+        }
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -656,14 +707,14 @@ impl Shell {
         if !self.interactive || commands.len() != 1 {
             return None;
         }
-        let words = &commands[0].words;
+        let words = decoded_words(&commands[0].words);
         let Some(head) = words.first() else {
             return None;
         };
         if !crate::easter_eggs::is_registered(head) {
             return None;
         }
-        crate::easter_eggs::dispatch(true, words).ok().flatten()
+        crate::easter_eggs::dispatch(true, &words).ok().flatten()
     }
 
     /// Execute a single input line via rubash. Returns the exit code.
@@ -681,8 +732,7 @@ impl Shell {
             return Ok(0);
         }
 
-        let line =
-            protect_parameter_pattern_removal_equals(&normalize_native_windows_path_literals(line));
+        let line = normalize_native_windows_path_literals(line);
         let mut tokens = tokenize(&line);
         if tokens.is_empty() {
             return Ok(0);
@@ -695,11 +745,9 @@ impl Shell {
 
         // parse() returns Ast directly (not Result) in rubash.
         let mut ast = parse(&tokens);
-        normalize_parameter_pattern_operator_order(&mut ast);
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
 
         let mut printed_command_not_found_hints = false;
         let code = if self.native_plugin_enabled("zoxide")
@@ -709,7 +757,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "z")
         {
-            self.execute_native_zoxide(&ast.commands[0].words[1..])?
+            self.execute_native_zoxide(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_plugin_enabled("thefuck")
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -717,7 +765,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "fuck")
         {
-            self.execute_native_thefuck(&ast.commands[0].words[1..])?
+            self.execute_native_thefuck(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_selector_enabled()
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -725,7 +773,7 @@ impl Shell {
                 .first()
                 .is_some_and(|command| command == "cdf" || command == "fzf-cd")
         {
-            self.execute_native_fzf_cd(&ast.commands[0].words[1..])?
+            self.execute_native_fzf_cd(&decoded_words(&ast.commands[0].words[1..]))?
         } else if self.native_plugin_enabled("last-working-dir")
             && ast.commands.len() == 1
             && ast.commands[0]
@@ -811,7 +859,6 @@ impl Shell {
         let code = self.execute_line_with_options(line, true)?;
         self.run_postcmd_hooks(code);
         self.run_zshaddhistory_hooks(line);
-        self.sync_alias_mirror_from_line(line, code);
         self.remember_interactive_command(line, code);
         let new_pwd = self.executor.get_env("PWD").map(str::to_owned);
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
@@ -827,7 +874,6 @@ impl Shell {
         let old_pwd = self.executor.get_env("PWD").map(str::to_owned);
         self.run_preexec_hooks(script);
         let code = self.execute_script_with_options(script, true)?;
-        self.sync_alias_mirror_from_line(script, code);
         self.remember_interactive_command(script, code);
         let new_pwd = self.executor.get_env("PWD").map(str::to_owned);
         if let (Some(old_pwd), Some(new_pwd)) = (old_pwd, new_pwd) {
@@ -901,7 +947,7 @@ impl Shell {
             self.sync_prompt_from_plugin_env();
             return;
         };
-        let Ok(script) = std::fs::read_to_string(&path) else {
+        let Ok(_script) = std::fs::read_to_string(&path) else {
             self.sync_prompt_from_plugin_env();
             return;
         };
@@ -912,7 +958,6 @@ impl Shell {
                 if code != 0 {
                     log::warn!("{} exited with status {}", path.display(), code);
                 }
-                self.sync_alias_mirror_from_script(&script, code);
             }
             Err(err) => log::warn!("{} failed: {}", path.display(), err),
         }
@@ -1229,21 +1274,43 @@ impl Shell {
         self.run_source_plugin_scripts_for_hook("startup", &context);
     }
 
+    /// Source-pack dispatch re-sources each plugin entry file on every hook
+    /// event, so the file's top-level `niubash_add_*_hook` registration calls
+    /// run each time. Those functions come from the bundle's `lib/hooks.niu`,
+    /// which is normally pulled in by `oh-my-niu.niu` — in rc-less or custom
+    /// shells that entry point never ran and every dispatch spammed
+    /// "command not found" (and registered hooks could never run anyway).
+    /// Load the registry once per shell; fall back to the same no-op stubs
+    /// oh-my-niu.niu installs for bundles that ship no hooks lib.
+    fn ensure_source_plugin_hook_registry(&mut self, bundle_root: &Path) {
+        if self.framework_hook_defined("niubash_add_precmd_hook") {
+            return;
+        }
+        let hooks_lib = bundle_root.join("lib").join("hooks.niu");
+        let loaded = hooks_lib.is_file()
+            && self
+                .source_file_into_current_shell(&hooks_lib)
+                .map(|code| code == 0)
+                .unwrap_or(false);
+        if !loaded {
+            let _ = self.execute_script(
+                "for __niu_h in startup precmd preexec postcmd chpwd period \
+                 zshaddhistory zshexit greeting title trapdebug traperr trapint \
+                 trapwinch trapusr1 trapusr2 trappipe trapterm trapchld trapzerr; do \
+                 eval \"niubash_add_${__niu_h}_hook() { :; }; \
+                 niubash_run_${__niu_h}_hooks() { :; }\"; done; unset __niu_h",
+            );
+        }
+        self.framework_hook_probes
+            .insert("niubash_add_precmd_hook".to_string(), true);
+    }
+
     fn run_source_plugin_scripts_for_hook(&mut self, hook_name: &str, context: &[(&str, String)]) {
-        for source in crate::plugins::source_plugin_scripts_for_hook(&self.plugins, hook_name) {
-            let script = match std::fs::read_to_string(&source.path) {
-                Ok(script) => script,
-                Err(err) => {
-                    log::warn!(
-                        "source plugin '{}' hook '{}' failed to read {}: {}",
-                        source.pack,
-                        hook_name,
-                        source.path.display(),
-                        err
-                    );
-                    continue;
-                }
-            };
+        let sources = crate::plugins::source_plugin_scripts_for_hook(&self.plugins, hook_name);
+        if let Some(first) = sources.first() {
+            self.ensure_source_plugin_hook_registry(&first.bundle_root.clone());
+        }
+        for source in sources {
             let plugin_dir = source
                 .path
                 .parent()
@@ -1270,7 +1337,6 @@ impl Shell {
                             code
                         );
                     }
-                    self.sync_alias_mirror_from_script(&script, code);
                 }
                 Err(err) => log::warn!(
                     "source plugin '{}' hook '{}' failed from {}: {}",
@@ -1849,7 +1915,11 @@ impl Shell {
         let Some((pack_name, process)) = self.process_plugin_for_command(command_name) else {
             return Ok(None);
         };
-        let code = self.run_process_plugin_command(&pack_name, &process, &command.words[1..])?;
+        let code = self.run_process_plugin_command(
+            &pack_name,
+            &process,
+            &decoded_words(&command.words[1..]),
+        )?;
         Ok(Some(code))
     }
 
@@ -2320,11 +2390,12 @@ impl Shell {
         let Some(command) = single_command_word(ast) else {
             return;
         };
-        if resolve_native_command_path(command).is_some() {
+        let command = decode_to_visible_text(command);
+        if resolve_native_command_path(&command).is_some() {
             return;
         }
 
-        self.print_command_not_found_hints(command);
+        self.print_command_not_found_hints(&command);
     }
 
     fn print_command_not_found_hints(&self, command: &str) {
@@ -2364,84 +2435,6 @@ impl Shell {
 
     fn sync_alias_mirror_from_executor(&mut self) {
         self.aliases = self.executor.aliases_snapshot();
-    }
-    fn sync_alias_mirror_from_line(&mut self, line: &str, code: i32) {
-        if code != 0 {
-            return;
-        }
-
-        let line =
-            protect_parameter_pattern_removal_equals(&normalize_native_windows_path_literals(line));
-        let tokens = tokenize(&line);
-        if tokens.is_empty() {
-            return;
-        }
-
-        let mut ast = parse(&tokens);
-        normalize_parameter_pattern_operator_order(&mut ast);
-        normalize_bare_windows_drive_commands(&mut ast);
-        normalize_cd_windows_drive_args(&mut ast);
-        normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
-        if ast.commands.len() != 1 {
-            return;
-        }
-
-        let mut words = ast.commands[0].words.as_slice();
-        if words.first().is_some_and(|word| word == "builtin") {
-            words = &words[1..];
-        }
-
-        match words.first().map(String::as_str) {
-            Some("alias") => self.sync_alias_assignments(&words[1..]),
-            Some("unalias") => self.sync_unalias_arguments(&words[1..]),
-            _ => {}
-        }
-    }
-
-    fn sync_alias_mirror_from_script(&mut self, script: &str, code: i32) {
-        if code != 0 {
-            return;
-        }
-        for line in script.lines() {
-            self.sync_alias_mirror_from_line(line, code);
-        }
-    }
-
-    fn sync_alias_assignments(&mut self, args: &[String]) {
-        for arg in args {
-            if arg == "-p" || arg == "--" {
-                continue;
-            }
-            let Some((name, value)) = arg.split_once('=') else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            self.aliases.insert(
-                name.to_string(),
-                strip_rubash_alias_quote_marker(value).to_string(),
-            );
-        }
-    }
-
-    fn sync_unalias_arguments(&mut self, args: &[String]) {
-        let mut allow_options = true;
-        for arg in args {
-            if allow_options && arg == "--" {
-                allow_options = false;
-                continue;
-            }
-            if allow_options && arg == "-a" {
-                self.aliases.clear();
-                continue;
-            }
-            if allow_options && arg.starts_with('-') {
-                continue;
-            }
-            self.aliases.remove(arg);
-        }
     }
 
     fn remember_interactive_command(&mut self, line: &str, code: i32) {
@@ -2624,10 +2617,20 @@ impl Shell {
             return Ok(0);
         }
 
-        self.disable_rubash_history_storage();
-        let script = protect_parameter_pattern_removal_equals(
-            &normalize_native_windows_path_literals(script),
-        );
+        // P2: keep the engine's history data plane active for scripts so
+        // `set -H`/`set -o history`, fc, and the history builtin behave as
+        // under rubash/GNU. The interactive path still disables it in
+        // enter_interactive() (reedline owns REPL history).
+        //
+        // SINKING LIST (engine PR required): scripts that turn history
+        // expansion on (histexp.tests `set -H`) additionally need the
+        // engine's GNU line-group reader (script_driver.rs
+        // run_script_with_history, per-group `!!`/`!str` expansion and
+        // recording). That module is not in rubash's public API at the
+        // pinned dependency (3aa37b3d); once published, this host must
+        // route scripts matching script_uses_history/script_uses_aliases
+        // through it exactly like rubash's main.rs:774.
+        let script = normalize_native_windows_path_literals(script);
         let mut tokens = tokenize(&script);
         if tokens.is_empty() {
             return Ok(0);
@@ -2635,19 +2638,15 @@ impl Shell {
         rewrite_winuxcmd_command_shims(&mut tokens, interactive_terminal_colors);
 
         let mut ast = parse(&tokens);
-        normalize_parameter_pattern_operator_order(&mut ast);
         normalize_bare_windows_drive_commands(&mut ast);
         normalize_cd_windows_drive_args(&mut ast);
         normalize_winuxcmd_slash_drive_args(&mut ast);
-        rewrite_virtual_root_args(&mut ast, self.shell_root.as_deref());
         self.inject_process_stdin_for_rewritten_pipeline(&mut ast)?;
 
         let execution = if let Some(exit) = self.easter_egg_exit(&ast.commands) {
             Ok(exit)
         } else if let Some(code) = self.execute_process_plugin_simple_ast(&ast)? {
             Ok(code)
-        } else if let Some(execution) = self.execute_parameter_pattern_assignment_simple_ast(&ast) {
-            execution
         } else {
             self.execute_host_synced_simple_ast(&ast)
                 .unwrap_or_else(|| match self.executor.execute_ast(&ast) {
@@ -2728,127 +2727,6 @@ impl Shell {
 
         Some(Ok(self.executor.last_exit_code()))
     }
-
-    fn execute_parameter_pattern_assignment_simple_ast(
-        &mut self,
-        ast: &Ast,
-    ) -> Option<Result<i32, rubash::executor::ExecuteError>> {
-        if !ast
-            .commands
-            .iter()
-            .any(is_parameter_pattern_assignment_command)
-        {
-            return None;
-        }
-        if !ast.commands.iter().all(is_plain_simple_command) {
-            return None;
-        }
-
-        for command in &ast.commands {
-            if let Some((name, value)) = self.parameter_pattern_assignment(command) {
-                self.executor.set_env(&name, &value);
-                self.executor.set_last_exit_code(0);
-                continue;
-            }
-            let rewritten_command = self.rewrite_parameter_pattern_words(command);
-            let command = rewritten_command.as_ref().unwrap_or(command);
-            match self.executor.execute_command(command) {
-                Ok(()) => {}
-                Err(rubash::executor::ExecuteError::ExitCode(code)) => return Some(Ok(code)),
-                Err(rubash::executor::ExecuteError::Return(code)) => return Some(Ok(code)),
-                Err(err) => return Some(Err(err)),
-            }
-        }
-
-        Some(Ok(self.executor.last_exit_code()))
-    }
-
-    fn parameter_pattern_assignment(
-        &self,
-        command: &rubash::parser::CommandNode,
-    ) -> Option<(String, String)> {
-        let [(assignment_name, assignment_value)] = command.assignments.as_slice() else {
-            return None;
-        };
-        if !command.words.is_empty()
-            || command_has_redirects(command)
-            || !command.compound_assignments.is_empty()
-            || !command.array_element_assignments.is_empty()
-        {
-            return None;
-        }
-        if !is_simple_shell_name(assignment_name) {
-            return None;
-        }
-
-        let [expansion] = command.parameter_expansions.as_slice() else {
-            return None;
-        };
-        if expansion.assignment_name.as_deref() != Some(assignment_name)
-            || expansion.text != *assignment_value
-        {
-            return None;
-        }
-
-        let value = self.parameter_pattern_expansion_value(expansion)?;
-        Some((assignment_name.clone(), value))
-    }
-
-    fn rewrite_parameter_pattern_words(
-        &self,
-        command: &rubash::parser::CommandNode,
-    ) -> Option<rubash::parser::CommandNode> {
-        if command.parameter_expansions.is_empty() {
-            return None;
-        }
-
-        let mut rewritten = command.clone();
-        let mut changed = false;
-        for expansion in &command.parameter_expansions {
-            if expansion.assignment_name.is_some() {
-                return None;
-            }
-            let word_index = expansion.word_index?;
-            let word = command.words.get(word_index)?;
-            let whole_word = word.strip_prefix('\x1d').unwrap_or(word);
-            if whole_word != expansion.text {
-                return None;
-            }
-            let value = self.parameter_pattern_expansion_value(expansion)?;
-            rewritten.words[word_index] = value.clone();
-            if let Some(metadata) = rewritten.word_metadata.get_mut(word_index) {
-                *metadata = rubash::parser::WordMetadata::literal(word_index, value.clone(), value);
-            }
-            changed = true;
-        }
-
-        if changed {
-            rewritten.parameter_expansions.clear();
-            Some(rewritten)
-        } else {
-            None
-        }
-    }
-
-    fn parameter_pattern_expansion_value(
-        &self,
-        expansion: &rubash::parser::ParameterExpansion,
-    ) -> Option<String> {
-        let operator = expansion.operator.as_deref()?;
-        if !matches!(operator, "#" | "##" | "%" | "%%") {
-            return None;
-        }
-        let var_name = expansion.name.as_str();
-        if !is_simple_shell_name(var_name) {
-            return None;
-        }
-        let pattern = decode_simple_parameter_pattern(expansion.word.as_deref()?);
-        if pattern.contains(['$', '`', '[', ']']) {
-            return None;
-        }
-        let value = self.executor.get_env(var_name).unwrap_or_default();
-        remove_simple_parameter_pattern(&value, &pattern, operator)
-    }
 }
 
 fn restore_executor_env(executor: &mut Executor, name: &str, value: Option<String>) {
@@ -2866,218 +2744,6 @@ fn same_shell_dir(left: &str, right: &str) -> bool {
     } else {
         left == right
     }
-}
-
-fn normalize_parameter_pattern_operator_order(ast: &mut Ast) {
-    for command in &mut ast.commands {
-        normalize_command_parameter_pattern_operator_order(command);
-    }
-}
-
-fn normalize_command_parameter_pattern_operator_order(command: &mut rubash::parser::CommandNode) {
-    normalize_parameter_expansions_operator_order(&mut command.parameter_expansions);
-    for metadata in &mut command.word_metadata {
-        normalize_parameter_expansions_operator_order(&mut metadata.parameter_expansions);
-    }
-
-    if let Some(and_or_list) = &mut command.and_or_list {
-        for command in &mut and_or_list.commands {
-            normalize_command_parameter_pattern_operator_order(command);
-        }
-    }
-}
-
-fn normalize_parameter_expansions_operator_order(
-    expansions: &mut [rubash::parser::ParameterExpansion],
-) {
-    for expansion in expansions {
-        let Some((operator_index, operator)) =
-            leading_pattern_removal_operator(&expansion.parameter)
-        else {
-            continue;
-        };
-        let current_operator_index = expansion.name.len();
-        if matches!(expansion.operator.as_deref(), Some("#" | "##" | "%" | "%%"))
-            && current_operator_index == operator_index
-        {
-            continue;
-        }
-        if current_operator_index <= operator_index {
-            continue;
-        }
-
-        expansion.name = expansion.parameter[..operator_index].to_string();
-        expansion.operator = Some(operator.to_string());
-        expansion.operator_prefix = false;
-        expansion.word = Some(expansion.parameter[operator_index + operator.len()..].to_string());
-    }
-}
-
-fn leading_pattern_removal_operator(parameter: &str) -> Option<(usize, &'static str)> {
-    let chars: Vec<(usize, char)> = parameter.char_indices().collect();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    let mut brace_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-
-    for (position, &(byte_index, ch)) in chars.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            continue;
-        }
-
-        match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '$' if !single
-                && chars
-                    .get(position + 1)
-                    .is_some_and(|(_, next)| *next == '{') =>
-            {
-                brace_depth += 1;
-            }
-            '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
-            '(' if !single && !double => paren_depth += 1,
-            ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
-            '[' if !single && !double => bracket_depth += 1,
-            ']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
-            '#' | '%'
-                if byte_index > 0
-                    && !single
-                    && !double
-                    && brace_depth == 0
-                    && paren_depth == 0
-                    && bracket_depth == 0 =>
-            {
-                let operator = if chars.get(position + 1).is_some_and(|(_, next)| *next == ch) {
-                    if ch == '#' {
-                        "##"
-                    } else {
-                        "%%"
-                    }
-                } else if ch == '#' {
-                    "#"
-                } else {
-                    "%"
-                };
-                return Some((byte_index, operator));
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn is_parameter_pattern_assignment_command(command: &rubash::parser::CommandNode) -> bool {
-    let [_] = command.assignments.as_slice() else {
-        return false;
-    };
-    command.words.is_empty()
-        && !command_has_redirects(command)
-        && command.compound_assignments.is_empty()
-        && command.array_element_assignments.is_empty()
-        && matches!(command.parameter_expansions.as_slice(), [_])
-}
-
-fn is_simple_shell_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn decode_simple_parameter_pattern(pattern: &str) -> String {
-    let mut output = String::with_capacity(pattern.len());
-    let mut chars = pattern.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                output.push(next);
-            } else {
-                output.push(ch);
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
-}
-
-fn remove_simple_parameter_pattern(value: &str, pattern: &str, operator: &str) -> Option<String> {
-    match operator {
-        "#" => find_prefix_pattern_end(value, pattern, false)
-            .map(|end| value[end..].to_string())
-            .or_else(|| Some(value.to_string())),
-        "##" => find_prefix_pattern_end(value, pattern, true)
-            .map(|end| value[end..].to_string())
-            .or_else(|| Some(value.to_string())),
-        "%" => find_suffix_pattern_start(value, pattern, false)
-            .map(|start| value[..start].to_string())
-            .or_else(|| Some(value.to_string())),
-        "%%" => find_suffix_pattern_start(value, pattern, true)
-            .map(|start| value[..start].to_string())
-            .or_else(|| Some(value.to_string())),
-        _ => None,
-    }
-}
-
-fn find_prefix_pattern_end(value: &str, pattern: &str, longest: bool) -> Option<usize> {
-    let mut boundaries = value
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(value.len()))
-        .collect::<Vec<_>>();
-    if longest {
-        boundaries.reverse();
-    }
-    boundaries
-        .into_iter()
-        .find(|end| simple_glob_matches(pattern, &value[..*end]))
-}
-
-fn find_suffix_pattern_start(value: &str, pattern: &str, longest: bool) -> Option<usize> {
-    let mut boundaries = value
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(value.len()))
-        .collect::<Vec<_>>();
-    if !longest {
-        boundaries.reverse();
-    }
-    boundaries
-        .into_iter()
-        .find(|start| simple_glob_matches(pattern, &value[*start..]))
-}
-
-fn simple_glob_matches(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.chars().collect::<Vec<_>>();
-    let text = text.chars().collect::<Vec<_>>();
-    let mut matches = vec![vec![false; text.len() + 1]; pattern.len() + 1];
-    matches[0][0] = true;
-
-    for p in 0..pattern.len() {
-        if pattern[p] == '*' {
-            matches[p + 1][0] = matches[p][0];
-        }
-        for t in 0..text.len() {
-            matches[p + 1][t + 1] = match pattern[p] {
-                '*' => matches[p][t + 1] || matches[p + 1][t],
-                '?' => matches[p][t],
-                ch => matches[p][t] && ch == text[t],
-            };
-        }
-    }
-
-    matches[pattern.len()][text.len()]
 }
 
 fn normalize_cd_windows_drive_args(ast: &mut Ast) {
@@ -3327,8 +2993,98 @@ fn execute_niubash_host_external_command(
         return None;
     }
 
+    // P1 spawn takeover: the engine invokes this handler BEFORE its own
+    // find_user_command PATH scan (external_inner.rs execute_external_inner).
+    // When the engine can still resolve the name (POSIX absolute forms like
+    // /bin/cat, shell-PATH entries backed by the shell root, or
+    // dispatcher-owned WinuxCmd commands), we must fall through so the
+    // engine performs the spawn; emitting the 127 surface here would shadow
+    // a command the engine can run (GNU findcmd.c: search_for_command
+    // decides not-found, not a host pre-filter).
+    if engine_can_resolve_external(command, env) {
+        return None;
+    }
+
     command_not_found_host_external_output(command, args, env, plugins)
 }
+
+/// Mirror of the engine's `find_user_command` (executor/path.rs) admission
+/// test, built only from public rubash APIs. Conservative: returns true when
+/// uncertain so the engine keeps the final word.
+fn engine_can_resolve_external(command: &str, env: &HashMap<String, String>) -> bool {
+    // Path-containing names go through the engine's absolute-resolution path
+    // (shell_path_to_windows + WinuxCmd absolute mapping); it owns the
+    // verdict, so never preempt.
+    if command.contains('/') || command.contains('\\') {
+        return true;
+    }
+
+    // Bare names: scan the shell PATH with the engine's own entry mapping.
+    if let Some(path) = env.get("PATH") {
+        for entry in split_shell_path_list(path) {
+            for dir in Executor::resolve_shell_path_process_entries_from_env(&entry, env) {
+                let base = dir.join(command);
+                if base.is_file() {
+                    return true;
+                }
+                for ext in executable_extension_candidates(env) {
+                    if base.with_extension(&ext).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // The engine may resolve bare names through the single WinuxCmd
+    // dispatcher executable (find_winuxcmd_dispatcher + winuxcmd_has_command);
+    // dispatcher-owned names must fall through to it.
+    winuxcmd_dispatcher_commands().contains(&command.to_string())
+        // ...or through its emulated external-file builtins
+        // (executor/external_file_builtins.rs), which run before
+        // find_user_command in execute_external_inner.
+        || matches!(
+            command,
+            "pwd" | "printf" | "mkdir" | "touch" | "chmod" | "cp" | "rm" | "rmdir" | "cat"
+                | "sed" | "mkfifo" | "tty"
+        )
+}
+
+/// Executable extensions the engine probes (path.rs executable_extensions):
+/// PATHEXT first, then the default Windows set plus ps1.
+fn executable_extension_candidates(env: &HashMap<String, String>) -> Vec<String> {
+    let pathext_from_env = std::env::var("PATHEXT").ok();
+    let mut exts: Vec<String> = env
+        .get("PATHEXT")
+        .or(pathext_from_env.as_ref())
+        .map(|value| {
+            value
+                .split(';')
+                .filter_map(|ext| {
+                    ext.trim()
+                        .trim_start_matches('.')
+                        .split_whitespace()
+                        .next()
+                })
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!(".{}", ext.to_ascii_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for ext in [".exe", ".com", ".bat", ".cmd", ".ps1"] {
+        if !exts.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)) {
+            exts.push(ext.to_string());
+        }
+    }
+    exts
+}
+
+/// Dispatcher-owned command names, resolved once per process.
+fn winuxcmd_dispatcher_commands() -> &'static Vec<String> {
+    static COMMANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    COMMANDS.get_or_init(crate::winuxcmd::list_commands)
+}
+
 
 fn command_not_found_host_external_output(
     command: &str,
@@ -3537,14 +3293,6 @@ fn rewrite_winuxcmd_command_shims_in_stage(
         return;
     };
 
-    // Rubash keeps quoted glob-like characters behind an internal marker until
-    // execution. Niubash rewrites the AST before Rubash executes it, so restore
-    // those literals at this external-command boundary.
-    for token in &mut tokens[start..end] {
-        token.value = token.value.replace('\x11', "");
-        token.raw = token.raw.replace('\x11', "");
-    }
-
     match winuxcmd_command_shim(&tokens[command_index]) {
         Some(WinuxCmdShim::Exe { target }) => {
             tokens[command_index].value = target.to_string();
@@ -3566,6 +3314,18 @@ fn rewrite_winuxcmd_command_shims_in_stage(
             ),
         );
     }
+}
+
+/// Decode rubash transport words to user-visible text for host-side
+/// consumers that read `ast.words`/`token.value` directly (native plugins,
+/// process plugins, script dispatch). The executor decodes carriers at its
+/// own argv boundary; host code must use the public decoder instead of
+/// touching carrier bytes itself.
+fn decoded_words(words: &[String]) -> Vec<String> {
+    words
+        .iter()
+        .map(|word| decode_to_visible_text(word))
+        .collect()
 }
 
 fn simple_command_word_index(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
@@ -3642,65 +3402,6 @@ fn normalize_winuxcmd_slash_drive_args(ast: &mut Ast) {
     for command in &mut ast.commands {
         normalize_winuxcmd_slash_drive_command(command);
     }
-}
-
-/// Rewrite Niubash virtual-root path arguments (e.g. `/tmp/...`, `/etc/...`)
-/// into real host paths under the configured `shell_root` before they reach an
-/// external process. Niubash understands these logical dirs internally, but
-/// foreign executables (Git Bash, Python, VS Code, ...) do not, so a bare
-/// `/tmp/x.sh` passed to them resolves against the wrong location.
-///
-/// This applies to every command (not only winuxcmd shims) and only rewrites
-/// arguments that are explicit virtual-root paths with a sub-path. It never
-/// touches slash-drive paths (`/c/...`), tilde (`~`), or bare directory
-/// arguments such as a lone `/tmp`.
-fn rewrite_virtual_root_args(ast: &mut Ast, shell_root: Option<&Path>) {
-    let Some(root) = shell_root else {
-        return;
-    };
-    if !cfg!(windows) {
-        return;
-    }
-    for command in &mut ast.commands {
-        rewrite_virtual_root_command(command, root);
-    }
-}
-
-fn rewrite_virtual_root_command(command: &mut rubash::parser::CommandNode, root: &Path) {
-    if let Some(and_or_list) = &mut command.and_or_list {
-        for command in &mut and_or_list.commands {
-            rewrite_virtual_root_command(command, root);
-        }
-    }
-    // Never rewrite the command name itself.
-    for word in command.words.iter_mut().skip(1) {
-        if let Some(host_path) = virtual_root_arg_to_host_path(word, root) {
-            *word = host_path;
-        }
-    }
-}
-
-fn virtual_root_arg_to_host_path(value: &str, root: &Path) -> Option<String> {
-    let normalized = value.replace('\\', "/");
-    let Some(rest) = normalized.strip_prefix('/') else {
-        return None;
-    };
-    // Skip slash-drive paths (/c/..., /d/...) and bare tilde; those are handled
-    // elsewhere or by the external process environment.
-    if rest.is_empty() || rest.starts_with('~') {
-        return None;
-    }
-    let first = rest.split('/').next()?;
-    let sub = match first {
-        "tmp" | "bin" | "etc" | "var" | "usr" | "opt" | "dev" | "home" => &rest[first.len()..],
-        _ => return None,
-    };
-    // Require an explicit sub-path: rewrite `/tmp/x` but never a lone `/tmp`.
-    if !sub.starts_with('/') {
-        return None;
-    }
-    let host = root.join(rest).to_string_lossy().replace('/', "\\");
-    Some(host)
 }
 
 fn normalize_winuxcmd_slash_drive_command(command: &mut rubash::parser::CommandNode) {
@@ -4064,10 +3765,6 @@ fn normalize_alias_finder_command(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn strip_rubash_alias_quote_marker(value: &str) -> &str {
-    value.strip_prefix('\x1c').unwrap_or(value)
-}
-
 fn normalize_native_windows_path_literals(input: &str) -> String {
     if !cfg!(windows) {
         return input.to_string();
@@ -4126,146 +3823,6 @@ fn normalize_native_windows_path_literals(input: &str) -> String {
     }
 }
 
-fn protect_parameter_pattern_removal_equals(input: &str) -> String {
-    if !input.contains("${") {
-        return input.to_string();
-    }
-
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    let mut changed = false;
-
-    while let Some(offset) = rest.find("${") {
-        output.push_str(&rest[..offset + 2]);
-        let body = &rest[offset + 2..];
-        let Some(close) = parameter_expansion_body_end(body) else {
-            output.push_str(body);
-            return if changed { output } else { input.to_string() };
-        };
-
-        let expansion_body = &body[..close];
-        let protected = protect_pattern_body_equals(expansion_body);
-        changed |= protected.as_ref() != expansion_body;
-        output.push_str(&protected);
-        output.push('}');
-        rest = &body[close + 1..];
-    }
-
-    output.push_str(rest);
-    if changed {
-        output
-    } else {
-        input.to_string()
-    }
-}
-
-fn parameter_expansion_body_end(body: &str) -> Option<usize> {
-    let chars: Vec<(usize, char)> = body.char_indices().collect();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    let mut depth = 0usize;
-
-    for (position, &(byte_index, ch)) in chars.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && !single {
-            escaped = true;
-            continue;
-        }
-
-        match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '$' if !single
-                && chars
-                    .get(position + 1)
-                    .is_some_and(|(_, next)| *next == '{') =>
-            {
-                depth += 1;
-            }
-            '}' if !single && !double => {
-                if depth == 0 {
-                    return Some(byte_index);
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn protect_pattern_body_equals(body: &str) -> std::borrow::Cow<'_, str> {
-    let Some((operator_index, operator)) = leading_pattern_removal_operator(body) else {
-        return std::borrow::Cow::Borrowed(body);
-    };
-    let pattern_start = operator_index + operator.len();
-    if !body[pattern_start..].contains('=') {
-        return std::borrow::Cow::Borrowed(body);
-    }
-
-    let mut output = String::with_capacity(body.len());
-    output.push_str(&body[..pattern_start]);
-    let mut changed = false;
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    let mut brace_depth = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let chars: Vec<char> = body[pattern_start..].chars().collect();
-    let mut index = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            output.push(ch);
-            escaped = false;
-            index += 1;
-            continue;
-        }
-        if ch == '\\' && !single {
-            output.push(ch);
-            escaped = true;
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '$' if !single && chars.get(index + 1) == Some(&'{') => brace_depth += 1,
-            '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
-            '(' if !single && !double => paren_depth += 1,
-            ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
-            '[' if !single && !double => bracket_depth += 1,
-            ']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
-            '=' if !single
-                && !double
-                && brace_depth == 0
-                && paren_depth == 0
-                && bracket_depth == 0 =>
-            {
-                output.push('\\');
-                changed = true;
-            }
-            _ => {}
-        }
-        output.push(ch);
-        index += 1;
-    }
-
-    if changed {
-        std::borrow::Cow::Owned(output)
-    } else {
-        std::borrow::Cow::Borrowed(body)
-    }
-}
-
 fn is_native_windows_path_literal_start(chars: &[char], index: usize) -> bool {
     index + 2 < chars.len()
         && chars[index].is_ascii_alphabetic()
@@ -4296,7 +3853,10 @@ fn first_command_word(line: &str) -> Option<String> {
     if ast.commands.len() != 1 {
         return None;
     }
-    ast.commands[0].words.first().cloned()
+    ast.commands[0]
+        .words
+        .first()
+        .map(|word| decode_to_visible_text(word))
 }
 
 fn single_command_word(ast: &Ast) -> Option<&str> {
@@ -4312,7 +3872,7 @@ fn command_not_found_args(ast: &Ast, command: &str) -> Vec<String> {
     }
     let words = ast.commands[0].words.as_slice();
     match words {
-        [first, args @ ..] if first == command => args.to_vec(),
+        [first, args @ ..] if decode_to_visible_text(first) == command => decoded_words(args),
         _ => Vec::new(),
     }
 }
@@ -4890,15 +4450,9 @@ fn prepare_shell_root(winuxcmd_path: Option<&Path>) -> anyhow::Result<Option<Pat
         return Ok(None);
     };
 
-    for relative in [
-        "bin",
-        "usr/bin",
-        "usr/local/bin",
-        "etc",
-        "var",
-        "tmp",
-        "dev",
-    ] {
+    // /tmp is intentionally absent: it is backed by the real Windows temp
+    // directory (unixwin/niubash#94), never by the install tree.
+    for relative in ["bin", "usr/bin", "usr/local/bin", "etc", "var", "dev"] {
         std::fs::create_dir_all(root.join(relative))?;
     }
     Ok(Some(root))
@@ -6806,24 +6360,10 @@ niubash_run_precmd_hooks() {
 
     #[test]
     fn parameter_pattern_removal_wins_before_equals_in_pattern() {
+        // The `=` and `\"` inside the pattern body are pattern text, not
+        // assignment syntax — rubash parses them natively now.
         let script = r##"line='<rect x="0" fill="#fe0000"/>'; rest=${line#*fill=\"}; printf '%s\n' "${rest%%\"*}""##;
-        let script = protect_parameter_pattern_removal_equals(
-            &normalize_native_windows_path_literals(script),
-        );
-        assert!(script.contains(r#"${line#*fill\=\""#));
-        let tokens = tokenize(&script);
-        let mut ast = parse(&tokens);
-        normalize_parameter_pattern_operator_order(&mut ast);
-
-        let assignment_expansion = &ast.commands[1].parameter_expansions[0];
-        assert_eq!(assignment_expansion.name, "line");
-        assert_eq!(assignment_expansion.operator.as_deref(), Some("#"));
-        assert_eq!(assignment_expansion.word.as_deref(), Some(r#"*fill\=\""#));
-
-        let word_expansion = &ast.commands[2].parameter_expansions[0];
-        assert_eq!(word_expansion.name, "rest");
-        assert_eq!(word_expansion.operator.as_deref(), Some("%%"));
-        assert_eq!(word_expansion.word.as_deref(), Some(r#"\"*"#));
+        let script = normalize_native_windows_path_literals(script);
 
         let mut shell = test_shell(HookConfig::default());
         assert_eq!(shell.execute_script(&script).unwrap(), 0);
@@ -6960,6 +6500,22 @@ niubash_run_precmd_hooks() {
     }
 
     #[test]
+    fn shim_rewrite_preserves_quoted_glob_carriers() {
+        // Phase 0 (host-semantic-layer-elimination): the host must not strip
+        // rubash's \x11 quoted-glob carrier from token values — the executor
+        // decodes it at the argv boundary, and stripping it here made
+        // `echo a\*b` glob-expand. Host consumers decode via
+        // rubash::decode_to_visible_text instead.
+        let mut tokens = tokenize(r"grep a\*b file; echo c\?d");
+        rewrite_winuxcmd_command_shims(&mut tokens, false);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].words[1].contains('\x11'));
+        assert!(ast.commands[1].words[1].contains('\x11'));
+        assert_eq!(decode_to_visible_text(&ast.commands[0].words[1]), "a*b");
+        assert_eq!(decode_to_visible_text(&ast.commands[1].words[1]), "c?d");
+    }
+
+    #[test]
     fn interactive_terminal_grep_colors_force_pipeline_final_stage() {
         if !cfg!(windows) {
             return;
@@ -7051,7 +6607,16 @@ niubash_run_precmd_hooks() {
         let ast = parse(&tokens);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
 
-        assert_eq!(pipeline.stages[1].words, vec!["grep.exe", "-E", "a.+c"]);
+        // The `+` stays behind rubash's \x11 data carrier until the executor
+        // decodes it at the argv boundary; the host sees the transport form.
+        assert_eq!(
+            pipeline.stages[1].words,
+            vec!["grep.exe", "-E", "a.\u{11}+c"]
+        );
+        assert_eq!(
+            decode_to_visible_text(&pipeline.stages[1].words[2]),
+            "a.+c"
+        );
     }
 
     #[test]
@@ -7690,19 +7255,29 @@ BACKTICK_VALUE=`whoami`
     }
 
     #[test]
-    fn default_official_git_plugin_installs_builtin_alias_pack() {
+    fn compiled_git_alias_pack_is_interactive_only() {
+        // P4: the compiled convenience pack (gp/gst/...) must not leak into
+        // script/non-interactive runs where BASH_ALIASES observes it; it is
+        // installed on the interactive path only.
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("niubash-default-plugin-git");
         std::fs::create_dir_all(&temp).unwrap();
 
-        let shell = Shell::new().unwrap();
+        let mut shell = Shell::new().unwrap();
 
+        assert_eq!(
+            shell.aliases.get("gst").map(String::as_str),
+            None,
+            "compiled convenience aliases must not be applied in script mode"
+        );
+        assert!(shell.plugins.is_enabled("git"));
+
+        shell.enter_interactive();
         assert_eq!(
             shell.aliases.get("gst").map(String::as_str),
             Some("git status")
         );
-        assert!(shell.plugins.is_enabled("git"));
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -8264,105 +7839,5 @@ niubash_prompt_use_template "PLUGIN:{git}{prompt_char} " ""
     fn write_fake_cwd_probe(bin: &std::path::Path, log_path: &str) {
         let script = format!("@echo off\r\n>\"{}\" echo %CD%\r\nexit /b 0\r\n", log_path);
         std::fs::write(bin.join("cwdprobe.cmd"), script).unwrap();
-    }
-
-    #[test]
-    fn virtual_root_arg_to_host_path_rewrites_known_virtual_dirs() {
-        if !cfg!(windows) {
-            return;
-        }
-        let root = Path::new("C:/niubash-root");
-        let cases = [
-            (
-                "/tmp/opencode/repro.sh",
-                "C:\\niubash-root\\tmp\\opencode\\repro.sh",
-            ),
-            ("/etc/passwd", "C:\\niubash-root\\etc\\passwd"),
-            (
-                "/usr/local/bin/tool",
-                "C:\\niubash-root\\usr\\local\\bin\\tool",
-            ),
-            ("/var/log/x.log", "C:\\niubash-root\\var\\log\\x.log"),
-            ("/bin/sh", "C:\\niubash-root\\bin\\sh"),
-            ("/opt/app/run", "C:\\niubash-root\\opt\\app\\run"),
-            ("/dev/null", "C:\\niubash-root\\dev\\null"),
-            ("/home/alice/file", "C:\\niubash-root\\home\\alice\\file"),
-        ];
-        for (input, expected) in cases {
-            let got = virtual_root_arg_to_host_path(input, root);
-            assert_eq!(got.as_deref(), Some(expected), "input: {input}");
-        }
-    }
-
-    #[test]
-    fn virtual_root_arg_to_host_path_skips_non_virtual_paths() {
-        if !cfg!(windows) {
-            return;
-        }
-        let root = Path::new("C:/niubash-root");
-        // Slash-drive paths are handled elsewhere and must NOT be rewritten here.
-        assert_eq!(virtual_root_arg_to_host_path("/c/Users/me/x", root), None);
-        // A bare directory (no sub-path) must NOT be rewritten.
-        assert_eq!(virtual_root_arg_to_host_path("/tmp", root), None);
-        // Tilde is resolved by the external process environment.
-        assert_eq!(virtual_root_arg_to_host_path("~/x.sh", root), None);
-        // Unknown virtual-ish prefixes are left untouched.
-        assert_eq!(virtual_root_arg_to_host_path("/foo/bar", root), None);
-        // The command name position is handled by the caller (skip(1)).
-        assert_eq!(
-            virtual_root_arg_to_host_path("/tmp/x", root),
-            Some("C:\\niubash-root\\tmp\\x".to_string())
-        );
-    }
-
-    #[test]
-    fn rewrite_virtual_root_args_rewrites_external_command_args() {
-        if !cfg!(windows) {
-            return;
-        }
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let root = std::env::temp_dir().join("niubash-test-root");
-        let _ = std::fs::create_dir_all(&root);
-
-        // Mirrors the reported failure: an external bash.exe given a Niubash
-        // virtual /tmp path. The path must become a real host path under root.
-        let line = r#"D:/Git/bin/bash.exe /tmp/opencode/repro.sh --flag /etc/config"#;
-        let tokens = tokenize(line);
-        let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, Some(&root));
-
-        let words = &ast.commands[0].words;
-        assert_eq!(words[0], "D:/Git/bin/bash.exe", "command name untouched");
-        let expected_tmp = root
-            .join("tmp")
-            .join("opencode")
-            .join("repro.sh")
-            .to_string_lossy()
-            .replace('/', "\\");
-        assert_eq!(words[1], expected_tmp, "/tmp arg rewritten");
-        let expected_etc = root
-            .join("etc")
-            .join("config")
-            .to_string_lossy()
-            .replace('/', "\\");
-        assert_eq!(words[3], expected_etc, "/etc arg rewritten");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn rewrite_virtual_root_args_is_noop_without_shell_root() {
-        if !cfg!(windows) {
-            return;
-        }
-        let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
-        let _cwd_guard = CwdGuard::capture();
-        let line = r#"bash.exe /tmp/x.sh"#;
-        let tokens = tokenize(line);
-        let mut ast = parse(&tokens);
-        rewrite_virtual_root_args(&mut ast, None);
-        // No shell_root -> arguments are left exactly as written.
-        assert_eq!(ast.commands[0].words[1], "/tmp/x.sh");
     }
 }

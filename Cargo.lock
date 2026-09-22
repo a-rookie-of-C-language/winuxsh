@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "niubash"
-version = "1.1.1"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "niubash-runtime"
-version = "1.1.0"
+version = "1.1.4"
 dependencies = [
  "anyhow",
  "colored",
@@ -1079,9 +1079,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rubash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d9fc6ffc0d83ae2af8315fdeadeb40e3989eb1b7ef404c828b7058e044827d7"
+version = "1.2.0"
+source = "git+https://github.com/unixwin/rubash.git?branch=master#3aa37b3df079e11b4d9ec961aa3bccc3211cd207"
 dependencies = [
  "ctrlc",
  "libc",

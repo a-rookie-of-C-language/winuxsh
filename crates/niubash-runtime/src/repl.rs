@@ -16,7 +16,7 @@ use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
     ColumnarMenu, EditCommand, EditMode, Emacs, KeyCode, KeyModifiers, Keybindings, ListMenu,
     MenuBuilder, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
-    ReedlineMenu, Signal, Vi,
+    ReedlineMenu, Signal, ValidationResult, Validator, Vi,
 };
 
 const COMPLETION_MENU: &str = "completion_menu";
@@ -137,6 +137,7 @@ pub fn build_line_editor(shell: &Rc<RefCell<Shell>>) -> anyhow::Result<Reedline>
     )));
 
     let mut editor = Reedline::create()
+        .with_validator(Box::new(ReplValidator))
         .with_history(Box::new(history))
         .with_history_exclusion_prefix(history_exclusion_prefix(
             shell_ref.history_ignore_space_prefixed,
@@ -596,6 +597,23 @@ fn parse_plain_key_sequence(value: &str) -> Option<(KeyModifiers, KeyCode)> {
     Some((KeyModifiers::NONE, KeyCode::Char(ch)))
 }
 
+/// Lets Enter grow an unfinished command into a multi-line buffer instead of
+/// submitting it. Reedline submits only once `validate` reports Complete, so
+/// a pasted or typed `cmd \` / unclosed quote / open `if..fi` block stays
+/// editable — arrows move between lines — until the last line closes it.
+/// The REPL-side `PendingReplInput` collector remains as a fallback.
+struct ReplValidator;
+
+impl Validator for ReplValidator {
+    fn validate(&self, line: &str) -> ValidationResult {
+        if is_repl_input_complete(line) {
+            ValidationResult::Complete
+        } else {
+            ValidationResult::Incomplete
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PendingReplInput {
     lines: Vec<String>,
@@ -629,7 +647,10 @@ impl PendingReplInput {
     }
 
     fn is_multiline(&self) -> bool {
-        self.lines.len() > 1
+        // With the reedline validator a complete multi-line buffer arrives as
+        // a single entry containing '\n'; the fallback collector still joins
+        // per-line reads into multiple entries.
+        self.lines.len() > 1 || self.script().contains('\n')
     }
 }
 
@@ -1088,6 +1109,39 @@ fn has_unescaped_trailing_backslash(input: &str) -> bool {
 
 /// Run the interactive REPL.
 ///
+/// Notices produced off the startup path (e.g. the background update check)
+/// wait here and print above the next prompt instead of blocking shell
+/// startup or garbling an active line edit.
+static PENDING_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Queue a line to be printed before the next prompt draws. Callable from
+/// any thread; used by the bin crate's background update check.
+pub fn set_pending_notice(text: String) {
+    if let Ok(mut queue) = PENDING_NOTICES.lock() {
+        queue.push(text);
+    }
+}
+
+fn drain_pending_notices() {
+    if let Ok(mut queue) = PENDING_NOTICES.lock() {
+        for line in queue.drain(..) {
+            println!("{line}");
+        }
+    }
+}
+
+/// One dim orientation line shown only on the very first interactive start,
+/// right after the setup wizard — it points at `about`, the in-shell tour.
+/// Follows the wizard language so a Chinese first run reads Chinese.
+fn print_first_run_hint() {
+    let hint = if crate::setup_wizard::wizard_lang_is_chinese() {
+        "\x1b[2m  输入 about 快速上手 · niu setup 重新配置 · 文档 github.com/unixwin/niubash\x1b[0m"
+    } else {
+        "\x1b[2m  Type `about` for a quick tour · `niu setup` to reconfigure · docs: github.com/unixwin/niubash\x1b[0m"
+    };
+    println!("{hint}");
+}
+
 /// Takes ownership of the shell and shares it with the completer through an
 /// `Rc<RefCell<Shell>>` bridge so shell-function completions can execute in
 /// the engine while the line editor is active. No borrow is held across
@@ -1099,17 +1153,21 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     // exits with a broken console (e.g. ssh.exe on a failed auth) must not
     // leave the REPL drawing literal escape sequences with a hidden cursor.
     let console_baseline = crate::console_guard::capture();
-    // First-run setup wizard.
-    if crate::setup_wizard::is_first_run() {
+    // First-run setup wizard, then the `about` tour: the screen clears, shows
+    // what this shell is and where to go next, and waits for a keypress.
+    let first_run = crate::setup_wizard::is_first_run();
+    if first_run {
         let _ = crate::setup_wizard::run_wizard();
+        if crate::terminal::stdout_is_terminal() {
+            let _ = crate::easter_eggs::about_tour();
+        }
     }
 
-    let welcome = format!(
-        "Niubash {} \u{2014} bash-compatible shell for Windows. Type \u{2018}exit\u{2019} or press Ctrl+D to quit.",
-        env!("CARGO_PKG_VERSION")
-    );
+    let welcome = format!("Niubash {}", env!("CARGO_PKG_VERSION"));
     println!("{}", welcome);
-    println!();
+    if first_run && crate::terminal::stdio_is_interactive() {
+        print_first_run_hint();
+    }
 
     shell.borrow_mut().restore_last_working_dir_for_repl();
     shell.borrow_mut().run_startup_rc();
@@ -1131,6 +1189,7 @@ pub fn run_repl(shell: Shell) -> anyhow::Result<()> {
     loop {
         crate::console_guard::restore(&console_baseline);
         let signal = if pending.is_empty() {
+            drain_pending_notices();
             shell.borrow_mut().run_precmd_hooks();
             let prompt = shell.borrow().prompt.clone();
             line_editor.read_line(&prompt)
@@ -1388,6 +1447,34 @@ mod tests {
         assert!(!is_repl_input_complete("hello() {"));
         assert!(is_repl_input_complete("hello() {\n  echo hi\n}"));
         assert!(is_repl_input_complete("{ echo hi; }"));
+    }
+
+    #[test]
+    fn repl_validator_holds_incomplete_input_in_the_buffer() {
+        // Enter on an unfinished command must not submit: the validator keeps
+        // the buffer open so multi-line input stays editable (arrows work
+        // across lines) until the last line completes it.
+        let validator = ReplValidator;
+        assert!(matches!(
+            validator.validate("echo \"unterminated"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("echo one \\"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("if true; then"),
+            ValidationResult::Incomplete
+        ));
+        assert!(matches!(
+            validator.validate("echo done"),
+            ValidationResult::Complete
+        ));
+        assert!(matches!(
+            validator.validate("echo one \\\n  two"),
+            ValidationResult::Complete
+        ));
     }
 
     #[test]

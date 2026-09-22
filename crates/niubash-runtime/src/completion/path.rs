@@ -244,9 +244,32 @@ fn resolve_logical_shell_dir(value: &str) -> Option<PathBuf> {
             users.join(rest)
         });
     }
+    // /tmp and /var/tmp are per-user temporary namespaces backed by the real
+    // Windows temp dir, never the install tree (unixwin/niubash#94).
+    if normalized == "/tmp" || normalized.starts_with("/tmp/") {
+        let rest = normalized
+            .trim_start_matches("/tmp")
+            .trim_start_matches('/');
+        return Some(if rest.is_empty() {
+            std::env::temp_dir()
+        } else {
+            std::env::temp_dir().join(rest)
+        });
+    }
+    if normalized == "/var/tmp" || normalized.starts_with("/var/tmp/") {
+        let rest = normalized
+            .trim_start_matches("/var/tmp")
+            .trim_start_matches('/');
+        let base = std::env::temp_dir().join("var").join("tmp");
+        return Some(if rest.is_empty() {
+            base
+        } else {
+            base.join(rest)
+        });
+    }
     let rest = normalized.strip_prefix('/')?;
     match rest.split('/').next() {
-        Some("bin" | "dev" | "etc" | "opt" | "tmp" | "usr" | "var") => Some(root.join(rest)),
+        Some("bin" | "dev" | "etc" | "opt" | "usr" | "var") => Some(root.join(rest)),
         _ => None,
     }
 }

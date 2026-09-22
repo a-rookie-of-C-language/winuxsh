@@ -1438,11 +1438,14 @@ pub fn plugin_packs_text() -> String {
     plugin_packs_text_verbose(false)
 }
 
-/// Human-first listing. Machines and debugging get `--json` / `--verbose`;
-/// the default output stays readable: what is on, what is available, and
-/// one line per pack saying what it actually does.
+/// Human-first listing. The default output is a clean table: one row per
+/// pack with an active marker that reflects the user's `~/.niubashrc`
+/// selection, a category column, and a one-line summary. Developer
+/// diagnostics (`kind=... execution=... externalization=...`) live behind
+/// `--verbose`; machines get `--json`.
 pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     let inventory = active_plugin_inventory();
+    let active = active_pack_names(&inventory);
     let mut out = String::new();
     let title = if inventory.trust_source == "official_bundle" {
         "Official Niubash plugins"
@@ -1468,42 +1471,38 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
         _ => {}
     }
 
-    let mut enabled: Vec<&PluginPackRecord> = Vec::new();
-    let mut available: Vec<&PluginPackRecord> = Vec::new();
+    // Split theme-* packs off so the 26 optional themes collapse into the
+    // footer instead of drowning the list. Default-on themes stay as rows.
     let mut themes: Vec<&PluginPackRecord> = Vec::new();
     for pack in &inventory.packs {
-        if pack.name.starts_with("theme-") && pack.category == PluginCategory::Ux {
-            if pack.default {
-                enabled.push(pack);
-            } else {
-                themes.push(pack);
-            }
-        } else if pack.default {
-            enabled.push(pack);
-        } else {
-            available.push(pack);
+        if pack.name.starts_with("theme-")
+            && pack.category == PluginCategory::Ux
+            && !active.contains(&pack.name)
+        {
+            themes.push(pack);
         }
     }
-    enabled.sort_by(|a, b| a.name.cmp(&b.name));
-    available.sort_by(|a, b| a.name.cmp(&b.name));
     themes.sort_by(|a, b| a.name.cmp(&b.name));
 
-    for pack in &inventory.packs {
-        out.push_str(&pack_list_line(pack));
-    }
+    // Verbose: emit the developer diagnostics block (one jargon line per
+    // pack) before the human table. Default output skips this entirely.
     if verbose {
-        return out;
+        for pack in &inventory.packs {
+            out.push_str(&pack_list_line(pack));
+        }
     }
 
-    // Unified human view: one row per pack (default-on themes stay; the 26
-    // optional themes collapse into the footer), enabled on top, status
-    // symbol + dim category column + summary truncated to terminal width.
     let mut rows: Vec<&PluginPackRecord> = inventory
         .packs
         .iter()
         .filter(|pack| !themes.iter().any(|theme| std::ptr::eq(*theme, *pack)))
         .collect();
-    rows.sort_by(|a, b| b.default.cmp(&a.default).then(a.name.cmp(&b.name)));
+    // Active packs first, then by name.
+    rows.sort_by(|a, b| {
+        let a_active = active.contains(&a.name);
+        let b_active = active.contains(&b.name);
+        b_active.cmp(&a_active).then_with(|| a.name.cmp(&b.name))
+    });
     let name_w = rows
         .iter()
         .map(|pack| pack.name.chars().count())
@@ -1520,20 +1519,22 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     let prefix_len = 2 + 1 + 1 + name_w + 1 + cat_w + 2;
     let summary_max = width.saturating_sub(prefix_len).max(24);
 
+    let active_count = rows.iter().filter(|p| active.contains(&p.name)).count();
     for pack in &rows {
+        let is_active = active.contains(&pack.name);
         let missing = crate::plugins::missing_required_binaries(&pack.required_binaries);
         let mut summary = pack.summary.clone();
         if !missing.is_empty() {
             summary = format!("{} ({})", summary, missing.join(", "));
         }
         let summary = crate::text_style::truncate(&summary, summary_max);
-        let symbol = if pack.default {
+        let symbol = if is_active {
             crate::text_style::on_symbol()
         } else {
             crate::text_style::off_symbol()
         };
         let category = crate::text_style::dim(pack.category.as_str());
-        let summary = if pack.default {
+        let summary = if is_active {
             summary
         } else {
             crate::text_style::dim(&summary)
@@ -1547,13 +1548,16 @@ pub fn plugin_packs_text_verbose(verbose: bool) -> String {
     let theme_count = themes.len();
     out.push('\n');
     let footer = format!(
-        "{} enabled · {} available · {} themes — set NIU_THEME=<name> to switch; list via `niu plugin themes`",
-        enabled.len(),
-        available.len(),
+        "{} active · {} available · {} themes — set NIU_THEME=<name> to switch; list via `niu plugin themes`",
+        active_count,
+        rows.len().saturating_sub(active_count),
         theme_count
     );
     out.push_str(&crate::text_style::dim(&footer));
     out.push('\n');
+    out.push_str(&crate::text_style::dim(
+        "Enable: niu plugin enable <name>   Disable: niu plugin disable <name>\n",
+    ));
     out.push_str(&crate::text_style::dim(
         "Details: niu plugin info <name>   Machine output: --json   Diagnostics: --verbose\n",
     ));
@@ -1616,21 +1620,16 @@ pub fn plugin_pack_text(name: &str) -> Option<String> {
 }
 
 /// Human-first single-pack view: what it does, its state, what it needs.
-/// Execution-model / readiness diagnostics stay at the bottom under a
-/// "Runtime details" heading (and in `--json` for machines).
+/// Execution-model / readiness diagnostics live behind `--verbose` (and in
+/// `--json` for machines); the default output is one non-redundant block.
 pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
     let inventory = active_plugin_inventory();
     let pack = inventory
         .packs
         .iter()
         .find(|pack| pack.name.eq_ignore_ascii_case(name))?;
-    let kv = |key: &str, value: String| {
-        format!(
-            "  {} {}",
-            crate::text_style::dim(&format!("{key:<12}")),
-            value
-        )
-    };
+    let active = active_pack_names(&inventory);
+    let is_active = active.contains(&pack.name);
     let mut out = String::new();
     out.push_str(&format!(
         "{} — {}\n",
@@ -1643,19 +1642,17 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
     out.push_str(&format!("Trust source: {}\n", inventory.trust_source));
     out.push_str(&format!("Version: {}\n", pack.version));
     out.push_str(&format!("Summary: {}\n", pack.summary));
+    let state_label = if is_active {
+        crate::text_style::green("active")
+    } else {
+        crate::text_style::dim("off")
+    };
+    let default_label = if pack.default { "on" } else { "off" };
+    out.push_str(&format!(
+        "State: {} (default {})\n",
+        state_label, default_label
+    ));
     out.push_str(&format!("Kind: {}\n", pack.kind.as_str()));
-    out.push_str(&format!(
-        "Default: {}\n",
-        if pack.default { "on" } else { "off" }
-    ));
-    out.push_str(&format!(
-        "Execution model: {}\n",
-        plugin_execution_model(pack)
-    ));
-    out.push_str(&format!(
-        "Externalization class: {}\n",
-        plugin_externalization_class(pack)
-    ));
     if !pack.permissions.is_empty() {
         out.push_str(&format!("Permissions: {}\n", pack.permissions.join(",")));
     }
@@ -1725,116 +1722,30 @@ pub fn plugin_pack_text_verbose(name: &str, verbose: bool) -> Option<String> {
             out.push('\n');
         }
     }
-    let readiness = plugin_readiness_profile(pack);
-    push_readiness_text(&mut out, &readiness);
-    out.push_str(&kv(
-        "state",
-        if pack.default {
-            crate::text_style::green("enabled by default".to_string().as_str())
-        } else {
-            crate::text_style::dim("off by default".to_string().as_str())
-        },
-    ));
-    out.push('\n');
-    out.push_str(&kv("version", pack.version.clone()));
-    out.push('\n');
-    out.push_str(&kv("category", pack.category.as_str().to_string()));
-    out.push('\n');
-    let kind_text = match pack.kind {
-        PluginKind::Source => "source pack (startup code runs in your shell)",
-        PluginKind::Bridge => "host bridge (no startup code runs)",
-        PluginKind::Builtin => "built-in host behavior",
-        PluginKind::Process => "process adapter (external helper program)",
-    };
-    out.push_str(&kv("kind", kind_text.to_string()));
-    out.push('\n');
-    if !pack.required_binaries.is_empty() {
-        let missing = crate::text_style::warn_missing_note(&pack.required_binaries);
-        out.push_str(&kv(
-            "needs",
-            if missing.is_empty() {
-                pack.required_binaries.join(", ")
-            } else {
-                missing.trim_matches(|c| c == '(' || c == ')').to_string()
-            },
-        ));
-        out.push('\n');
-    }
-    if !pack.permissions.is_empty() {
-        out.push_str(&kv("permissions", pack.permissions.join(", ")));
-        out.push('\n');
-    }
-    let mut exports: Vec<String> = Vec::new();
-    if pack.exports.aliases {
-        exports.push("aliases".to_string());
-    }
-    if !pack.exports.completions.is_empty() {
-        exports.push(format!("completions ({})", pack.exports.completions.len()));
-    }
-    if !pack.exports.prompt_segments.is_empty() {
-        exports.push("prompt segments".to_string());
-    }
-    if !pack.exports.hooks.is_empty() {
-        exports.push(format!("hooks ({})", pack.exports.hooks.join(", ")));
-    }
-    if !pack.exports.commands.is_empty() {
-        exports.push(format!("commands ({})", pack.exports.commands.join(", ")));
-    }
-    if !pack.exports.keybindings.is_empty() {
-        exports.push("keybindings".to_string());
-    }
-    if !pack.exports.themes.is_empty() {
-        exports.push(format!("themes ({})", pack.exports.themes.join(", ")));
-    }
-    if !pack.exports.providers.is_empty() {
-        exports.push(format!("providers ({})", pack.exports.providers.join(", ")));
-    }
-    if !exports.is_empty() {
-        out.push_str(&kv("exports", exports.join(", ")));
-        out.push('\n');
-    }
-    if let Some(source) = &pack.source {
-        out.push_str(&kv("entry", source.entry.clone()));
-        out.push('\n');
-    }
-    if verbose && !keybinding_lines.is_empty() {
-        out.push_str("  keybinding metadata:\n");
-        for line in keybinding_lines {
-            out.push_str("    ");
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
+    // Developer diagnostics: execution model, externalization class, and the
+    // readiness profile are host-internal classification words. They stay out
+    // of the default view and appear under "Runtime details" with --verbose
+    // (and always in --json).
     out.push_str(&format!(
         "\n{}\n",
         crate::text_style::dim("Runtime details (--verbose adds more; --json for machines):")
     ));
-    out.push_str(&kv("execution", plugin_execution_model(pack).to_string()));
-    out.push('\n');
-    out.push_str(&kv(
-        "externalization",
-        plugin_externalization_class(pack).to_string(),
+    out.push_str(&format!("  execution: {}\n", plugin_execution_model(pack)));
+    out.push_str(&format!(
+        "  externalization: {}\n",
+        plugin_externalization_class(pack)
     ));
-    out.push('\n');
     if verbose {
         let readiness = plugin_readiness_profile(pack);
         push_readiness_text(&mut out, &readiness);
-        out.push_str(&kv("source", inventory.source.clone()));
-        out.push('\n');
-        out.push_str(&kv("trust source", inventory.trust_source.clone()));
-        out.push('\n');
         if let Some(process) = &pack.process {
-            out.push_str(&kv(
-                "process",
-                format!(
-                    "protocol={} command={} args=({}) timeout={}ms",
-                    process.protocol,
-                    process.command,
-                    list_or_none(&process.args),
-                    process.timeout_millis
-                ),
+            out.push_str(&format!(
+                "  process: protocol={} command={} args=({}) timeout={}ms\n",
+                process.protocol,
+                process.command,
+                list_or_none(&process.args),
+                process.timeout_millis
             ));
-            out.push('\n');
         }
     }
     Some(out)
@@ -1849,7 +1760,7 @@ fn list_or_none(values: &[String]) -> String {
 pub fn plugin_search_json(query: Option<&str>) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&plugin_search_results(query))?)
 }
-pub fn plugin_search_text(query: Option<&str>) -> String {
+pub fn plugin_search_text(query: Option<&str>, verbose: bool) -> String {
     let inventory = active_plugin_inventory();
     let source = inventory.source.clone();
     let trust_source = inventory.trust_source.clone();
@@ -1861,7 +1772,9 @@ pub fn plugin_search_text(query: Option<&str>) -> String {
         out.push_str(&format!("Query: {}\n", query));
     }
     for result in plugin_search_results_from_inventory(query, inventory) {
-        out.push_str(&pack_list_line(&result.pack));
+        if verbose {
+            out.push_str(&pack_list_line(&result.pack));
+        }
         out.push_str(&pack_human_line(&result.pack));
     }
     out
@@ -2968,6 +2881,21 @@ fn source_plugin_exports_hook(hooks: &[String], hook_name: &str) -> bool {
     }
     hooks.iter().any(|hook| hook == hook_name)
 }
+/// Aliases exported by an INSTALLED plugin bundle (from its on-disk assets).
+/// These behave like user config aliases and are applied in every shell
+/// mode. Only the COMPILED convenience packs (gp/gst/...) are
+/// interactive-only: see `Shell::enter_interactive` (P4, assoc.tests
+/// observes BASH_ALIASES in scripts).
+pub fn installed_bundle_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
+    let inventory = active_plugin_inventory();
+    let root = inventory.path.as_ref()?;
+    let pack = inventory
+        .packs
+        .iter()
+        .find(|pack| pack.name == pack_name && pack.exports.aliases)?;
+    load_bundle_aliases_from_path(root, pack)
+}
+
 pub fn plugin_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
     let inventory = active_plugin_inventory();
     if let Some(root) = &inventory.path {
@@ -3244,7 +3172,7 @@ fn resolve_prompt_segment_refs(
 pub fn plugin_theme_catalog_json() -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&plugin_theme_catalog())?)
 }
-pub fn plugin_theme_catalog_text() -> String {
+pub fn plugin_theme_catalog_text(verbose: bool) -> String {
     let current = std::env::var("NIU_THEME")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase());
@@ -3258,16 +3186,21 @@ pub fn plugin_theme_catalog_text() -> String {
     ));
     let mut user = Vec::new();
     let mut bundle = Vec::new();
-    for entry in plugin_theme_catalog() {
-        out.push_str(&format!(
-            "- {} source={} owner={} bundle={} pack={} trust_source={}\n",
-            entry.name,
-            entry.source,
-            entry.owner,
-            entry.bundle.as_deref().unwrap_or("none"),
-            entry.pack.as_deref().unwrap_or("none"),
-            entry.trust_source
-        ));
+    let entries = plugin_theme_catalog();
+    if verbose {
+        for entry in &entries {
+            out.push_str(&format!(
+                "- {} source={} owner={} bundle={} pack={} trust_source={}\n",
+                entry.name,
+                entry.source,
+                entry.owner,
+                entry.bundle.as_deref().unwrap_or("none"),
+                entry.pack.as_deref().unwrap_or("none"),
+                entry.trust_source
+            ));
+        }
+    }
+    for entry in entries {
         if entry.source == "user" {
             user.push(entry.name);
         } else {
@@ -3489,6 +3422,244 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(|value| PathBuf::from(shell_path_to_host_path(value.to_string_lossy().as_ref())))
         .filter(|path| !path.as_os_str().is_empty())
 }
+
+/// Path to the user's interactive startup file. `~/.niubashrc` is primary; the
+/// pre-rename `~/.winuxshrc` is a read-only fallback when the primary file is
+/// absent. `None` when neither exists. The standalone `niu plugin` CLI reads
+/// this so `list`/`info` can reflect the user's actual plugin selection
+/// instead of only the inventory defaults.
+pub fn user_rc_path() -> Option<PathBuf> {
+    let home = shell_home_dir()?;
+    let primary = home.join(".niubashrc");
+    if primary.is_file() {
+        return Some(primary);
+    }
+    let compat = home.join(".winuxshrc");
+    if compat.is_file() {
+        return Some(compat);
+    }
+    None
+}
+
+/// The plugin selection declared in `~/.niubashrc`: the names listed in
+/// `NIU_PLUGINS=(...)` and whether `NIU_DISABLE_DEFAULT_PLUGINS` is set.
+/// Empty when the rc file is absent or declares no plugin line.
+#[derive(Debug, Clone, Default)]
+pub struct ConfiguredPlugins {
+    pub load: Vec<String>,
+    pub disable_defaults: bool,
+}
+
+pub fn configured_plugins() -> ConfiguredPlugins {
+    configured_plugins_from_path(user_rc_path().as_deref())
+}
+
+fn configured_plugins_from_path(path: Option<&Path>) -> ConfiguredPlugins {
+    let mut out = ConfiguredPlugins::default();
+    let Some(path) = path else { return out };
+    let Ok(text) = fs::read_to_string(path) else {
+        return out;
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(value) = rc_assignment_value(line, "NIU_DISABLE_DEFAULT_PLUGINS") {
+            out.disable_defaults = !value.trim().is_empty() && value.trim() != "0";
+            continue;
+        }
+        if let Some(value) = rc_assignment_value(line, "NIU_PLUGINS") {
+            out.load = parse_plugin_array(value);
+        }
+    }
+    out
+}
+
+/// Strip a leading `name=` (optionally `export name=`) assignment and return
+/// the raw value text. `None` when the line is not that exact assignment
+/// (so `NIU_PLUGINS_EXTRA=...` does not match `NIU_PLUGINS`).
+fn rc_assignment_value<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let stripped = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let rest = stripped.strip_prefix(name)?;
+    let value = rest.strip_prefix('=')?.trim_start();
+    Some(value)
+}
+
+fn parse_plugin_array(value: &str) -> Vec<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
+        .unwrap_or(value);
+    let value = value
+        .strip_prefix('(')
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or(value);
+    value
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| c == '\'' || c == '"')
+                .to_string()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Compute the set of pack names that are actually active given the inventory
+/// defaults and the user's `~/.niubashrc` selection. Mirrors the selection
+/// logic the oh-my-niu bundle loader applies at shell startup: when
+/// `NIU_DISABLE_DEFAULT_PLUGINS` is set, only the listed names are active;
+/// otherwise the inventory defaults plus the listed names.
+pub fn active_pack_names(inventory: &PluginInventory) -> BTreeSet<String> {
+    let configured = configured_plugins();
+    active_pack_names_from(inventory, &configured)
+}
+
+fn active_pack_names_from(
+    inventory: &PluginInventory,
+    configured: &ConfiguredPlugins,
+) -> BTreeSet<String> {
+    let mut active = BTreeSet::new();
+    if !configured.disable_defaults {
+        for pack in &inventory.packs {
+            if pack.default {
+                active.insert(pack.name.clone());
+            }
+        }
+    }
+    for name in &configured.load {
+        active.insert(name.clone());
+    }
+    active
+}
+
+/// Add `name` to the `NIU_PLUGINS=(...)` line in the user's rc, creating the
+/// line when absent. Idempotent. Returns the rc path that was written.
+pub fn enable_pack_in_rc(name: &str) -> anyhow::Result<PathBuf> {
+    let path = user_rc_path()
+        .ok_or_else(|| anyhow!("no ~/.niubashrc found; create one first or run `niu setup`"))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let updated = upsert_plugin_array(&text, name, true);
+    if updated == text {
+        return Ok(path);
+    }
+    fs::write(&path, updated)?;
+    Ok(path)
+}
+
+/// Remove `name` from the `NIU_PLUGINS=(...)` line. When `name` is a
+/// default-on pack, removing it from the list is not enough (defaults still
+/// load), so the rc is rewritten with `NIU_DISABLE_DEFAULT_PLUGINS=1` and the
+/// full active set minus `name`. Returns the rc path that was written.
+pub fn disable_pack_in_rc(name: &str, inventory: &PluginInventory) -> anyhow::Result<PathBuf> {
+    let path = user_rc_path()
+        .ok_or_else(|| anyhow!("no ~/.niubashrc found; create one first or run `niu setup`"))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let configured = configured_plugins_from_path(Some(&path));
+    let active = active_pack_names_from(inventory, &configured);
+    let is_default = inventory.packs.iter().any(|p| p.name == name && p.default);
+    let updated = if is_default {
+        let keep: Vec<String> = active.iter().filter(|n| *n != name).cloned().collect();
+        rewrite_rc_plugin_selection(&text, &keep, true)
+    } else {
+        upsert_plugin_array(&text, name, false)
+    };
+    if updated == text {
+        return Ok(path);
+    }
+    fs::write(&path, updated)?;
+    Ok(path)
+}
+
+/// Insert or remove `name` from the `NIU_PLUGINS=(...)` array line. Creates
+/// the line (and a preceding blank line) when inserting into an rc that has
+/// none. Removing the last entry leaves an empty `NIU_PLUGINS=()` line.
+fn upsert_plugin_array(rc: &str, name: &str, insert: bool) -> String {
+    let mut out = String::new();
+    let mut handled = false;
+    for raw in rc.lines() {
+        let line = raw.trim();
+        if let Some(value) = rc_assignment_value(line, "NIU_PLUGINS") {
+            handled = true;
+            let mut names = parse_plugin_array(value);
+            if insert {
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            } else {
+                names.retain(|n| n != name);
+            }
+            out.push_str(&format_plugin_array_line(&names));
+            out.push('\n');
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    if !handled && insert {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format_plugin_array_line(&[name.to_string()]));
+        out.push('\n');
+    }
+    // The rc reader trims trailing newlines via lines(); preserve a single
+    // trailing newline like the original when it ended with one.
+    if rc.ends_with('\n') && out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
+}
+
+fn format_plugin_array_line(names: &[String]) -> String {
+    if names.is_empty() {
+        "NIU_PLUGINS=()".to_string()
+    } else {
+        format!("NIU_PLUGINS=({})", names.join(" "))
+    }
+}
+
+/// Rewrite the rc's plugin selection: set `NIU_DISABLE_DEFAULT_PLUGINS` and
+/// replace the `NIU_PLUGINS=(...)` line with `keep`. Used by `disable` for
+/// default-on packs where removal alone is not enough.
+fn rewrite_rc_plugin_selection(rc: &str, keep: &[String], disable_defaults: bool) -> String {
+    let mut out = String::new();
+    let mut saw_disable = false;
+    let mut saw_plugins = false;
+    for raw in rc.lines() {
+        let line = raw.trim();
+        if let Some(_) = rc_assignment_value(line, "NIU_DISABLE_DEFAULT_PLUGINS") {
+            saw_disable = true;
+            out.push_str(&format!(
+                "NIU_DISABLE_DEFAULT_PLUGINS={}",
+                if disable_defaults { "1" } else { "0" }
+            ));
+            out.push('\n');
+            continue;
+        }
+        if let Some(_) = rc_assignment_value(line, "NIU_PLUGINS") {
+            saw_plugins = true;
+            out.push_str(&format_plugin_array_line(keep));
+            out.push('\n');
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    if !saw_plugins {
+        out.push_str(&format_plugin_array_line(keep));
+        out.push('\n');
+    }
+    if !saw_disable && disable_defaults {
+        out.push_str("NIU_DISABLE_DEFAULT_PLUGINS=1\n");
+    }
+    if rc.ends_with('\n') && out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
+}
+
 fn official_bundle_root() -> PathBuf {
     env_path("NIU_PLUGIN_BUNDLE_ROOT")
         .or_else(|| shell_home_dir().map(|home| home.join(".niubash").join("bundles")))

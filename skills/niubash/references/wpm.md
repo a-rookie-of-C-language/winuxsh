@@ -8,7 +8,10 @@ management.
 - `wpm list`, `wpm search`, `wpm info`: inspect packages.
 - `wpm install`: install a missing command or package.
 - `wpm index status`: inspect package-index state.
+- `wpm index update`: refresh the package index before searching if it is
+  stale or empty.
 - `wpm update winuxcmd`: update WinuxCmd itself.
+- `niu doctor`: one-shot health check covering links, core, rc, and bundle.
 
 Discover what the user actually has installed before assuming a tool is
 present — run these directly in the current Niubash session:

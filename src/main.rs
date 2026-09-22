@@ -62,6 +62,7 @@ fn run_main() -> ExitCode {
     // Install Ctrl+C handler (best-effort)
     niubash_runtime::ctrl_c::install();
     niubash_runtime::console_guard::prefer_utf8_code_page();
+    niubash_runtime::console_guard::enable_vt_output();
 
     // Expose the host binary path so rubash's bash shim can forward to niu.
     // WINUXSH_SHELL is a deprecated bridge for current rubash upstream.
@@ -104,12 +105,35 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     if first.starts_with('-')
         && !matches!(
             first.as_str(),
-            "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command"
+            "-h" | "--help"
+                | "-V"
+                | "--version"
+                | "-C"
+                | "--repl-command"
+                | "--gitstatus-daemon"
+                | "--completion-probe"
+                | "--install-wt-profile"
+                | "--self-update"
         )
         && !legacy_command_mode_has_post_c_login_flag(args)
         && ShellInvocation::parse(&args[1..]).is_ok()
     {
-        return run_shell_invocation(&args[1..]);
+        // P3 invocation alignment: a leading-dash argument the engine parser
+        // rejects is a usage error with the GNU surface (shell.c:874-881):
+        // "<shell>: <option>: invalid option" + usage block, rc 2
+        // (EX_BADUSAGE). The engine (rubash main.rs) reports under the
+        // literal "bash" name so the upstream invocation suite normalizes
+        // byte-for-byte; keep that convention.
+        return match ShellInvocation::parse(&args[1..]) {
+            Ok(_) => run_shell_invocation(&args[1..]),
+            Err(message) => {
+                eprintln!("bash: {message}");
+                if message.contains("invalid option") {
+                    show_shell_usage();
+                }
+                std::process::exit(2);
+            }
+        };
     }
     match first.as_str() {
         "-h" | "--help" => {
@@ -130,7 +154,12 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "--self-update" => self_update::run(&args[2..]),
-        "setup" | "configure" => niubash_runtime::setup_wizard::rerun_wizard(),
+        "setup" | "configure" => match setup_preset_arg(&args[2..]) {
+            Some(name) => niubash_runtime::setup_wizard::apply_preset(&name),
+            None => niubash_runtime::setup_wizard::rerun_wizard(),
+        },
+        "font" => niubash_runtime::fonts::run_font_command(),
+        "doctor" => niubash_runtime::doctor::run_doctor(),
         "plugin" => run_plugin_command(args),
         "-C" | "--repl-command" => run_repl_command(args),
         "-c" => {
@@ -161,7 +190,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             // Treat as a script file to execute
             let script = script_arg_to_host_path(first);
             if !script.exists() {
-                anyhow::bail!("unknown argument '{}' (not a script file)", first);
+                // shell.c shell_execve on a name that is neither option,
+                // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
+                eprintln!("niu: {}: No such file or directory", first);
+                std::process::exit(127);
             }
             let mut shell = niubash_runtime::Shell::new()?;
             shell.set_script_name(first);
@@ -209,12 +241,16 @@ fn legacy_command_mode_has_post_c_login_flag(args: &[String]) -> bool {
 }
 
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
+    // Read before Shell::new overwrites the process variable (shell name
+    // setup writes BASH_ARGV0 back into the environment).
+    let inherited_argv0 = std::env::var("BASH_ARGV0").ok().filter(|v| !v.is_empty());
     let invocation =
         ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
 
     if invocation.dump_strings {
         let input = invocation_input(&invocation)?;
-        print_locale_strings(&input, invocation.dump_po);
+        let source_name = invocation_source_name(&invocation);
+        print_locale_strings(&input, invocation.dump_po, &source_name);
         return Ok(());
     }
     if invocation.pretty_print {
@@ -235,13 +271,28 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.no_editing = invocation.no_editing;
     invocation
         .apply_to_executor(&mut shell.executor)
-        .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
+        .map_err(|error| {
+            // shell.c reports a bad -o/-O option name through the line-0
+            // diagnostic ("bash: line 0: badopt: invalid shell option name").
+            if error.contains("invalid shell option name") {
+                eprintln!("bash: line 0: {error}");
+                std::process::exit(2);
+            }
+            anyhow::anyhow!("niu: {error}")
+        })?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
         shell.source_non_interactive_env();
         niubash_runtime::startup_trace::tick("invocation: setup done");
+        // GNU shell.c: $0 for -c is the word after the command string, or
+        // $BASH_ARGV0 from the environment when exported by the caller.
+        if let Some(argv0) = inherited_argv0.clone() {
+            shell.set_script_name(&argv0);
+        } else if let Some(name) = invocation.command_name.clone() {
+            shell.set_script_name(&name);
+        }
         shell.executor.set_env("BASH_EXECUTION_STRING", &command);
         let code = shell.execute_script(&command)?;
         niubash_runtime::startup_trace::tick("invocation: execute_script");
@@ -296,60 +347,437 @@ fn invocation_input(invocation: &ShellInvocation) -> anyhow::Result<String> {
 /// -D / --dump-strings: list every locale string ($"...") without executing,
 /// the way GNU bash's dump-strings option does. --dump-po-strings selects the
 /// GNU gettext PO output format.
-fn print_locale_strings(input: &str, po: bool) {
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'$' && bytes[i + 1] == b'"' {
-            let mut j = i + 2;
-            let mut content = String::new();
-            while j < bytes.len() {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    content.push(bytes[j + 1] as char);
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == b'"' {
-                    break;
-                }
-                content.push(bytes[j] as char);
-                j += 1;
-            }
-            if po {
-                println!("msgid \"{}\"", content);
-                println!("msgstr \"\"");
-            } else {
-                println!("\"{}\"", content);
-            }
-            i = j + 1;
-        } else {
-            i += 1;
+///
+/// GNU recognizes a locale string only where the word lexer reads `$` followed
+/// by `"` while scanning a word (parse.y read_token_word's
+/// `character == '$' && peek_char == '"'` branch; the dump itself is
+/// locale.c locale_expand: printf("\"%s\"\n")). Comment text and here-doc
+/// bodies are never lexed as words, so they never dump; single-quoted text,
+/// double-quoted spans and backtick bodies are skipped as units; word-
+/// embedded, quoted and arithmetic-embedded command substitutions are
+/// re-lexed, so locale strings inside them do dump (parse.y:4100 processes
+/// `$(` units encountered inside a matched pair).
+///
+/// This pass therefore walks the rubash token stream -- which already
+/// excludes the comment and here-doc-body classes structurally, since the
+/// lexer never yields word-shaped tokens from them -- and applies the
+/// word-level quote rules to the raw spelling of word-shaped tokens. The
+/// old implementation byte-scanned the raw script instead and misfired in
+/// exactly those positions.
+fn print_locale_strings(input: &str, po: bool, source_name: &str) {
+    let mut strings = Vec::new();
+    collect_locale_strings(input, 1, &mut strings);
+    print!("{}", render_locale_string_dump(&strings, po, source_name));
+}
+
+/// The `#: name:lineno` anchor GNU bash prints in --dump-po-strings entries
+/// (locale.c locale_expand passes yy_input_name()): the script path as given
+/// on argv, the literal `-c` for -c input, and the shell's own argv[0] for
+/// standard input.
+fn invocation_source_name(invocation: &ShellInvocation) -> String {
+    if invocation.command.is_some() {
+        return "-c".to_string();
+    }
+    if let Some(script) = &invocation.script {
+        return script.clone();
+    }
+    std::env::args().next().unwrap_or_else(|| "niu".to_string())
+}
+
+/// Collects `(line, raw body)` for every locale string in `input`, in source
+/// order. `base_line` is the line the token stream's own numbering starts
+/// from: top-level tokens carry real script lines in `token.position`, while
+/// a re-lexed substitution body restarts at 1, so nested strings are mapped
+/// back with `base_line + position - 1`. GNU reports the physical line of
+/// each nested string; the two agree whenever the substitution body starts
+/// on its token's start line (the overwhelmingly common single-line word).
+fn collect_locale_strings(input: &str, base_line: usize, out: &mut Vec<(usize, String)>) {
+    for token in rubash::lexer::tokenize(input) {
+        let line = base_line + token.position.saturating_sub(1);
+        match token.kind {
+            rubash::TokenKind::Word
+            | rubash::TokenKind::Assignment
+            | rubash::TokenKind::BraceExpand => scan_locale_words(&token.raw, line, out),
+            rubash::TokenKind::CommandSubst => match substitution_span(&token.raw) {
+                SubstitutionSpan::Command(body) => collect_locale_strings(&body, line, out),
+                SubstitutionSpan::Arithmetic(body) => scan_arithmetic_text(&body, line, out),
+                SubstitutionSpan::None => {}
+            },
+            _ => {}
         }
     }
 }
 
-/// --pretty-print: parse the input and print it back in normalized form.
-/// rubash has no AST-to-source serializer yet, so this validates the script
-/// and rebuilds the source from the token stream, preserving whitespace.
-fn pretty_print_script(input: &str) {
-    use rubash::TokenKind;
-    let tokens = rubash::lexer::tokenize(input);
-    if tokens.is_empty() {
-        return;
+/// Word-level scan of one token's raw spelling, mirroring where GNU's word
+/// lexer recognizes `$"`: outside single quotes, double-quoted spans,
+/// backtick bodies and `${...}`/`$'...'` units. `\"` at word level escapes
+/// the next character, so `\$"x"` is not a locale string introducer.
+fn scan_locale_words(raw: &str, line: usize, out: &mut Vec<(usize, String)>) {
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'"' => i = scan_double_quoted(raw, i + 1, line, out),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'"') => {
+                    let close = locale_body_end(raw, i + 2, line, out);
+                    out.push((line, raw[i + 2..close].to_string()));
+                    i = close + 1;
+                }
+                Some(b'\'') => i = skip_ansi_c_quoted(bytes, i + 2),
+                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
     }
-    let _ast = rubash::parser::parse(&tokens);
+}
+
+/// Byte index of the closing `"` of a locale string body whose text starts at
+/// `start` (just past the opening quote). Nested `${...}`/`` `...` ``/`$(...)`
+/// units are skipped the way GNU parse_matched_pair skips them while it
+/// extracts the pair, and command-substitution units are re-lexed so their
+/// own locale strings dump first (GNU order: inner before outer). The
+/// surrounding body is reported verbatim: GNU additionally rewrites nested
+/// `$"..."` units to `"..."` inside the body it dumps, which needs a
+/// byte-exact body serializer rubash does not expose (host-semantic-layer
+/// plan, C1 residual).
+fn locale_body_end(raw: &str, start: usize, line: usize, out: &mut Vec<(usize, String)>) -> usize {
+    let bytes = raw.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Walks a double-quoted span. `$` followed by `"` is literal data here (GNU
+/// dumps nothing for `echo "$"dqp" tail"`), while `$(...)` units are re-lexed
+/// (parse.y:4100) and their locale strings dump.
+fn scan_double_quoted(
+    raw: &str,
+    start: usize,
+    line: usize,
+    out: &mut Vec<(usize, String)>,
+) -> usize {
+    let bytes = raw.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i + 1,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' => match bytes.get(i + 1) {
+                Some(b'{') => i = skip_dollar_brace(bytes, i + 2),
+                Some(b'(') => i = scan_substitution_unit(raw, i + 1, line, out),
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Extracts the span of a `$(...)` / `$((...))` unit whose `(` sits at `open`
+/// and dispatches it: command-substitution bodies are re-lexed (GNU dumps
+/// their locale strings, unquoted, word-embedded or double-quoted alike) and
+/// arithmetic bodies keep dumping only through the quoted command
+/// substitutions they contain.
+fn scan_substitution_unit(
+    raw: &str,
+    open: usize,
+    line: usize,
+    out: &mut Vec<(usize, String)>,
+) -> usize {
+    let bytes = raw.as_bytes();
+    let Some(close) = paren_close(bytes, open) else {
+        return bytes.len();
+    };
+    if bytes.get(open + 1) == Some(&b'(') {
+        scan_arithmetic_text(&raw[open + 2..close - 1], line, out);
+    } else {
+        collect_locale_strings(&raw[open + 1..close], line, out);
+    }
+    close + 1
+}
+
+/// Arithmetic text (`$(( ... ))` inner span): `$"..."` never fires here, but
+/// quoted command substitutions are parsed by GNU and their locale strings
+/// dump (GNU 5.3.0: `$(( "$(echo $"x")" + 1 ))` dumps `"x"`).
+fn scan_arithmetic_text(text: &str, line: usize, out: &mut Vec<(usize, String)>) {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = scan_double_quoted(text, i + 1, line, out),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                if bytes.get(i + 2) == Some(&b'(') {
+                    // Nested arithmetic span: no locale recognition inside.
+                    i += 3;
+                } else {
+                    i = scan_substitution_unit(text, i + 1, line, out);
+                }
+            }
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+}
+
+enum SubstitutionSpan {
+    Command(String),
+    Arithmetic(String),
+    None,
+}
+
+/// Classifies a CommandSubst token's raw spelling: a `` `...` `` token shares
+/// the kind but never starts with `$(`, and its body must not be re-lexed
+/// (GNU keeps backtick bodies verbatim at parse time, so `echo `echo $"x"``
+/// dumps nothing). `$((...))` yields its arithmetic inner span.
+fn substitution_span(raw: &str) -> SubstitutionSpan {
+    let bytes = raw.as_bytes();
+    if bytes.first() != Some(&b'$') || bytes.get(1) != Some(&b'(') {
+        return SubstitutionSpan::None;
+    }
+    let Some(close) = paren_close(bytes, 1) else {
+        return SubstitutionSpan::None;
+    };
+    if bytes.get(2) == Some(&b'(') {
+        SubstitutionSpan::Arithmetic(raw[3..close - 1].to_string())
+    } else {
+        SubstitutionSpan::Command(raw[2..close].to_string())
+    }
+}
+
+/// Byte index of the `)` matching the `(` at `open`, honoring quoting the way
+/// GNU parse_matched_pair does while it extracts a substitution span. Returns
+/// None when the span never closes; callers then treat the rest of the text
+/// as the unit, which keeps the scan total on malformed input.
+fn paren_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i - 1);
+                }
+            }
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'"' => i = skip_double_span(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn skip_single_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn skip_ansi_c_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => return i + 1,
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_backquoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => return i + 1,
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_double_span(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return i + 1,
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'$' if bytes.get(i + 1) == Some(&b'{') => i = skip_dollar_brace(bytes, i + 2),
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_dollar_brace(bytes: &[u8], mut i: usize) -> usize {
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'"' => i = skip_double_span(bytes, i + 1),
+            b'`' => i = skip_backquoted(bytes, i + 1),
+            b'\\' => i = (i + 2).min(bytes.len()),
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Renders collected locale strings exactly the way GNU bash prints them
+/// (locale.c locale_expand): plain mode is `"body"` with the raw body text
+/// verbatim (escapes stay escaped, embedded newlines split the output line),
+/// and PO mode is the mk_msgstr form anchored by `#: name:lineno`.
+fn render_locale_string_dump(strings: &[(usize, String)], po: bool, source_name: &str) -> String {
     let mut out = String::new();
-    for token in &tokens {
-        if token.kind == TokenKind::Eof {
+    for (line, body) in strings {
+        if po {
+            let mut escaped = String::new();
+            let mut multiline = false;
+            for ch in body.chars() {
+                match ch {
+                    '\n' => {
+                        escaped.push_str("\\n\"\n\"");
+                        multiline = true;
+                    }
+                    '"' | '\\' => {
+                        escaped.push('\\');
+                        escaped.push(ch);
+                    }
+                    _ => escaped.push(ch),
+                }
+            }
+            if multiline {
+                out.push_str(&format!(
+                    "#: {source_name}:{line}\nmsgid \"\"\n\"{escaped}\"\nmsgstr \"\"\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "#: {source_name}:{line}\nmsgid \"{escaped}\"\nmsgstr \"\"\n"
+                ));
+            }
+        } else {
+            out.push('"');
+            out.push_str(body);
+            out.push_str("\"\n");
+        }
+    }
+    out
+}
+
+/// --pretty-print: GNU pretty_print_loop (eval.c:215-253) reads one command
+/// at a time: a blank input line ends the current command, an empty parse
+/// prints one newline (suppressed right after another newline), and each
+/// parsed command prints as its canonical text plus one newline. Mirrors the
+/// engine's rubash main.rs implementation over the public parser API.
+fn pretty_print_script(input: &str) {
+    let posix = std::env::var("__RUBASH_POSIX_MODE").as_deref() == Ok("1");
+    let mut output = String::new();
+    let mut pending = String::new();
+    let mut last_was_newline = false;
+    for line in input.lines() {
+        if line.trim().is_empty() && !rubash::lexer::has_unclosed_input_syntax(&pending) {
+            last_was_newline =
+                flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+            pending.clear();
+            if !last_was_newline {
+                output.push('\n');
+                last_was_newline = true;
+            }
             continue;
         }
-        out.push_str(&token.leading_ws);
-        out.push_str(&token.raw);
+        if !pending.is_empty() {
+            pending.push('\n');
+        }
+        pending.push_str(line);
     }
-    print!("{}", out);
-    if !out.ends_with('\n') {
-        println!();
+    last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+    if !last_was_newline && !output.is_empty() {
+        output.push('\n');
     }
+    print!("{output}");
+}
+
+fn flush_pretty_print_chunk(
+    chunk: &str,
+    posix: bool,
+    output: &mut String,
+    last_was_newline: bool,
+) -> bool {
+    let tokens = rubash::lexer::tokenize_with_initial_posix(chunk, posix);
+    let ast = rubash::parser::parse(&tokens);
+    let mut printed = false;
+    for command in &ast.commands {
+        if is_pretty_print_empty(command) {
+            continue;
+        }
+        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
+        output.push('\n');
+        printed = true;
+    }
+    if printed {
+        return false;
+    }
+    last_was_newline
+}
+
+fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
+    command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && command.for_command.is_none()
+        && command.select_command.is_none()
+        && command.loop_command.is_none()
+        && command.if_command.is_none()
+        && command.case_command.is_none()
+        && command.function_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.conditional_command.is_none()
+        && command.coproc_command.is_none()
+        && command.brace_group.is_none()
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {
@@ -568,6 +996,44 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
     None
 }
 
+/// GNU shell.c show_shell_usage (shell.c:2056-2103) with extra=0: the usage
+/// block the upstream invocation suite expects after an invalid option. The
+/// "bash" spelling is the engine convention (rubash main.rs) so the suite's
+/// `sed 's|^.*/bash|bash|'` normalization matches byte for byte.
+fn show_shell_usage() {
+    eprint!(
+        "bash [GNU long option] [option] ...
+bash [GNU long option] [option] script-file ...
+"
+    );
+    eprintln!("GNU long options:");
+    for name in LONG_OPTIONS {
+        eprintln!("	--{name}");
+    }
+    eprintln!("Shell options:");
+    eprintln!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
+    eprintln!("	-abefhkmnptuvxBCEHPT or -o option");
+}
+
+const LONG_OPTIONS: &[&str] = &[
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+];
+
 fn print_usage() {
     println!(
         "Niubash {} \u{2014} a bash-compatible shell that feels at home on Windows.",
@@ -578,7 +1044,9 @@ fn print_usage() {
     println!("        niu -c <cmd>         Run a command then exit");
     println!("        niu -C <cmd>         Run one REPL-style command then exit");
     println!("        niu setup           Re-run prompt/plugin setup");
-    println!("        niu <script> [args]   Run a script file");
+    println!("        niu font            Install a Nerd Font for icon-rich themes");
+    println!("        niu doctor          Health-check the installation");
+    println!("        niu <script> [args]  Run a script file");
     println!();
     println!("Options:");
     println!("  -h, --help                Show this help");
@@ -613,8 +1081,6 @@ fn print_usage() {
     println!("  plugin use <name>         Activate a trusted third-party bundle");
     println!("  plugin remove <name>      Remove a third-party bundle");
     println!();
-    println!();
-    println!();
     println!("  --completion-probe <line> [cursor]  Debug: print completion candidates");
     println!();
     println!("Configuration: ~/.niubashrc for interactive startup; a pre-rename ~/.winuxshrc is migrated once into ~/.niubashrc");
@@ -630,6 +1096,8 @@ fn print_usage() {
         "                          NIU_ENV takes precedence). Unset by default, keeping -c fast."
     );
     println!("  BASH_ENV=<file>         GNU bash compatible: same as NIU_ENV, lower precedence.");
+    println!("  NIU_LANG=<lang>         Setup wizard language (zh / en). Falls back to the");
+    println!("                          Windows UI language, then LC_ALL/LANG.");
 }
 
 fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
@@ -688,6 +1156,8 @@ fn run_plugin_command(args: &[String]) -> anyhow::Result<()> {
         "trust" => run_plugin_trust_command(&args[3..]),
         "use" => run_plugin_use_command(&args[3..]),
         "remove" => run_plugin_remove_command(&args[3..]),
+        "enable" => run_plugin_enable_command(&args[3..]),
+        "disable" => run_plugin_disable_command(&args[3..]),
         unknown => anyhow::bail!("unknown plugin subcommand '{}'", unknown),
     }
 }
@@ -753,6 +1223,73 @@ fn run_plugin_remove_command(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_plugin_enable_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin enable requires a plugin name");
+    };
+    // Validate the pack exists in the active inventory so the user gets a
+    // clear error instead of silently writing a bogus name into ~/.niubashrc.
+    let inventory = niubash_runtime::plugins::active_plugin_inventory();
+    if !inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "unknown plugin '{}'; run `niu plugin list` to see available packs",
+            name
+        );
+    }
+    let path = niubash_runtime::plugins::enable_pack_in_rc(name)?;
+    println!(
+        "{} '{}' in {}",
+        niubash_runtime::text_style::green("Enabled"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
+    println!("restart niu (or reload ~/.niubashrc) for the change to take effect");
+    Ok(())
+}
+
+fn run_plugin_disable_command(args: &[String]) -> anyhow::Result<()> {
+    let Some(name) = args.first() else {
+        anyhow::bail!("plugin disable requires a plugin name");
+    };
+    let inventory = niubash_runtime::plugins::active_plugin_inventory();
+    if !inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!(
+            "unknown plugin '{}'; run `niu plugin list` to see available packs",
+            name
+        );
+    }
+    let is_default = inventory
+        .packs
+        .iter()
+        .any(|pack| pack.name.eq_ignore_ascii_case(name) && pack.default);
+    let path = niubash_runtime::plugins::disable_pack_in_rc(name, &inventory)?;
+    println!(
+        "{} '{}' in {}",
+        niubash_runtime::text_style::green("Disabled"),
+        name,
+        niubash_runtime::text_style::dim(&path.display().to_string())
+    );
+    if is_default {
+        println!(
+            "{}",
+            niubash_runtime::text_style::dim(
+                "'{}' is on by default; the rc was rewritten with NIU_DISABLE_DEFAULT_PLUGINS=1 \
+                 and the remaining active packs listed in NIU_PLUGINS."
+            )
+        );
+    }
+    println!("restart niu (or reload ~/.niubashrc) for the change to take effect");
+    Ok(())
+}
+
 fn run_plugin_doctor_command(args: &[String]) -> anyhow::Result<()> {
     let json = args.iter().any(|arg| arg == "--json");
     let verbose = args.iter().any(|arg| arg == "--verbose");
@@ -788,7 +1325,7 @@ fn run_plugin_review_command(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
-    let (query, json) = parse_plugin_search_args(args)?;
+    let (query, json, verbose) = parse_plugin_search_args(args)?;
     if json {
         println!(
             "{}",
@@ -797,18 +1334,29 @@ fn run_plugin_search_command(args: &[String]) -> anyhow::Result<()> {
     } else {
         println!(
             "{}",
-            niubash_runtime::plugins::plugin_search_text(query.as_deref())
+            niubash_runtime::plugins::plugin_search_text(query.as_deref(), verbose)
         );
     }
     Ok(())
 }
 
 fn run_plugin_themes_command(args: &[String]) -> anyhow::Result<()> {
-    let json = parse_plugin_json_flag(args)?;
+    let mut json = false;
+    let mut verbose = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--verbose" => verbose = true,
+            unknown => anyhow::bail!("unknown plugin option '{}'", unknown),
+        }
+    }
     if json {
         println!("{}", niubash_runtime::plugins::plugin_theme_catalog_json()?);
     } else {
-        println!("{}", niubash_runtime::plugins::plugin_theme_catalog_text());
+        println!(
+            "{}",
+            niubash_runtime::plugins::plugin_theme_catalog_text(verbose)
+        );
     }
     Ok(())
 }
@@ -1065,12 +1613,14 @@ fn parse_plugin_json_flag(args: &[String]) -> anyhow::Result<bool> {
     Ok(json)
 }
 
-fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, bool)> {
+fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, bool, bool)> {
     let mut query = None;
     let mut json = false;
+    let mut verbose = false;
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
+            "--verbose" => verbose = true,
             value if value.starts_with("-") => {
                 anyhow::bail!("unknown plugin search option {}", value)
             }
@@ -1082,17 +1632,19 @@ fn parse_plugin_search_args(args: &[String]) -> anyhow::Result<(Option<String>, 
             }
         }
     }
-    Ok((query, json))
+    Ok((query, json, verbose))
 }
 
 fn print_plugin_usage() {
     println!("Usage:  niu plugin <command>");
     println!();
     println!("Commands:");
-    println!("  list [--json]             List official Niubash plugins");
-    println!("  info <name> [--json]      Inspect one official Niubash plugin");
-    println!("  search [query] [--json]   Discover official plugins");
-    println!("  themes [--json]           List user and bundle themes");
+    println!("  list [--json] [--verbose] List official Niubash plugins (active state)");
+    println!("  info <name> [--json] [--verbose]  Inspect one plugin");
+    println!("  search [query] [--json] [--verbose]  Discover plugins");
+    println!("  themes [--json] [--verbose]  List user and bundle themes");
+    println!("  enable <name>             Enable a plugin in ~/.niubashrc");
+    println!("  disable <name>            Disable a plugin in ~/.niubashrc");
     println!("  bundle status [--json]    Inspect official bundle install state");
     println!("  doctor [--json] [--verbose]  Diagnose plugin configuration health");
     println!("  review <name> [--json]    Review plugin permissions before enabling");
@@ -1105,6 +1657,21 @@ fn print_plugin_usage() {
     println!("                            Roll back to the previous bundle");
     println!("  install <name>           Install official plugin from active bundle");
     println!("  uninstall <name>         Uninstall official plugin from active bundle");
+}
+
+/// Parse `--preset <name>` / `--preset=<name>` from `niu setup` arguments.
+/// Unknown flags are ignored so the interactive wizard keeps working.
+fn setup_preset_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--preset" {
+            return iter.next().cloned();
+        }
+        if let Some(name) = arg.strip_prefix("--preset=") {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
@@ -1125,6 +1692,7 @@ fn install_windows_terminal_profile(args: &[String]) -> anyhow::Result<()> {
         &commandline,
         icon.as_deref(),
         set_default,
+        None,
     )?;
 
     if !quiet {
@@ -1239,5 +1807,123 @@ mod tests {
         assert!(normalize_plugin_bundle_release_tag("stable").is_err());
         assert!(normalize_plugin_bundle_release_tag("v1.2").is_err());
         assert!(normalize_plugin_bundle_release_tag("v1.2.3.4").is_err());
+    }
+
+    fn dumped_bodies(input: &str) -> Vec<String> {
+        let mut strings = Vec::new();
+        collect_locale_strings(input, 1, &mut strings);
+        strings.into_iter().map(|(_, body)| body).collect()
+    }
+
+    /// GNU bash 5.3.0 (`--dump-strings`, probed case-by-case): locale
+    /// strings dump only where the word lexer sees `$"`, never in comment
+    /// text, here-doc bodies, single-quoted text, double-quoted spans or
+    /// backtick bodies; assignment RHS and command substitutions do.
+    #[test]
+    fn dump_strings_recognition_matches_gnu_word_lexer() {
+        assert_eq!(dumped_bodies("echo $\"plain\""), vec!["plain"]);
+        assert_eq!(dumped_bodies("echo a$\"mid\"dle"), vec!["mid"]);
+        assert_eq!(dumped_bodies("x=$\"assign.rhs\""), vec!["assign.rhs"]);
+        assert_eq!(dumped_bodies("echo $\"one\" $\"two\""), vec!["one", "two"]);
+        assert_eq!(dumped_bodies("echo $\"a\"$\"b\""), vec!["a", "b"]);
+        assert!(dumped_bodies("# comment with $\"in.comment\" text").is_empty());
+        assert!(dumped_bodies("echo '$\"single.quoted\" not locale'").is_empty());
+        assert!(dumped_bodies("echo \"$\"dqp\" tail\"").is_empty());
+        assert!(dumped_bodies("echo \"a$\"b\"c\"").is_empty());
+        assert!(dumped_bodies("echo `echo $\"in.backtick\"`").is_empty());
+        assert!(dumped_bodies("echo \\$\"escaped.dollar\"").is_empty());
+        assert_eq!(
+            dumped_bodies("cat <<EOF\nheredoc body with $\"in.heredoc\"\nEOF\necho $\"after\""),
+            vec!["after"]
+        );
+    }
+
+    /// GNU prints the raw body text between the quotes, verbatim: escapes
+    /// stay escaped (`locale.c locale_expand` printf("\"%s\"\n", temp)).
+    #[test]
+    fn dump_strings_keeps_escapes_raw() {
+        assert_eq!(
+            dumped_bodies("echo $\"esc \\\"q1\\\" q2\""),
+            vec!["esc \\\"q1\\\" q2"]
+        );
+        assert_eq!(
+            dumped_bodies("echo $\"tail.backslash\\\\\""),
+            vec!["tail.backslash\\\\"]
+        );
+        // A real newline inside the string stays in the dumped body.
+        assert_eq!(dumped_bodies("echo $\"multi\nline\""), vec!["multi\nline"]);
+    }
+
+    /// Command substitutions are re-lexed (parse.y:4100), whichever quoting
+    /// context hides them; backtick bodies are not.
+    #[test]
+    fn dump_strings_recurses_into_command_substitutions() {
+        assert_eq!(
+            dumped_bodies("echo $(echo $\"in.comsub\")"),
+            vec!["in.comsub"]
+        );
+        assert_eq!(
+            dumped_bodies("echo pre$(echo $\"midcomsub\")post"),
+            vec!["midcomsub"]
+        );
+        assert_eq!(
+            dumped_bodies("echo \"$(echo $\"quotedcomsub\")\""),
+            vec!["quotedcomsub"]
+        );
+        assert_eq!(
+            dumped_bodies("echo $(( $(echo $\"arithcomsub\") + 1 ))"),
+            vec!["arithcomsub"]
+        );
+    }
+
+    /// locale.c mk_msgstr: `"` and `\` backslash-escaped, embedded newlines
+    /// split as `\n` + quote close/reopen with an empty first msgid, entry
+    /// anchored by `#: name:lineno` (line = the `$"` line).
+    #[test]
+    fn dump_po_strings_matches_gnu_format() {
+        let render = |input: &str| {
+            let mut strings = Vec::new();
+            collect_locale_strings(input, 1, &mut strings);
+            render_locale_string_dump(&strings, true, "probe.sh")
+        };
+        assert_eq!(
+            render("echo $\"plain\""),
+            "#: probe.sh:1\nmsgid \"plain\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"esc \\\"q1\\\" q2\""),
+            "#: probe.sh:1\nmsgid \"esc \\\\\\\"q1\\\\\\\" q2\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"multi\nline\""),
+            "#: probe.sh:1\nmsgid \"\"\n\"multi\\n\"\n\"line\"\nmsgstr \"\"\n"
+        );
+        // One entry per string, anchored on its own line.
+        assert_eq!(
+            render("echo $\"one\" $\"two\"\necho $\"three\""),
+            "#: probe.sh:1\nmsgid \"one\"\nmsgstr \"\"\n\
+             #: probe.sh:1\nmsgid \"two\"\nmsgstr \"\"\n\
+             #: probe.sh:2\nmsgid \"three\"\nmsgstr \"\"\n"
+        );
+        assert_eq!(
+            render("echo $\"\""),
+            "#: probe.sh:1\nmsgid \"\"\nmsgstr \"\"\n"
+        );
+    }
+
+    /// GNU yy_input_name() convention: the script path as given, the literal
+    /// `-c` for -c input, the shell's own argv[0] for standard input.
+    #[test]
+    fn invocation_source_name_follows_gnu_convention() {
+        let mut invocation = ShellInvocation::parse(&[]).unwrap();
+        assert_eq!(
+            invocation_source_name(&invocation),
+            std::env::args().next().unwrap_or_else(|| "niu".to_string())
+        );
+        invocation.command = Some("echo hi".to_string());
+        assert_eq!(invocation_source_name(&invocation), "-c");
+        invocation.command = None;
+        invocation.script = Some("D:/repo/probe.sh".to_string());
+        assert_eq!(invocation_source_name(&invocation), "D:/repo/probe.sh");
     }
 }

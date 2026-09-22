@@ -25,6 +25,30 @@ emulation layer, no path roulette. One `niu.exe` bundles the
 commands from [winuxcmd](https://github.com/unixwin/winuxcmd), a git-aware
 prompt, and a permission-modeled plugin system.
 
+**What it is — and is not.** niubash is a bash-compatible shell implemented
+natively in Rust for Windows: the language engine
+([rubash](https://github.com/unixwin/rubash)) is a from-scratch Bash
+interpreter, and the bundled Unix commands are native Windows executables.
+It is **not MSYS2, not Cygwin, not Git Bash, and not WSL** — there is no
+POSIX emulation layer, no `cygwin1.dll` / `msys-2.0.dll`, and no
+path-translation machinery anywhere in the stack. Every process niubash
+starts is an ordinary Win32 process, and niubash itself has **no runtime
+dependency on Python, Node.js, or any other language toolchain** (the setup
+wizard can optionally install modern CLI tools via `wpm` — that is a
+convenience, never a dependency).
+
+**There is no path-conversion layer — by design.** MSYS-family shells live
+in a Unix-looking world and must heuristically translate to Windows, and
+since a heuristic that always guesses right does not exist, they ship
+escape hatches (`MSYS_NO_PATHCONV`, `MSYS2_ARG_CONV_EXCL`) for when the
+guessing breaks your command — an off switch is a confession that the
+layer misfires. Niubash has nothing to switch off: the **Windows-native
+path is the shell's first-class internal representation**. `/c/...`,
+`/mnt/c/...`, and `C:\...` are all understood as input spellings of that
+one reality; what any process receives is always a native Windows path.
+Native Windows programs cannot hit a path problem coming from this shell —
+there is no translation step left to get wrong.
+
 **Highlights**
 
 - **Real Bash** — `if`, `for`, `case`, `$(...)`, pipes, heredocs, functions, arrays. The [rubash](https://github.com/unixwin/rubash) engine passes **86/86** of GNU Bash's own test suite.
@@ -87,7 +111,7 @@ NIU_PLUGINS=(prompt-core git common-aliases)
 export NIU_THEME NIU_THEME_PLUGIN
 
 # the official plugin distribution, oh-my-niu
-[ -f "$NIUBASH/oh-my-niu.winux" ] && . "$NIUBASH/oh-my-niu.winux"
+[ -f "$NIUBASH/oh-my-niu.niu" ] && . "$NIUBASH/oh-my-niu.niu"
 
 alias ll='ls -la'
 alias gst='git status'
@@ -177,9 +201,10 @@ This is what that feels like from the other side of the keyboard:
 
 | | niubash | WSL | Git Bash | PowerShell | CMD |
 |---|---|---|---|---|---|
+| Implementation | native Rust engine, native PE commands | full Linux distro in a VM | POSIX emulation (`msys-2.0.dll`) | native | native |
 | Bash syntax | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Native Windows paths (no `/mnt/c`) | ✅ | ❌ | ⚠️ conversion quirks | ✅ | ✅ |
-| Calls `git.exe` / `node.exe` directly | ✅ | ⚠️ via `/mnt/c` | ⚠️ path translation | ✅ | ✅ |
+| Native Windows paths (no `/mnt/c`) | ✅ | ❌ | ⚠️ heuristic conversion, corrupts args | ✅ | ✅ |
+| Calls `git.exe` / `node.exe` directly | ✅ | ⚠️ via `/mnt/c` | ⚠️ path translation mangles args | ✅ | ✅ |
 | Unix commands (`ls`, `grep`, `find`) | ✅ | ✅ | ✅ | ❌ | ❌ |
 | Agent-written Bash just runs | ✅ | ✅ | ⚠️ arg rewriting | ❌ | ❌ |
 | Cold start to prompt | **~170 ms** | seconds | ~1 s | ~280 ms | — |
@@ -187,6 +212,44 @@ This is what that feels like from the other side of the keyboard:
 | Themes / git prompt / plugins | ✅ | — | ✅ | ⚠️ | ❌ |
 
 One binary. One process. No distro to patch, no emulation layer to appease.
+Emulation was the previous century's approximation of the right
+architecture — a native implementation where the Windows path is the only
+path that exists. That architecture ships here.
+
+### The closest comparable: [brush](https://github.com/reubeno/brush)
+
+Credit where due: brush pioneered "bash, re-implemented in Rust" and took it
+further than anyone else — it is the honest reference point for this
+category. The head-to-head:
+
+| | niubash | brush |
+|---|---|---|
+| Approach | bash re-implemented in Rust, Windows-native | bash re-implemented in Rust, cross-platform |
+| Compatibility gate | GNU Bash's **own upstream test suite** — 86/86 gate green, 57/83 full suites byte-identical (zero-diff) | GNU's suite is not run at all; validation is a self-built 1700+ case corpus with bash as oracle, ~125 known failures ([their reference](https://github.com/reubeno/brush/blob/main/docs/reference/compatibility.md)) |
+
+**Same exam, same proctor — measured, not claimed.** We ran GNU Bash's 83
+upstream test suites through the identical bridge harness
+([`run-83.sh`](https://github.com/unixwin/rubash/blob/master/tests/gnu-compat/run-83.sh),
+same baselines from WSL GNU Bash, same output normalization, brush built in
+release mode): **niubash 57/83 byte-identical, brush 10/83** — with 3 suites
+brush could not finish inside the 150-second bound
+(measured 2026-09-21, brush v0.4.0).
+
+Why such a gap? The two test counts measure different instruments. A
+self-built corpus of ~1,700 curated single-case checks answers "does this
+construct roughly work?"; GNU's 83 whole-behavior suites replay bash's own
+torture tests — traps, history expansion, POSIX mode, exotic redirection —
+and demand **byte-identical** output. The bridge above is what "~1700
+tests" buys under the official instrument. And byte-identical is the bar
+that matters for scripts and agents: "close enough" breaks the moment
+output is piped into the next command.
+| Unix commands on Windows | bundled: `ls`, `cat`, `grep`, `find`, `sed`, … via [winuxcmd](https://github.com/unixwin/winuxcmd) | none bundled — you still need external tools for `ls` |
+| Path model | Windows-native paths first-class; `/c/…` and `/mnt/c/…` are input dialects; no conversion layer exists | generic cross-platform path handling |
+| Interactive surface | IDE-style completion menu, 27 themes, plugin ecosystem (oh-my-niu) | syntax highlighting, autosuggestions, starship |
+
+Same idea, different depth. Brush proves the approach works; niubash ships
+its Windows-native completion — engine, commands, path contract, and
+ecosystem together.
 
 ## Architecture
 
@@ -204,6 +267,16 @@ niu.exe
 
 ## FAQ
 
+- **Is niubash based on MSYS2 or Cygwin?** No. MSYS2 and Cygwin are POSIX
+  emulation layers: a Unix-ish DLL runtime, a fake root filesystem, and
+  heuristic path translation that rewrites your arguments at the worst
+  moment. niubash has none of that — Bash compatibility lives in the
+  language engine ([rubash](https://github.com/unixwin/rubash)), commands
+  are native Windows executables, and `C:\`/`C:/` paths pass through
+  untranslated. That's why MSYS-world needs `MSYS_NO_PATHCONV` to turn its
+  converter off — and why niubash has no equivalent flag: there is no
+  converter to disable. (The `bash.exe`/`sh.exe` in the install folder are
+  tiny forwarder shims that start `niu.exe` — not MSYS bash.)
 - **Another Git Bash?** No — Git Bash emulates Unix on top of Windows: translating paths, guessing at arguments. niubash is a native Windows process; Bash compatibility happens in the language engine (rubash), not in a fake filesystem.
 - **Still need WSL?** Sure — for real Linux kernels, Linux Docker, Linux-only toolchains, it's still the right tool. For the other 95% of your day: you don't need WSL. You need niubash.
 - **Why the name `niu`?** Short, fast to type, zero finger travel. The project is niubash, the binary is `niu`, the env prefix is `NIU_` — and "niu" (牛) is what your shell should be on Windows.
