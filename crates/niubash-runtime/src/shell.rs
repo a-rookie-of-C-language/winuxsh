@@ -2977,13 +2977,7 @@ fn execute_niubash_host_external_command(
     // a command the engine can run (GNU findcmd.c: search_for_command
     // decides not-found, not a host pre-filter).
     if engine_can_resolve_external(command, env) {
-        if std::env::var("NIU_DEBUG_SPAWN").as_deref() == Ok("1") {
-            eprintln!("[niu-debug] fall-through engine resolve: {command:?}");
-        }
         return None;
-    }
-    if std::env::var("NIU_DEBUG_SPAWN").as_deref() == Ok("1") {
-        eprintln!("[niu-debug] handler 127 for {command:?}");
     }
 
     command_not_found_host_external_output(command, args, env, plugins)
