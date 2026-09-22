@@ -1471,6 +1471,44 @@ mod tests {
     }
 
     #[test]
+    fn default_keybindings_support_system_clipboard_shortcuts() {
+        let emacs = default_emacs_keybindings();
+        assert_eq!(
+            emacs.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyCode::Char('c')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::CopySelectionSystem]))
+        );
+        assert_eq!(
+            emacs.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyCode::Char('v')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::PasteSystem]))
+        );
+    }
+
+    #[test]
+    fn vi_insert_keybindings_support_system_clipboard_shortcuts() {
+        let insert = default_vi_insert_keybindings();
+        assert_eq!(
+            insert.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyCode::Char('c')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::CopySelectionSystem]))
+        );
+        assert_eq!(
+            insert.find_binding(
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                KeyCode::Char('v')
+            ),
+            Some(ReedlineEvent::Edit(vec![EditCommand::PasteSystem]))
+        );
+    }
+
+    #[test]
     fn native_widget_preset_adds_autosuggest_accept_binding() {
         let mut keybindings = default_emacs_keybindings();
         let config = NativeWidgetConfig {
