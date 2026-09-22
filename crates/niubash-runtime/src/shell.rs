@@ -335,13 +335,17 @@ impl Shell {
             }
         }
 
-        // Official Niubash builtin alias packs. Managed aliases take
-        // precedence, and canonical plugin state gates each pack.
+        // P4: the builtin alias packs (git/docker/kubectl/npm conveniences)
+        // are NOT applied here. They must not leak into non-interactive
+        // runs, where GNU bash scripts would observe them through
+        // BASH_ALIASES (assoc.tests). enter_interactive() installs them on
+        // the REPL path only. User-INSTALLED plugin bundles do apply here:
+        // they are explicit user state, like config aliases.
         for pack_name in ["git", "docker", "kubectl", "npm"] {
             if !plugin_state.is_enabled(pack_name) {
                 continue;
             }
-            let Some(pack_aliases) = crate::plugins::plugin_aliases(pack_name) else {
+            let Some(pack_aliases) = crate::plugins::installed_bundle_aliases(pack_name) else {
                 continue;
             };
             for (name, value) in pack_aliases {
@@ -354,7 +358,7 @@ impl Shell {
             }
         }
 
-        crate::startup_trace::tick("aliases + builtin packs");
+        crate::startup_trace::tick("aliases");
 
         // 6. Prompt + theme. Choose backend based on `prompt_style`:
         //    "segments"  -> new p10k-style segment engine
@@ -673,6 +677,27 @@ impl Shell {
         // so HISTFILE cannot create a second, competing history stream.
         self.executor.set_shell_option("history", false);
         self.executor.unset_env("HISTFILE");
+        // P4: install the builtin alias packs here (interactive only). GNU
+        // alias tables in a script run must stay product-clean, and
+        // BASH_ALIASES must not observe the git/docker/kubectl/npm
+        // conveniences outside the REPL.
+        let plugin_state = self.plugins.clone();
+        for pack_name in ["git", "docker", "kubectl", "npm"] {
+            if !plugin_state.is_enabled(pack_name) {
+                continue;
+            }
+            let Some(pack_aliases) = crate::plugins::plugin_aliases(pack_name) else {
+                continue;
+            };
+            for (name, value) in pack_aliases {
+                if self.aliases.contains_key(&name) {
+                    continue;
+                }
+                if apply_alias(&mut self.executor, &name, &value) {
+                    self.aliases.insert(name, value);
+                }
+            }
+        }
     }
 
     /// Route a one-command AST to an easter egg when this shell is
@@ -7230,19 +7255,29 @@ BACKTICK_VALUE=`whoami`
     }
 
     #[test]
-    fn default_official_git_plugin_installs_builtin_alias_pack() {
+    fn compiled_git_alias_pack_is_interactive_only() {
+        // P4: the compiled convenience pack (gp/gst/...) must not leak into
+        // script/non-interactive runs where BASH_ALIASES observes it; it is
+        // installed on the interactive path only.
         let _env_lock = PROCESS_STATE_LOCK.lock().unwrap();
         let _cwd_guard = CwdGuard::capture();
         let temp = unique_temp_dir("niubash-default-plugin-git");
         std::fs::create_dir_all(&temp).unwrap();
 
-        let shell = Shell::new().unwrap();
+        let mut shell = Shell::new().unwrap();
 
+        assert_eq!(
+            shell.aliases.get("gst").map(String::as_str),
+            None,
+            "compiled convenience aliases must not be applied in script mode"
+        );
+        assert!(shell.plugins.is_enabled("git"));
+
+        shell.enter_interactive();
         assert_eq!(
             shell.aliases.get("gst").map(String::as_str),
             Some("git status")
         );
-        assert!(shell.plugins.is_enabled("git"));
 
         let _ = std::fs::remove_dir_all(temp);
     }

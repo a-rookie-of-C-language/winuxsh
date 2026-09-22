@@ -105,11 +105,33 @@ fn run(args: &[String]) -> anyhow::Result<()> {
     if first.starts_with('-')
         && !matches!(
             first.as_str(),
-            "-h" | "--help" | "-V" | "--version" | "-C" | "--repl-command"
+            "-h" | "--help"
+                | "-V"
+                | "--version"
+                | "-C"
+                | "--repl-command"
+                | "--gitstatus-daemon"
+                | "--completion-probe"
+                | "--install-wt-profile"
+                | "--self-update"
         )
-        && ShellInvocation::parse(&args[1..]).is_ok()
     {
-        return run_shell_invocation(&args[1..]);
+        // P3 invocation alignment: a leading-dash argument the engine parser
+        // rejects is a usage error with the GNU surface (shell.c:874-881):
+        // "<shell>: <option>: invalid option" + usage block, rc 2
+        // (EX_BADUSAGE). The engine (rubash main.rs) reports under the
+        // literal "bash" name so the upstream invocation suite normalizes
+        // byte-for-byte; keep that convention.
+        return match ShellInvocation::parse(&args[1..]) {
+            Ok(_) => run_shell_invocation(&args[1..]),
+            Err(message) => {
+                eprintln!("bash: {message}");
+                if message.contains("invalid option") {
+                    show_shell_usage();
+                }
+                std::process::exit(2);
+            }
+        };
     }
     match first.as_str() {
         "-h" | "--help" => {
@@ -164,7 +186,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             // Treat as a script file to execute
             let script = script_arg_to_host_path(first);
             if !script.exists() {
-                anyhow::bail!("unknown argument '{}' (not a script file)", first);
+                // shell.c shell_execve on a name that is neither option,
+                // builtin, nor file: ENOENT surface, EX_NOTFOUND (127).
+                eprintln!("niu: {}: No such file or directory", first);
+                std::process::exit(127);
             }
             let mut shell = niubash_runtime::Shell::new()?;
             shell.set_script_name(first);
@@ -184,6 +209,9 @@ fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
+    // Read before Shell::new overwrites the process variable (shell name
+    // setup writes BASH_ARGV0 back into the environment).
+    let inherited_argv0 = std::env::var("BASH_ARGV0").ok().filter(|v| !v.is_empty());
     let invocation =
         ShellInvocation::parse(args).map_err(|error| anyhow::anyhow!("niu: {}", error))?;
 
@@ -211,13 +239,28 @@ fn run_shell_invocation(args: &[String]) -> anyhow::Result<()> {
     shell.no_editing = invocation.no_editing;
     invocation
         .apply_to_executor(&mut shell.executor)
-        .map_err(|error| anyhow::anyhow!("niu: {}", error))?;
+        .map_err(|error| {
+            // shell.c reports a bad -o/-O option name through the line-0
+            // diagnostic ("bash: line 0: badopt: invalid shell option name").
+            if error.contains("invalid shell option name") {
+                eprintln!("bash: line 0: {error}");
+                std::process::exit(2);
+            }
+            anyhow::anyhow!("niu: {error}")
+        })?;
     shell.executor.inherit_process_stdin();
     shell.enable_process_stdin_pipeline_bridge();
 
     if let Some(command) = invocation.command {
         shell.source_non_interactive_env();
         niubash_runtime::startup_trace::tick("invocation: setup done");
+        // GNU shell.c: $0 for -c is the word after the command string, or
+        // $BASH_ARGV0 from the environment when exported by the caller.
+        if let Some(argv0) = inherited_argv0.clone() {
+            shell.set_script_name(&argv0);
+        } else if let Some(name) = invocation.command_name.clone() {
+            shell.set_script_name(&name);
+        }
         shell.executor.set_env("BASH_EXECUTION_STRING", &command);
         let code = shell.execute_script(&command)?;
         niubash_runtime::startup_trace::tick("invocation: execute_script");
@@ -630,28 +673,79 @@ fn render_locale_string_dump(strings: &[(usize, String)], po: bool, source_name:
     out
 }
 
-/// --pretty-print: parse the input and print it back in normalized form.
-/// rubash has no AST-to-source serializer yet, so this validates the script
-/// and rebuilds the source from the token stream, preserving whitespace.
+/// --pretty-print: GNU pretty_print_loop (eval.c:215-253) reads one command
+/// at a time: a blank input line ends the current command, an empty parse
+/// prints one newline (suppressed right after another newline), and each
+/// parsed command prints as its canonical text plus one newline. Mirrors the
+/// engine's rubash main.rs implementation over the public parser API.
 fn pretty_print_script(input: &str) {
-    use rubash::TokenKind;
-    let tokens = rubash::lexer::tokenize(input);
-    if tokens.is_empty() {
-        return;
-    }
-    let _ast = rubash::parser::parse(&tokens);
-    let mut out = String::new();
-    for token in &tokens {
-        if token.kind == TokenKind::Eof {
+    let posix = std::env::var("__RUBASH_POSIX_MODE").as_deref() == Ok("1");
+    let mut output = String::new();
+    let mut pending = String::new();
+    let mut last_was_newline = false;
+    for line in input.lines() {
+        if line.trim().is_empty() && !rubash::lexer::has_unclosed_input_syntax(&pending) {
+            last_was_newline =
+                flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+            pending.clear();
+            if !last_was_newline {
+                output.push('\n');
+                last_was_newline = true;
+            }
             continue;
         }
-        out.push_str(&token.leading_ws);
-        out.push_str(&token.raw);
+        if !pending.is_empty() {
+            pending.push('\n');
+        }
+        pending.push_str(line);
     }
-    print!("{}", out);
-    if !out.ends_with('\n') {
-        println!();
+    last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+    if !last_was_newline && !output.is_empty() {
+        output.push('\n');
     }
+    print!("{output}");
+}
+
+fn flush_pretty_print_chunk(
+    chunk: &str,
+    posix: bool,
+    output: &mut String,
+    last_was_newline: bool,
+) -> bool {
+    let tokens = rubash::lexer::tokenize_with_initial_posix(chunk, posix);
+    let ast = rubash::parser::parse(&tokens);
+    let mut printed = false;
+    for command in &ast.commands {
+        if is_pretty_print_empty(command) {
+            continue;
+        }
+        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
+        output.push('\n');
+        printed = true;
+    }
+    if printed {
+        return false;
+    }
+    last_was_newline
+}
+
+fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
+    command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && command.for_command.is_none()
+        && command.select_command.is_none()
+        && command.loop_command.is_none()
+        && command.if_command.is_none()
+        && command.case_command.is_none()
+        && command.function_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.conditional_command.is_none()
+        && command.coproc_command.is_none()
+        && command.brace_group.is_none()
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
 }
 
 fn script_arg_to_host_path(value: &str) -> PathBuf {
@@ -869,6 +963,44 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
     }
     None
 }
+
+/// GNU shell.c show_shell_usage (shell.c:2056-2103) with extra=0: the usage
+/// block the upstream invocation suite expects after an invalid option. The
+/// "bash" spelling is the engine convention (rubash main.rs) so the suite's
+/// `sed 's|^.*/bash|bash|'` normalization matches byte for byte.
+fn show_shell_usage() {
+    eprint!(
+        "bash [GNU long option] [option] ...
+bash [GNU long option] [option] script-file ...
+"
+    );
+    eprintln!("GNU long options:");
+    for name in LONG_OPTIONS {
+        eprintln!("	--{name}");
+    }
+    eprintln!("Shell options:");
+    eprintln!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
+    eprintln!("	-abefhkmnptuvxBCEHPT or -o option");
+}
+
+const LONG_OPTIONS: &[&str] = &[
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+];
 
 fn print_usage() {
     println!(

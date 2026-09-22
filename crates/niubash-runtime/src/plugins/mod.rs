@@ -2881,6 +2881,21 @@ fn source_plugin_exports_hook(hooks: &[String], hook_name: &str) -> bool {
     }
     hooks.iter().any(|hook| hook == hook_name)
 }
+/// Aliases exported by an INSTALLED plugin bundle (from its on-disk assets).
+/// These behave like user config aliases and are applied in every shell
+/// mode. Only the COMPILED convenience packs (gp/gst/...) are
+/// interactive-only: see `Shell::enter_interactive` (P4, assoc.tests
+/// observes BASH_ALIASES in scripts).
+pub fn installed_bundle_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
+    let inventory = active_plugin_inventory();
+    let root = inventory.path.as_ref()?;
+    let pack = inventory
+        .packs
+        .iter()
+        .find(|pack| pack.name == pack_name && pack.exports.aliases)?;
+    load_bundle_aliases_from_path(root, pack)
+}
+
 pub fn plugin_aliases(pack_name: &str) -> Option<Vec<(String, String)>> {
     let inventory = active_plugin_inventory();
     if let Some(root) = &inventory.path {
